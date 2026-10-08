@@ -102,10 +102,11 @@ const RELEASE_CHAIN = [
   'v2.8.2-beta.6',
   'v2.8.2-beta.7',
   'v2.8.2',
+  'v2.8.3-beta.1',
 ]
 
 /** 未登记发布说明的判据面：本区间的文件名前缀（防"新版本天然落在判据外"）。 */
-const UNREGISTERED_NOTE_PREFIX = 'v2.8.2-beta.'
+const UNREGISTERED_NOTE_PREFIX = 'v2.8.3-beta.'
 
 /** `GITHUB_REF` 里 tag 引用的前缀 —— "本次是不是在发 tag"的**唯一**判据形态。 */
 const TAG_REF_PREFIX = 'refs/tags/'
