@@ -55,6 +55,7 @@ import {
   materializeBundledRuntimes,
   prunePackagerSkippedNames,
   readRuntimePin,
+  resolveRuntimeTarget,
   runtimeTreeDigest,
 } from '../scripts/fetch-bundled-runtimes.mjs'
 
@@ -375,6 +376,19 @@ describe('打包配置：载荷的随包方式与 Linux 侧的双份排除', () 
       '!build/speech-model/**',
     ]))
     expect(manifest.build.linux.files.every(pattern => pattern.startsWith('!'))).toBe(true)
+  })
+
+  it('Windows runner 的默认目标归一成 win-x64（不是 win32-x64）', () => {
+    const pin = readRuntimePin()
+    // 载荷键在 runtimes.json / 发布清单 / artifact 名里一律是 `win-x64`，而 Node 报的平台名
+    // 是 `win32`。2026-10-08 CI 实测：不归一 ⇒ 默认目标算成 win32-x64 ⇒ 声明表里没有 ⇒
+    // 打包 fail-loud、Windows job 一分半即红、整条发布链卡住。
+    expect(resolveRuntimeTarget('win32', 'x64', pin)).toBe('win-x64')
+    expect(resolveRuntimeTarget('linux', 'x64', pin)).toBe('linux-x64')
+    expect(resolveRuntimeTarget('darwin', 'arm64', pin)).toBe('darwin-arm64')
+    // 归一**只**改平台名拼写：真正没声明的目标仍然 fail-loud（不许悄悄放过）。
+    expect(() => resolveRuntimeTarget('win32', 'arm64', pin)).toThrowError(/不支持的目标平台 win-arm64/u)
+    expect(() => resolveRuntimeTarget('freebsd', 'x64', pin)).toThrowError(/不支持的目标平台/u)
   })
 
   it('钉死清单（runtimes.json）覆盖三平台且每个平台三个运行时都齐', () => {
