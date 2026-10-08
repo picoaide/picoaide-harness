@@ -154,9 +154,13 @@ func TestNormalizeConnectorDefinitionRejects(t *testing.T) {
 			want:  "无法解析",
 		},
 		{
+			// 两个保留键都要点名，且按字典序：只报随机命中的那一个时，这条用例会随 Go 的
+			// map 迭代顺序红绿各半 —— 2026-10-08 的 CI 就是这样红的（同一提交两条 run，
+			// push 那条红、pull_request 那条绿）。文案本身也是产品面：同一份输入必须永远
+			// 给出同一条错误。
 			name:  "没有 mcp 也没有 mcpServers（只有我们的顶层键）",
 			input: `{"authMode":"oauth","auth":{"discoveryUrl":"https://mcp.example.com/mcp"}}`,
-			want:  "authMode",
+			want:  `见到的是 "auth", "authMode"`,
 		},
 	}
 	for _, tc := range cases {

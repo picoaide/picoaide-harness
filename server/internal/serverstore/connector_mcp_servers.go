@@ -176,11 +176,26 @@ func mcpServersOf(top map[string]any) (map[string]any, error) {
 		}
 		return servers, nil
 	}
+	// **把命中的保留键全部列出并按字典序排**：只报 `range` 里第一个命中的那个键时，同一条
+	// 输入在不同进程里会给出不同文案（Go 的 map 迭代顺序随机）——2026-10-08 的 CI 实测就是
+	// 这么红的：`{"authMode":…,"auth":…}` 有一半概率报 "auth"、一半报 "authMode"，而判据
+	// 断言的是具体键名 ⇒ 同一条用例随机红绿（同一提交的 pull_request 那条 run 绿、push 那条红）。
+	// 排序后同一输入永远同一条错误，判据也就能要求"必须同时点名两个键"。
+	var reserved []string
 	for key := range top {
 		if connectorReservedTopKeys[key] {
-			return nil, fmt.Errorf(
-				"%w: 定义里既没有 mcp 数组也没有 mcpServers 对象（见到的是 %q）", ErrValidation, key)
+			reserved = append(reserved, key)
 		}
+	}
+	if len(reserved) > 0 {
+		sort.Strings(reserved)
+		quoted := make([]string, 0, len(reserved))
+		for _, key := range reserved {
+			quoted = append(quoted, fmt.Sprintf("%q", key))
+		}
+		return nil, fmt.Errorf(
+			"%w: 定义里既没有 mcp 数组也没有 mcpServers 对象（见到的是 %s）",
+			ErrValidation, strings.Join(quoted, ", "))
 	}
 	if len(top) == 0 {
 		return nil, fmt.Errorf("%w: 定义里没有 MCP server", ErrValidation)
