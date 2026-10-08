@@ -559,23 +559,6 @@ the package names, versions, and licenses for transparency.
 | yoctocolors | 2.2.0 | MIT |
 | zod | 4.4.3 | MIT |
 > Notice-required licenses in use: LGPL-3.0-or-later. Their license texts ship inside node_modules; see the package LICENSE files for the full terms.
-## Bundled agent runtimes
-The installers also ship the node, pnpm and python runtimes the agent runs on. They are not
-npm packages, so the table above does not cover them; each runtime keeps its own license text
-inside `resources/runtimes/<runtime>/`, and the packaging gate refuses a build whose payload is
-missing any of those texts.
-### Node.js (v24.21.0，随包 node 运行时)
-- Source: https://nodejs.org/dist/v24.21.0/
-- License: MIT（Node.js 及其内嵌组件的许可文本随包在 node/LICENSE）
-- Terms: 标准 MIT 条款；随包的是官方预编译发行包，未做修改（按 runtimes.json 钉死的 sha256 校验）。
-### pnpm (11.7.0，随包包管理器)
-- Source: https://www.npmjs.com/package/pnpm/v/11.7.0
-- License: MIT
-- Terms: 标准 MIT 条款；以 npm 发行包形式随包（pnpm/LICENSE 随包），用随包 node 执行。
-### CPython (3.12.15，python-build-standalone 20261003，随包 python 运行时)
-- Source: https://github.com/astral-sh/python-build-standalone/releases/tag/20261003
-- License: PSF-2.0（其内嵌第三方组件的许可文本随包在 CPython 的 LICENSE.txt）
-- Terms: Python 软件基金会许可协议第 2 版；随包的是官方 install_only_stripped 预编译包，未做修改。
 ## Bundled speech-recognition model weights
 The installers also ship speech-recognition model weights. They are not npm packages, so
 the table above does not cover them; these are their names, sources, and licenses.

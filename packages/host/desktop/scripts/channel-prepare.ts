@@ -34,7 +34,6 @@ import {
   type ChannelBuildOptions,
 } from './channel-build.ts'
 import { SPEECH_MODEL_PAYLOAD_DIR } from './verify-packaged-runtime.ts'
-import { BUNDLED_RUNTIMES_PAYLOAD_DIR } from './verify-packaged-runtime.ts'
 
 /** `prepareChannelPackaging()` 的可覆盖输入（测试用）。 */
 export interface ChannelPrepareOptions extends ChannelBuildOptions {
@@ -48,21 +47,6 @@ export interface ChannelPrepareOptions extends ChannelBuildOptions {
    * `speech-model-bundle.spec.ts` 覆盖，这里只让"调用链真的通"。
    */
   readonly speechModel?: SpeechModelPayloadDeps
-  /**
-   * 随包 agent 运行时的载荷读写（测试接缝；缺省 = `fetch-bundled-runtimes.mjs`）。
-   *
-   * 同 `speechModel`：真实现要联网拉三套运行时（展开后 ~240MiB），单测传替身，
-   * 只验证"这一步真的被调用、参数对"。
-   */
-  readonly runtimes?: BundledRuntimesPayloadDeps
-  /**
-   * 随包运行时的目标平台键（`linux-x64` / `win-x64` / `darwin-arm64`）。
-   *
-   * 缺省 = 宿主平台，与三个打包入口各自的目标一致（`package-win.ts` 还会自己断言
-   * `process.platform === 'win32'`；`release-mac.ts` 固定 `--arm64`）。显式传参是给
-   * 未来的交叉打包留的口子 —— 目标与载荷不一致时 `fetch-bundled-runtimes.mjs` 会拒。
-   */
-  readonly runtimeTarget?: string
 }
 
 /**
@@ -93,51 +77,7 @@ export async function prepareChannelPackaging(
   stageChannelProfile(context, appDir)
   await prepareBrandAssets({ context, outputDir: appDir })
   await prepareSpeechModelPayload(context, appDir, options.speechModel)
-  await prepareBundledRuntimesPayload(appDir, options.runtimes, options.runtimeTarget)
   return context
-}
-
-/**
- * 随包 agent 运行时载荷（`build/runtimes/`）—— 打包输入的**唯一**就位点。
- *
- * 与语音模型载荷同一姿势（幂等 + 唯一入口），两点不同：
- *   · **所有渠道都要**（官方与品牌渠道的 agent 都需要 node/pnpm/python，没有渠道开关）；
- *   · 目标平台必须与本次打包目标一致（`--target`，缺省 = 宿主平台）：把 linux 载荷打进
- *     Windows 安装包是"客户端启动即没有运行时"的静默形态，因此由
- *     `fetch-bundled-runtimes.mjs` 与 afterPack 门禁两侧各自校验目标键。
- *
- * `deps` 是**测试接缝**（真实现要联网拉 ~90MiB 制品、展开后 ~240MiB）：单测传替身，
- * 生产不传。
- * @param appDir - `build/` 目录。
- * @param deps - 载荷读写实现（缺省 = `fetch-bundled-runtimes.mjs`）。
- * @param target - 目标平台键（缺省 = 宿主平台）。
- * @returns 载荷根目录与目标平台。
- */
-export async function prepareBundledRuntimesPayload(
-  appDir: string = defaultChannelAppDir(),
-  deps?: BundledRuntimesPayloadDeps,
-  target?: string,
-): Promise<{ out: string, target: string }> {
-  const { materializeBundledRuntimes } = deps ?? await import('./fetch-bundled-runtimes.mjs')
-  const out = join(appDir, BUNDLED_RUNTIMES_PAYLOAD_DIR)
-  const result = await materializeBundledRuntimes(target === undefined ? { out } : { out, target })
-  console.log(
-    `channel-prepare: 随包 agent 运行时已就位 → build/${BUNDLED_RUNTIMES_PAYLOAD_DIR}（${result.target}；`
-    + `node ${result.manifest.versions.node} / pnpm ${result.manifest.versions.pnpm} / python ${result.manifest.versions.python}）`,
-  )
-  return { out: result.out, target: result.target }
-}
-
-/** `prepareBundledRuntimesPayload()` 的载荷读写面（与 `fetch-bundled-runtimes.mjs` 的导出同形）。 */
-export interface BundledRuntimesPayloadDeps {
-  /** 就位载荷（下载缺失制品 + 校验 + 解包 + 写 shim 与清单）。 */
-  readonly materializeBundledRuntimes: (options?: { readonly out?: string, readonly target?: string }) => Promise<{
-    readonly out: string
-    readonly target: string
-    readonly manifest: {
-      readonly versions: { readonly node: string, readonly pnpm: string, readonly python: string }
-    }
-  }>
 }
 
 /**

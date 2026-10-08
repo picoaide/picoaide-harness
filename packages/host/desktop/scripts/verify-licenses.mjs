@@ -222,48 +222,6 @@ const BUNDLED_MODEL_NOTICES = [
 ]
 
 /**
- * 随包 agent 运行时（node + pnpm + python，2026-10-08）—— 非 npm 产物，另有随包许可文本。
- *
- * 这三套是**第三方预编译制品**（不是从 npm 依赖树来的），所以上面那张表扫不到它们。
- * 再分发合规有两条：① 通告里点名来源与许可；② **许可正文随包**（各自运行时目录下的
- * `LICENSE` / `lib/python<X.Y>/LICENSE.txt`，由 `fetch-bundled-runtimes.mjs` 记录进载荷
- * 清单、afterPack 门禁逐条断言）。版本与来源的**唯一真源**是 `runtimes.json`。
- */
-const BUNDLED_RUNTIME_NOTICES = (() => {
-  // 版本/来源**不在这里写死**：真源是 `runtimes.json`（打包期就是按它下载与校验的）。
-  // 写死一份的后果是"通告说 24.21.0、随包其实是别的版本"，而没有任何判据会发现。
-  //
-  // 文件缺席 ⇒ 这棵树**没有声明**随包运行时（`scripts/verify-check-workspaces.mjs` 的
-  // 合成树就是这种形态：它们只放 scripts/ + package.json）。这条不像 npm 依赖树那样
-  // "读不出就必须红"：真仓删掉 `runtimes.json` 会在 desktop 套件里当场红
-  // （`tests/bundled-runtimes.spec.ts` 直接解析它、`channel-prepare` 的 TS 侧也 import
-  // 同一个路径），所以这里不必再复制一条判据，而复制出来的那条只会把合成树夹具判死。
-  const pinPath = new URL('../runtimes.json', import.meta.url)
-  if (!existsSync(pinPath)) return []
-  const pin = JSON.parse(readFileSync(pinPath, 'utf8'))
-  return [
-    {
-      name: `Node.js (v${pin.node.version}，随包 node 运行时)`,
-      source: pin.node.base,
-      license: 'MIT（Node.js 及其内嵌组件的许可文本随包在 node/LICENSE）',
-      terms: '标准 MIT 条款；随包的是官方预编译发行包，未做修改（按 runtimes.json 钉死的 sha256 校验）。',
-    },
-    {
-      name: `pnpm (${pin.pnpm.version}，随包包管理器)`,
-      source: `https://www.npmjs.com/package/pnpm/v/${pin.pnpm.version}`,
-      license: 'MIT',
-      terms: '标准 MIT 条款；以 npm 发行包形式随包（pnpm/LICENSE 随包），用随包 node 执行。',
-    },
-    {
-      name: `CPython (${pin.python.version}，python-build-standalone ${pin.python.release}，随包 python 运行时)`,
-      source: pin.python.source,
-      license: 'PSF-2.0（其内嵌第三方组件的许可文本随包在 CPython 的 LICENSE.txt）',
-      terms: 'Python 软件基金会许可协议第 2 版；随包的是官方 install_only_stripped 预编译包，未做修改。',
-    },
-  ]
-})()
-
-/**
  * Render the shipped third-party notice list.
  *
  * `--notices`(覆盖写)与 `--check-notices`(比对)共用这一份渲染:生成器与比对
@@ -293,21 +251,6 @@ function renderNotices(entries) {
       ? ''
       : `> Notice-required licenses in use: ${[...new Set(noticeEntries.map(entry => entry.license))].join(', ')}. Their license texts ship inside node_modules; see the package LICENSE files for the full terms.`,
     '',
-    '## Bundled agent runtimes',
-    '',
-    'The installers also ship the node, pnpm and python runtimes the agent runs on. They are not',
-    'npm packages, so the table above does not cover them; each runtime keeps its own license text',
-    'inside `resources/runtimes/<runtime>/`, and the packaging gate refuses a build whose payload is',
-    'missing any of those texts.',
-    '',
-    ...BUNDLED_RUNTIME_NOTICES.flatMap(notice => [
-      `### ${notice.name}`,
-      '',
-      `- Source: ${notice.source}`,
-      `- License: ${notice.license}`,
-      `- Terms: ${notice.terms}`,
-      '',
-    ]),
     '## Bundled speech-recognition model weights',
     '',
     'The installers also ship speech-recognition model weights. They are not npm packages, so',

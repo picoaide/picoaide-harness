@@ -206,11 +206,7 @@ function verifyWithBrandStub(
   list: ArchiveLister,
   exists: FileProbe = existsSync,
 ): void {
-  // 末两个实参是**随包载荷**的来源树：`null` = 这棵合成树不声明载荷（合成夹具里既没有
-  // `build/speech-model` 也没有 `build/runtimes`）。两条载荷断言各有自己的用例
-  // （speech-model 在 `speech-model-bundle` 组、runtimes 在 `bundled-runtimes` 组），
-  // 这里放开它们只会让每个合成树用例都去磁盘上找真载荷。
-  verifyPackagedRuntime(runtimeContext, list, exists, () => BRAND_SVG, null, null)
+  verifyPackagedRuntime(runtimeContext, list, exists, () => BRAND_SVG, null)
 }
 
 describe('平台无关的产物身份判据（B-6）', () => {
@@ -561,13 +557,10 @@ describe('打包必需清单的可枚举目录 oracle（G-2，2026-09-23 补）'
     {
       label: 'build/（brand-prepare 的构建期产物）',
       dir: 'build',
-      exclude: [/^channel\.json$/u, /^speech-model\//u, /^runtimes\//u, /^runtimes-cache\//u],
+      exclude: [/^channel\.json$/u, /^speech-model\//u],
       why: 'channel.json 只有渠道构建产出，官方构建里不存在（其随包断言在 verify-channel-package.ts）；'
         + 'speech-model/ 是随包语音模型载荷（2026-09-29），它经 extraResources 进 resources/ 而**不进 app.asar**'
-        + '（230MiB 塞进归档会拖慢每次读取），由 assertBundledSpeechModelPackaged 单独断言；'
-        + 'runtimes/ 与 runtimes-cache/ 是随包 agent 运行时载荷（2026-10-08，node+pnpm+python，展开 ~240MiB）'
-        + '与它的一次性下载缓存，同样经 extraResources 进 resources/runtimes 而不进 app.asar，'
-        + '由 assertBundledRuntimesPackaged 单独断言（树摘要 + 三个命令真跑一次）',
+        + '（230MiB 塞进归档会拖慢每次读取），由 assertBundledSpeechModelPackaged 单独断言',
     },
     {
       label: 'lib/preload/（沙箱预加载脚本）',

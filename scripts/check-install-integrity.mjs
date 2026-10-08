@@ -301,11 +301,6 @@ export const EXECUTION_FACE_REGISTRY = [
   // 随包语音模型的载荷就位（2026-09-29）：它按上游清单校验大小+sha256 并写清单，
   // 而客户端装配期与 afterPack 门禁都以那份清单为准 —— 改写它 = 改写"载荷可信"这个前提。
   'packages/host/desktop/scripts/fetch-speech-model.mjs',
-  // 随包 agent 运行时（node/pnpm/python，2026-10-08）的载荷就位：它按随包的
-  // `runtimes.json` 校验字节+sha256、解包、裁剪、写 shim 与清单，而客户端装配期
-  // （PATH 前置 / `ProfileContext.packageManager`）与 afterPack 门禁都以那份清单为准
-  // —— 改写它 = 改写"agent 拿到的 node/pnpm/python 是钉死的那三个版本"这个前提。
-  'packages/host/desktop/scripts/fetch-bundled-runtimes.mjs',
   'packages/host/desktop/scripts/fixtures/renderer-error-capture-main.mjs',
   'packages/host/desktop/scripts/generate-mac-app-icon.mjs',
   'packages/host/desktop/scripts/generate-tray-icons.mjs',

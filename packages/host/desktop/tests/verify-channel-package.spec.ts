@@ -13,7 +13,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import sharp from 'sharp'
 import { describe, expect, it } from 'vitest'
-import { prepareChannelPackaging, type BundledRuntimesPayloadDeps, type SpeechModelPayloadDeps } from '../scripts/channel-prepare.ts'
+import { prepareChannelPackaging, type SpeechModelPayloadDeps } from '../scripts/channel-prepare.ts'
 
 /**
  * 随包语音模型的载荷替身（2026-09-29 起**所有渠道默认随包**）。
@@ -25,15 +25,6 @@ import { prepareChannelPackaging, type BundledRuntimesPayloadDeps, type SpeechMo
 const speechModelStub = (): SpeechModelPayloadDeps => ({
   materializeSpeechModel: async (options) => ({ out: options?.out ?? '', status: [] }),
   removeSpeechModel: () => {},
-})
-
-/** 随包 agent 运行时的载荷替身（同上：真实现要联网拉 ~240MiB）。 */
-const runtimesStub = (): BundledRuntimesPayloadDeps => ({
-  materializeBundledRuntimes: async (options) => ({
-    out: options?.out ?? '',
-    target: options?.target ?? 'linux-x64',
-    manifest: { versions: { node: '0.0.0-probe', pnpm: '0.0.0-probe', python: '0.0.0-probe' } },
-  }),
 })
 import { verifyChannelPackage } from '../scripts/verify-channel-package.ts'
 
@@ -82,7 +73,7 @@ async function channelRepo(): Promise<string> {
 async function stagedChannelBuild(): Promise<{ repo: string, appDir: string }> {
   const repo = await channelRepo()
   const appDir = tempDir('dsh-verify-build-')
-  await prepareChannelPackaging({ env: { DSH_BUILD_CHANNEL: CHANNEL }, repoRoot: repo, appDir, speechModel: speechModelStub(), runtimes: runtimesStub() })
+  await prepareChannelPackaging({ env: { DSH_BUILD_CHANNEL: CHANNEL }, repoRoot: repo, appDir, speechModel: speechModelStub() })
   return { repo, appDir }
 }
 
@@ -166,7 +157,7 @@ describe('verifyChannelPackage', () => {
 
   it('官方构建的 build/ 干净时通过', async () => {
     const appDir = tempDir('dsh-verify-official-')
-    await prepareChannelPackaging({ env: {}, appDir, speechModel: speechModelStub(), runtimes: runtimesStub() })
+    await prepareChannelPackaging({ env: {}, appDir, speechModel: speechModelStub() })
     const result = await verifyChannelPackage({ env: {}, buildDir: appDir })
     expect(result.channelId).toBe('official')
   })
