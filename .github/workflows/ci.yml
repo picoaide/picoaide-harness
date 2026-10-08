@@ -1096,8 +1096,11 @@ jobs:
       actions: write
     env:
       # 随包 agent 运行时的制品缓存落点（fetch-bundled-runtimes.mjs 读它；
-      # 与上面 "Cache bundled agent runtimes" 步骤的 path 必须一致）。
-      PICOAI_RUNTIME_CACHE: ${{ runner.temp }}/picoaide-runtimes
+      # 与下面 "Cache bundled agent runtimes" 步骤的 path 必须一致）。
+      # 路径由 github.workspace 推导而**不是** runner.temp：job 级 env 里 `runner` 上下文
+      # 不可用（GitHub 解析期报 `Unrecognized named-value: 'runner'` ⇒ 整个 workflow 文件
+      # 失效、所有 run 0 秒 startup failure —— 2026-10-08 实测踩过，别再改回去）。
+      PICOAI_RUNTIME_CACHE: ${{ github.workspace }}/../picoaide-runtimes
     steps:
       - uses: actions/checkout@v7
         with:
@@ -1121,7 +1124,7 @@ jobs:
       - name: Cache bundled agent runtimes
         uses: actions/cache@v6
         with:
-          path: ${{ runner.temp }}/picoaide-runtimes
+          path: ${{ github.workspace }}/../picoaide-runtimes
           key: runtimes-${{ runner.os }}-${{ hashFiles('packages/host/desktop/runtimes.json') }}
           restore-keys: |
             runtimes-${{ runner.os }}-
@@ -1269,8 +1272,11 @@ jobs:
       actions: write
     env:
       # 随包 agent 运行时的制品缓存落点（fetch-bundled-runtimes.mjs 读它；
-      # 与上面 "Cache bundled agent runtimes" 步骤的 path 必须一致）。
-      PICOAI_RUNTIME_CACHE: ${{ runner.temp }}/picoaide-runtimes
+      # 与下面 "Cache bundled agent runtimes" 步骤的 path 必须一致）。
+      # 路径由 github.workspace 推导而**不是** runner.temp：job 级 env 里 `runner` 上下文
+      # 不可用（GitHub 解析期报 `Unrecognized named-value: 'runner'` ⇒ 整个 workflow 文件
+      # 失效、所有 run 0 秒 startup failure —— 2026-10-08 实测踩过，别再改回去）。
+      PICOAI_RUNTIME_CACHE: ${{ github.workspace }}/../picoaide-runtimes
       # Windows 安装器的 7z 压缩级别（2026-10-08 定案）。app-builder-lib 的
       # `compute7zCompressArgs` 读这个变量：非空即以 `-mx=<n>` 覆盖配置里的级别，
       # 并跳过 `-mfb=258 -mpass=15`（那两条是 maximum 档额外耗时的来源）。
@@ -1304,7 +1310,7 @@ jobs:
       - name: Cache bundled agent runtimes
         uses: actions/cache@v6
         with:
-          path: ${{ runner.temp }}/picoaide-runtimes
+          path: ${{ github.workspace }}/../picoaide-runtimes
           key: runtimes-${{ runner.os }}-${{ hashFiles('packages/host/desktop/runtimes.json') }}
           restore-keys: |
             runtimes-${{ runner.os }}-
@@ -1417,8 +1423,11 @@ jobs:
       actions: write
     env:
       # 随包 agent 运行时的制品缓存落点（fetch-bundled-runtimes.mjs 读它；
-      # 与上面 "Cache bundled agent runtimes" 步骤的 path 必须一致）。
-      PICOAI_RUNTIME_CACHE: ${{ runner.temp }}/picoaide-runtimes
+      # 与下面 "Cache bundled agent runtimes" 步骤的 path 必须一致）。
+      # 路径由 github.workspace 推导而**不是** runner.temp：job 级 env 里 `runner` 上下文
+      # 不可用（GitHub 解析期报 `Unrecognized named-value: 'runner'` ⇒ 整个 workflow 文件
+      # 失效、所有 run 0 秒 startup failure —— 2026-10-08 实测踩过，别再改回去）。
+      PICOAI_RUNTIME_CACHE: ${{ github.workspace }}/../picoaide-runtimes
     steps:
       - uses: actions/checkout@v7
         with:
@@ -1442,7 +1451,7 @@ jobs:
       - name: Cache bundled agent runtimes
         uses: actions/cache@v6
         with:
-          path: ${{ runner.temp }}/picoaide-runtimes
+          path: ${{ github.workspace }}/../picoaide-runtimes
           key: runtimes-${{ runner.os }}-${{ hashFiles('packages/host/desktop/runtimes.json') }}
           restore-keys: |
             runtimes-${{ runner.os }}-
