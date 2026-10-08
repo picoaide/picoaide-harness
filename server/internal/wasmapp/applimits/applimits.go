@@ -396,6 +396,16 @@ func (l Limits) Validate() *apperr.Error {
 	bad := func(field, msg string) *apperr.Error {
 		return apperr.New(apperr.CodeValidation, msg).WithDetail("field", field)
 	}
+	// 六项时间预算的上下界取**有效区间**（推导见 effectiveBudgetBounds）：基础区间
+	// 里有一批值在任何组合下都存不进去（编译超时 > 60、单条 SQL ≤ busy timeout、
+	// 干跑/宿主调用 > guest 的独立上限…），拿它当范围判据会把越界原因推给后面的序关系
+	// 分支 —— 管理员看到的是**另一个字段**的名字（把 guest 调到 1 会报"干跑不得大于
+	// guest"，而真正的原因是"宿主调用必须严格大于单条 SQL、而 guest 不得小于宿主调用"）。
+	guestB, dryB := budgetBound("guest_budget_seconds"), budgetBound("dry_run_budget_seconds")
+	hostB, wallB := budgetBound("host_call_budget_seconds"), budgetBound("request_wall_clock_seconds")
+	sqlB, compileB := budgetBound("sql_statement_budget_seconds"), budgetBound("compile_timeout_seconds")
+	busySeconds := int(limits.AppDBBusyTimeout / time.Second)
+	readTimeoutSeconds := int(limits.ServerReadTimeout / time.Second)
 	switch {
 	case l.MaxInstances < MinInstances || l.MaxInstances > MaxInstances:
 		return bad("max_instances", fmt.Sprintf("全局并发实例数必须在 %d–%d 之间", MinInstances, MaxInstances)).
@@ -430,25 +440,42 @@ func (l Limits) Validate() *apperr.Error {
 			WithHint("它决定同一应用能同时跑多少条 SELECT（WAL 下真正并发），写仍串行；" +
 				"每个只读连接各占一份页缓存（appdb_cache_kib）与一个 fd ⇒ 调大会线性抬高常驻，且**下一个应用库句柄**才生效")
 
-	// ---- 时间预算：范围 ----
-	case l.GuestBudgetSeconds < MinBudgetSeconds || l.GuestBudgetSeconds > MaxGuestBudgetSeconds:
-		return bad("guest_budget_seconds", fmt.Sprintf("guest 执行预算必须在 %d–%d 秒之间", MinBudgetSeconds, MaxGuestBudgetSeconds)).
+	// ---- 时间预算：范围（上下界 = effectiveBudgetBounds 的**有效**区间）----
+	case l.GuestBudgetSeconds < guestB.Min || l.GuestBudgetSeconds > guestB.Max:
+		return bad("guest_budget_seconds", fmt.Sprintf("guest 执行预算必须在 %d–%d 秒之间", guestB.Min, guestB.Max)).
 			WithHint("应用单次请求里真正执行的时长上限（等数据库/等宿主调用时**暂停计时**）；" +
-				"调大等于允许更长的单次计算，而端到端墙钟仍然封顶")
-	case l.DryRunBudgetSeconds < MinBudgetSeconds || l.DryRunBudgetSeconds > MaxBudgetSeconds:
-		return bad("dry_run_budget_seconds", fmt.Sprintf("干跑预算必须在 %d–%d 秒之间", MinBudgetSeconds, MaxBudgetSeconds)).
+				"调大等于允许更长的单次计算，而端到端墙钟仍然封顶").
+			WithHint(fmt.Sprintf("下限不是 %d s：宿主调用预算不得超过 guest，而宿主调用又必须严格大于单条 "+
+				"SQL 硬超时（>%d s）⇒ guest 的可行下限是 %d s",
+				MinBudgetSeconds, busySeconds, guestB.Min))
+	case l.DryRunBudgetSeconds < dryB.Min || l.DryRunBudgetSeconds > dryB.Max:
+		return bad("dry_run_budget_seconds", fmt.Sprintf("干跑预算必须在 %d–%d 秒之间", dryB.Min, dryB.Max)).
 			WithHint("发布/预检时用合成帧跑一次真实实例化的预算；建议与 guest 预算一致，" +
-				"调得比它短会把线上跑得动的应用挡在发布门外")
-	case l.HostCallBudgetSeconds < MinBudgetSeconds || l.HostCallBudgetSeconds > MaxBudgetSeconds:
-		return bad("host_call_budget_seconds", fmt.Sprintf("宿主调用预算必须在 %d–%d 秒之间", MinBudgetSeconds, MaxBudgetSeconds)).
-			WithHint("db.* / log / assets.read 等宿主调用的硬超时；它**不**被 guest 的暂停计时覆盖，两者独立")
-	case l.RequestWallClockSeconds < MinBudgetSeconds || l.RequestWallClockSeconds > MaxBudgetSeconds:
-		return bad("request_wall_clock_seconds", fmt.Sprintf("端到端墙钟必须在 %d–%d 秒之间", MinBudgetSeconds, MaxBudgetSeconds)).
-			WithHint("含排队；到点即拒。必须严格大于 guest 预算")
-	case l.SQLStatementBudgetSeconds < MinBudgetSeconds || l.SQLStatementBudgetSeconds > MaxBudgetSeconds:
-		return bad("sql_statement_budget_seconds", fmt.Sprintf("单条 SQL 硬超时必须在 %d–%d 秒之间", MinBudgetSeconds, MaxBudgetSeconds))
-	case l.CompileTimeoutSeconds < MinBudgetSeconds || l.CompileTimeoutSeconds > MaxBudgetSeconds:
-		return bad("compile_timeout_seconds", fmt.Sprintf("编译超时必须在 %d–%d 秒之间", MinBudgetSeconds, MaxBudgetSeconds))
+				"调得比它短会把线上跑得动的应用挡在发布门外").
+			WithHint(fmt.Sprintf("上限 = guest 预算的可行上限 %d s（干跑不得大于 guest）：要调大干跑必须先调大 guest",
+				guestB.Max))
+	case l.HostCallBudgetSeconds < hostB.Min || l.HostCallBudgetSeconds > hostB.Max:
+		return bad("host_call_budget_seconds", fmt.Sprintf("宿主调用预算必须在 %d–%d 秒之间", hostB.Min, hostB.Max)).
+			WithHint("db.* / log / assets.read 等宿主调用的硬超时；它**不**被 guest 的暂停计时覆盖，两者独立").
+			WithHint(fmt.Sprintf("下限 = 单条 SQL 硬超时的可行下限 + 1（%d s）：语句 deadline 套在宿主调用里面，"+
+				"内层不小于外层时应用拿到的是 HOST_CALL_OVER_BUDGET 而不是 DB_DENIED；上限 = guest 的可行上限 %d s",
+				hostB.Min, guestB.Max))
+	case l.RequestWallClockSeconds < wallB.Min || l.RequestWallClockSeconds > wallB.Max:
+		return bad("request_wall_clock_seconds", fmt.Sprintf("端到端墙钟必须在 %d–%d 秒之间", wallB.Min, wallB.Max)).
+			WithHint(fmt.Sprintf("含排队；到点即拒。必须严格大于 guest 预算 ⇒ 下限 = guest 的可行下限 + 1（%d s）；"+
+				"上限 %d s 是通用上限（槽位占用已足够长）", wallB.Min, wallB.Max))
+	case l.SQLStatementBudgetSeconds < sqlB.Min || l.SQLStatementBudgetSeconds > sqlB.Max:
+		return bad("sql_statement_budget_seconds", fmt.Sprintf("单条 SQL 硬超时必须在 %d–%d 秒之间", sqlB.Min, sqlB.Max)).
+			WithHint(fmt.Sprintf("下限 = SQLite 的 busy timeout（%d s，连接级不可配置）+ 1：否则忙等会吃掉整条语句的预算，"+
+				"应用看到的是语句超时而真实原因是库忙", busySeconds)).
+			WithHint(fmt.Sprintf("上限 = 宿主调用预算的可行上限 − 1（%d s）与端到端墙钟二者取小：语句 deadline 必须严格小于宿主调用预算",
+				hostB.Max-1)).
+			WithHint("**下一个应用库句柄生效**（不是立即）")
+	case l.CompileTimeoutSeconds < compileB.Min || l.CompileTimeoutSeconds > compileB.Max:
+		return bad("compile_timeout_seconds", fmt.Sprintf("编译超时必须在 %d–%d 秒之间", compileB.Min, compileB.Max)).
+			WithHint(fmt.Sprintf("上限 %d s = 服务端 ReadTimeout（传输层常量，**不可配置**）：同步 publish 必须在它之前返回；"+
+				"需要更长编译请拆小应用产物，或由运维调整服务端 ReadTimeout 后重新构建镜像",
+				readTimeoutSeconds))
 
 	// ---- 时间预算：序关系（保存时 fail-loud，不留给运行期）----
 	//
@@ -479,29 +506,14 @@ func (l Limits) Validate() *apperr.Error {
 		// appdb 的语句超时分支结构上不可达。后果不只是预算不可配：作者会按
 		// DB_DENIED(statement_timeout) 的方向去优化 SQL，而线上永远看不到那个码。
 		//
-		// 判据归属 sql_statement_budget_seconds：可行的收口动作是把内层调小（下限见下一条
-		// 的 busy timeout），所以点名内层；hint 同时给出"调大外层"这条出路。
+		// 判据归属 sql_statement_budget_seconds：可行的收口动作是把内层调小（下限见上面
+		// 范围判据里 busy timeout 那条），所以点名内层；hint 同时给出"调大外层"这条出路。
 		return bad("sql_statement_budget_seconds",
 			"单条 SQL 硬超时必须严格小于宿主调用预算：否则语句超时会先被外层的宿主预算收掉，"+
 				"应用拿到 HOST_CALL_OVER_BUDGET 而不是 DB_DENIED(statement_timeout)").
 			WithHint(fmt.Sprintf("当前 sql=%d s、host_call=%d s ⇒ 把 sql 调到 ≤%d s，或把宿主调用预算调到 ≥%d s",
 				l.SQLStatementBudgetSeconds, l.HostCallBudgetSeconds,
 				l.HostCallBudgetSeconds-1, l.SQLStatementBudgetSeconds+1))
-	case l.SQLStatementBudgetSeconds <= int(limits.AppDBBusyTimeout/time.Second):
-		// 与 limits 里那条 Note 同源（app_db_busy_timeout 必须小于单语句预算）：
-		// 否则"等库不忙"的忙等会吃掉整条语句的预算，应用看到的是 statement_timeout，
-		// 而真实原因是"库忙"—— 两者对作者的可操作结论完全不同（改 SQL vs 重试）。
-		return bad("sql_statement_budget_seconds",
-			fmt.Sprintf("单条 SQL 硬超时必须大于 SQLite 的 busy timeout（%d s，连接级不可配置）",
-				int(limits.AppDBBusyTimeout/time.Second))).
-			WithHint("否则忙等会吃掉整条语句的预算，应用看到的是语句超时而真实原因是库忙")
-	case l.CompileTimeoutSeconds > int(limits.ServerReadTimeout/time.Second):
-		// 上界取 limits.ServerReadTimeout（传输层常量，**不可配置**）：同步 publish 要在
-		// HTTP ReadTimeout 之前返回，这是 §10.5 第 58 项那条编译期断言的可配置版本。
-		return bad("compile_timeout_seconds",
-			fmt.Sprintf("编译超时不得超过服务端 ReadTimeout（%d s，传输层常量不可配置）",
-				int(limits.ServerReadTimeout/time.Second))).
-			WithHint("同步 publish 必须在 ReadTimeout 预算内返回")
 	}
 	return nil
 }
@@ -702,7 +714,100 @@ type Range struct {
 	Restart bool `json:"restart"`
 }
 
+// effectiveBudgetBounds 是六个时间预算字段的**有效区间**：任何合法组合都必须落在里面。
+//
+// 为什么不能让控制台显示基础区间（MinBudgetSeconds..MaxBudgetSeconds）：
+// 表单拿这个区间做 min/max 与"（1–300）"这样的提示，**比真能存进去的值宽**就等于把
+// 管理员引到一个必然被拒的格子里（2026-10-08 现场：编译超时那一格写着 1–300，而
+// `Validate` 一律拒收 > 60 —— 管理员照着提示填 90，点保存只得到一句拒绝，
+// 页面上看不出"这一格根本填不到那么大"）。
+//
+// 推导规则与 `Validate` 的序关系是**同一批**（区别只是这里问的是"把某条规则推到
+// 极限后，某个字段还能取到哪些值"），所以每条界只在"该规则让区间外的值在任何组合下
+// 都非法"时才收紧：
+//
+//	guest  ∈ [1,120] 基础区间
+//	guest  ≥ host_call ≥ sql+1 ≥ busy+1+1 = 5   ⇒ guest.min = 5
+//	wall   ≥ guest+1 ≥ 6                        ⇒ wall.min  = 6
+//	dry_run ≤ guest ≤ 120                       ⇒ dry_run.max = 120
+//	host_call ≤ guest ≤ 120                     ⇒ host_call.max = 120
+//	host_call ≥ sql+1 ≥ busy+2 = 5              ⇒ host_call.min = 5
+//	sql    ≥ busy+1 = 4                         ⇒ sql.min = 4
+//	sql    ≤ host_call-1 ≤ 119                  ⇒ sql.max = 119
+//	compile ≤ ServerReadTimeout = 60            ⇒ compile.max = 60
+//
+// 区间的**双向**判据（缺任一条都会让"声明区间 ≠ 可行域"溜过去）：
+//
+//	TestBudgetRangesAreReachable —— 区间里**每一个**值都要有见证（声明不得宽于可行域）；
+//	TestBudgetRangesAreSound     —— 区间外**每一个**值都不得有合法组合（不得窄于可行域）。
+//
+// 收紧过头会让"表单挡掉合法值"，放宽过头就是 2026-10-08 那条现场缺陷，两个方向都得判。
+//
+// 为什么只有这一组需要推导：其余字段的跨字段上限（app_running ≤ max_instances、
+// user_per_app_queued ≤ app_queue…）在两个字段都在同一张表单里时**可以同时取到端点**
+// （app_running=256 配 max_instances=256 即可），所以它们的基础区间已经是有效区间。
+// 时间预算这一组不同：guest 的独立上限（120）比通用上限（300）紧，于是 dry_run /
+// host_call 的 300 根本取不到；SQL 与 busy timeout、宿主调用的序关系又把两头都压住。
+//
+// 只读（包级常量推导出来的），不要在调用方修改返回值。
+var effectiveBudgetBounds = deriveEffectiveBudgetBounds()
+
+// deriveEffectiveBudgetBounds 按包注释里的规则迭代到不动点（值域有限 ⇒ 必然收敛；
+// 迭代次数取字段数 + 2 已经足够，多一轮是无害的幂等运算）。
+func deriveEffectiveBudgetBounds() map[string]Range {
+	b := map[string]Range{
+		"guest_budget_seconds":         {Min: MinBudgetSeconds, Max: MaxGuestBudgetSeconds},
+		"dry_run_budget_seconds":       {Min: MinBudgetSeconds, Max: MaxBudgetSeconds},
+		"host_call_budget_seconds":     {Min: MinBudgetSeconds, Max: MaxBudgetSeconds},
+		"request_wall_clock_seconds":   {Min: MinBudgetSeconds, Max: MaxBudgetSeconds},
+		"sql_statement_budget_seconds": {Min: MinBudgetSeconds, Max: MaxBudgetSeconds},
+		"compile_timeout_seconds":      {Min: MinBudgetSeconds, Max: MaxBudgetSeconds},
+	}
+	// raiseMin / lowerMax 只做**单向**收紧，且不越过已推出的界（幂等）。
+	raiseMin := func(field string, v int) {
+		if r := b[field]; v > r.Min {
+			r.Min = v
+			b[field] = r
+		}
+	}
+	lowerMax := func(field string, v int) {
+		if r := b[field]; v < r.Max {
+			r.Max = v
+			b[field] = r
+		}
+	}
+	for i := 0; i < len(b)+2; i++ {
+		// 编译超时 ≤ 服务端 ReadTimeout（传输层常量，不可配置）。
+		lowerMax("compile_timeout_seconds", int(limits.ServerReadTimeout/time.Second))
+		// 单条 SQL > SQLite busy timeout（忙等不得吃掉整条语句的预算）。
+		raiseMin("sql_statement_budget_seconds", minSQLStatementBudgetSeconds())
+		// 墙钟 > guest（两个方向：抬墙钟下界、压 guest 上界）。
+		raiseMin("request_wall_clock_seconds", b["guest_budget_seconds"].Min+1)
+		lowerMax("guest_budget_seconds", b["request_wall_clock_seconds"].Max-1)
+		// guest 的独立上限（MaxGuestBudgetSeconds 已在基础区间里）与墙钟上界取更紧的那个。
+		lowerMax("guest_budget_seconds", MaxGuestBudgetSeconds)
+		// 干跑 ≤ guest。
+		lowerMax("dry_run_budget_seconds", b["guest_budget_seconds"].Max)
+		// 宿主调用 ≤ guest（压上界）且 > 单条 SQL（抬下界）。
+		lowerMax("host_call_budget_seconds", b["guest_budget_seconds"].Max)
+		raiseMin("host_call_budget_seconds", b["sql_statement_budget_seconds"].Min+1)
+		// guest ≥ 宿主调用 ⇒ guest 的下界被宿主调用的下界抬起。
+		raiseMin("guest_budget_seconds", b["host_call_budget_seconds"].Min)
+		// 单条 SQL < 宿主调用，且 ≤ 墙钟（两个上界取更紧的那个）。
+		lowerMax("sql_statement_budget_seconds", b["host_call_budget_seconds"].Max-1)
+		lowerMax("sql_statement_budget_seconds", b["request_wall_clock_seconds"].Max)
+	}
+	return b
+}
+
+// budgetBound 返回某字段的有效区间（未知字段返回零值，调用方按"没有这一项"处理）。
+func budgetBound(field string) Range { return effectiveBudgetBounds[field] }
+
 // Ranges 返回全部字段的取值区间（**与 Validate 同一批常量**，不另写一份数字）。
+//
+// 时间预算那六项的上下界来自 effectiveBudgetBounds（推导出来的**有效**区间，见其注释）：
+// 控制台表单直接把它渲染成 `min`/`max` 与"（min–max）"提示，所以它必须等于
+// "任何合法组合都逃不出的那个区间"，而不是基础区间。
 func Ranges() map[string]Range {
 	return map[string]Range{
 		"max_instances":         {MinInstances, MaxInstances, "个", false},
@@ -726,12 +831,17 @@ func Ranges() map[string]Range {
 		//     预算固化进句柄）。
 		// 与 instance_memory_mb 不同 —— 那一项住在 wazero 的 RuntimeConfig 里，
 		// 进程内建好之后不可变，所以只有它需要重启。
-		"guest_budget_seconds":         {MinBudgetSeconds, MaxGuestBudgetSeconds, "秒", false},
-		"dry_run_budget_seconds":       {MinBudgetSeconds, MaxBudgetSeconds, "秒", false},
-		"host_call_budget_seconds":     {MinBudgetSeconds, MaxBudgetSeconds, "秒", false},
-		"request_wall_clock_seconds":   {MinBudgetSeconds, MaxBudgetSeconds, "秒", false},
-		"sql_statement_budget_seconds": {MinBudgetSeconds, MaxBudgetSeconds, "秒", false},
-		"compile_timeout_seconds":      {MinBudgetSeconds, MaxBudgetSeconds, "秒", false},
+		//
+		// ⚠️ 上下界不在这里写死（2026-10-08）：基础区间比"真能存进去的值"宽
+		// （编译超时 1–300 而实际上限 60、单条 SQL 1–300 而实际是 4–119…），
+		// 表单照着它渲染就会把管理员引到必然被拒的格子里。六项一律取
+		// effectiveBudgetBounds（推导出来的有效区间），见该变量与 Validate 的同一批规则。
+		"guest_budget_seconds":         {effectiveBudgetBounds["guest_budget_seconds"].Min, effectiveBudgetBounds["guest_budget_seconds"].Max, "秒", false},
+		"dry_run_budget_seconds":       {effectiveBudgetBounds["dry_run_budget_seconds"].Min, effectiveBudgetBounds["dry_run_budget_seconds"].Max, "秒", false},
+		"host_call_budget_seconds":     {effectiveBudgetBounds["host_call_budget_seconds"].Min, effectiveBudgetBounds["host_call_budget_seconds"].Max, "秒", false},
+		"request_wall_clock_seconds":   {effectiveBudgetBounds["request_wall_clock_seconds"].Min, effectiveBudgetBounds["request_wall_clock_seconds"].Max, "秒", false},
+		"sql_statement_budget_seconds": {effectiveBudgetBounds["sql_statement_budget_seconds"].Min, effectiveBudgetBounds["sql_statement_budget_seconds"].Max, "秒", false},
+		"compile_timeout_seconds":      {effectiveBudgetBounds["compile_timeout_seconds"].Min, effectiveBudgetBounds["compile_timeout_seconds"].Max, "秒", false},
 	}
 }
 

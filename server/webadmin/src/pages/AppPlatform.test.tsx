@@ -75,15 +75,19 @@ const VIEW = {
     appdb_idle_min: { min: 1, max: 1440, unit: '分钟', restart: false },
     appdb_cache_kib: { min: 128, max: 65536, unit: 'KiB', restart: false },
     app_db_readers: { min: 1, max: 16, unit: '个', restart: false },
-    // 六个时间预算：下限 MinBudgetSeconds(1)；guest 上限 MaxGuestBudgetSeconds(120)，
-    // 其余 MaxBudgetSeconds(300)。**restart 全 false** —— 这六项在每个请求/每次编译的
-    // 入口处读当前值（只有单实例内存上限住在 wazero 的 RuntimeConfig 里）。
-    guest_budget_seconds: { min: 1, max: 120, unit: '秒', restart: false },
-    dry_run_budget_seconds: { min: 1, max: 300, unit: '秒', restart: false },
-    host_call_budget_seconds: { min: 1, max: 300, unit: '秒', restart: false },
-    request_wall_clock_seconds: { min: 1, max: 300, unit: '秒', restart: false },
-    sql_statement_budget_seconds: { min: 1, max: 300, unit: '秒', restart: false },
-    compile_timeout_seconds: { min: 1, max: 300, unit: '秒', restart: false },
+    // 六个时间预算：**有效区间**（服务端 applimits.Ranges() 从序关系推出来的那一份，
+    // 不是"基础区间 1–300"）。2026-10-08 现场：编译超时那一格曾写着 1–300，而服务端
+    // 一律拒收 > 60 —— 管理员照着提示填 90 只会撞 400。这一组数字必须与服务端一致：
+    // 服务端侧由 TestBudgetRangesAreSound / TestBudgetRangesEndpointsAreReachable 双向钉住，
+    // 本文件由上面那条键集门禁 + 渲染用例钉住。
+    // **restart 全 false** —— 这六项在每个请求/每次编译的入口处读当前值
+    // （只有单实例内存上限住在 wazero 的 RuntimeConfig 里）。
+    guest_budget_seconds: { min: 5, max: 120, unit: '秒', restart: false },
+    dry_run_budget_seconds: { min: 1, max: 120, unit: '秒', restart: false },
+    host_call_budget_seconds: { min: 5, max: 120, unit: '秒', restart: false },
+    request_wall_clock_seconds: { min: 6, max: 300, unit: '秒', restart: false },
+    sql_statement_budget_seconds: { min: 4, max: 119, unit: '秒', restart: false },
+    compile_timeout_seconds: { min: 1, max: 60, unit: '秒', restart: false },
   },
   budget: {
     // 服务端 P0-2 起 budget.profile 是 limits/setting 或 limits/profile:<name>，
@@ -882,27 +886,27 @@ describe('应用中心 · 限制项 · 时间预算(2026-10-01 新增)', () => {
    */
   const ROWS: { key: string; label: string; unit: string; min: number; max: number; hint: string }[] = [
     {
-      key: 'guest_budget_seconds', label: 'guest 执行预算', unit: '秒', min: 1, max: 120,
+      key: 'guest_budget_seconds', label: 'guest 执行预算', unit: '秒', min: 5, max: 120,
       hint: '应用单次请求里真正执行的时长上限；等数据库/等宿主调用时暂停计时。调大等于允许更长的单次计算，端到端墙钟仍然封顶',
     },
     {
-      key: 'dry_run_budget_seconds', label: '发布干跑预算', unit: '秒', min: 1, max: 300,
+      key: 'dry_run_budget_seconds', label: '发布干跑预算', unit: '秒', min: 1, max: 120,
       hint: '发布/预检时用合成帧跑一次真实实例化的预算；建议与 guest 预算一致，调得比它短会把线上跑得动的应用挡在发布门外',
     },
     {
-      key: 'host_call_budget_seconds', label: '宿主调用预算', unit: '秒', min: 1, max: 300,
+      key: 'host_call_budget_seconds', label: '宿主调用预算', unit: '秒', min: 5, max: 120,
       hint: 'db.* / log / assets.read 等宿主调用的硬超时；它不被 guest 的暂停计时覆盖，两者独立。必须严格大于单条 SQL 硬超时（语句 deadline 套在它里面：内层不小于外层时应用拿到的是 HOST_CALL_OVER_BUDGET 而不是 DB_DENIED）。每次请求即时生效',
     },
     {
-      key: 'request_wall_clock_seconds', label: '请求端到端墙钟', unit: '秒', min: 1, max: 300,
+      key: 'request_wall_clock_seconds', label: '请求端到端墙钟', unit: '秒', min: 6, max: 300,
       hint: '含排队等待；到点即拒。必须严格大于 guest 预算。注意：客户端应用请求的出站预算是随包固定的 75 秒（必须晚于本值，否则员工只会看到网络错误）',
     },
     {
-      key: 'sql_statement_budget_seconds', label: '单条 SQL 硬超时', unit: '秒', min: 1, max: 300,
+      key: 'sql_statement_budget_seconds', label: '单条 SQL 硬超时', unit: '秒', min: 4, max: 119,
       hint: '到点由看门狗回滚并打污染标记；必须严格小于宿主调用预算，也不得超过端到端墙钟。**下一个应用库句柄生效**（不是立即）',
     },
     {
-      key: 'compile_timeout_seconds', label: '编译超时', unit: '秒', min: 1, max: 300,
+      key: 'compile_timeout_seconds', label: '编译超时', unit: '秒', min: 1, max: 60,
       hint: '单次编译（含执行侧装载模块）的超时；不得超过服务端 ReadTimeout（60 秒，传输层常量不可配置）',
     },
   ]
@@ -1000,6 +1004,107 @@ describe('应用中心 · 限制项 · 时间预算(2026-10-01 新增)', () => {
     await waitFor(() => {
       expect(screen.getByTestId('lim-request_wall_clock_seconds')).toHaveProperty('value', '60')
     })
+  })
+
+  /**
+   * 2026-10-08 现场(用户报告):「admin/app-center/limits 时间预算修改后不能保存」。
+   *
+   * 真实形态：管理员把**编译超时**改到 60 s 以上（旧的服务端 ranges 写着 1–300，
+   * 页面就把 `max=300` 与「（1–300）」照实渲染出来），点保存 —— 服务端回 400：
+   *
+   *	{"error":{"code":"VALIDATION","message":"编译超时不得超过服务端 ReadTimeout（60 s，传输层常量不可配置）",
+   *	         "details":{"field":"compile_timeout_seconds"},"hints":["同步 publish 必须在 ReadTimeout 预算内返回"]}}
+   *
+   * 应答**解析得好好的**（errorText 一直在工作），但错误块渲染在字段区**之上**，
+   * 而保存按钮在最底部、表单又被拉回服务端真值 ⇒ 管理员看到的是"填了值、点保存、
+   * 值自己变回去"，于是判定"客户端没解析 / 不能保存"。
+   *
+   * 这一组用例钉住两条约定（前端真源在 Limits.tsx 文件头）：
+   *  ① 被拒的那一格必须标红 + 在格内给出服务端全文，并滚动/聚焦过去；
+   *  ② 反馈区必须渲染在**动作按钮旁边**（字段区之后），点保存时同屏可见。
+   * 服务端侧的另一半（这一格的可填范围到底是多少）由 applimits 的
+   * TestBudgetRangesAreSound / TestBudgetRangesEndpointsAreReachable 钉住。
+   */
+  it('编译超时 > 60 被拒 ⇒ 该格标红 + 格内给出服务端全文 + 视图滚动到它', async () => {
+    const scrolled: Element[] = []
+    Element.prototype.scrollIntoView = function scrollIntoViewSpy(this: Element) {
+      scrolled.push(this)
+    }
+    render(<Limits />)
+    const input = await screen.findByTestId('lim-compile_timeout_seconds')
+    // 旧服务端区间写着 1–300，页面照实渲染 ⇒ 管理员被引到这个必然被拒的值上。
+    // 现在服务端下发的是**有效区间** 1–60（这一句就是那半个缺陷的渲染判据）。
+    expect(input).toHaveAttribute('max', '60')
+    fireEvent.change(input, { target: { value: '90' } })
+
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/server/admin/wasm-apps/limits' && (init as RequestInit | undefined)?.method === 'PUT') {
+        throw new ApiError(
+          400, 'VALIDATION',
+          '编译超时必须在 1–60 秒之间',
+          undefined,
+          ['上限 60 s = 服务端 ReadTimeout（传输层常量，不可配置）：同步 publish 必须在它之前返回；需要更长编译请拆小应用产物'],
+          { field: 'compile_timeout_seconds' },
+        )
+      }
+      if (path === '/api/server/admin/wasm-apps/limits') return VIEW as any
+      if (path === '/api/server/admin/wasm-apps/runtime') return { runtime: RUNTIME } as any
+      return {} as any
+    })
+    fireEvent.click(screen.getByTestId('save-limits'))
+
+    // ① 被拒的那一格：错误全文落在格内、输入框标 aria-invalid 并用 describedby 指过去
+    const inline = await screen.findByTestId('lim-error-compile_timeout_seconds')
+    expect(inline.textContent).toContain('编译超时必须在 1–60 秒之间')
+    expect(inline.textContent).toContain('ReadTimeout')
+    const marked = screen.getByTestId('lim-compile_timeout_seconds')
+    expect(marked).toHaveAttribute('aria-invalid', 'true')
+    expect(marked).toHaveAttribute('aria-describedby', 'lim-error-compile_timeout_seconds')
+    // 没被点名的格子不许跟着标红（"哪一格要改"是这张页面唯一要回答的问题）
+    expect(screen.queryByTestId('lim-error-guest_budget_seconds')).toBeNull()
+    expect(screen.getByTestId('lim-guest_budget_seconds')).not.toHaveAttribute('aria-invalid')
+
+    // ② 视图被带到那一格（可见性：jsdom 不做布局，只能钉"滚动/聚焦发生在谁身上"）
+    await waitFor(() => { expect(scrolled).toContain(marked) })
+
+    // ③ 页内错误块照旧（live 区、全文）——字段级提示是它的视觉落点，不是替代品
+    const err = screen.getByTestId('limits-error')
+    expect(err).toHaveAttribute('role', 'alert')
+    expect(err.textContent).toContain('字段 compile_timeout_seconds')
+  })
+
+  it('反馈区渲染在动作按钮之前、字段区之后(点保存时同屏,不再渲染在页顶)', async () => {
+    render(<Limits />)
+    const input = await screen.findByTestId('lim-compile_timeout_seconds')
+    fireEvent.change(input, { target: { value: '90' } })
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/server/admin/wasm-apps/limits' && (init as RequestInit | undefined)?.method === 'PUT') {
+        throw new ApiError(400, 'VALIDATION', '编译超时必须在 1–60 秒之间', undefined, ['把编译超时调到 60 s 以内'], { field: 'compile_timeout_seconds' })
+      }
+      if (path === '/api/server/admin/wasm-apps/limits') return VIEW as any
+      if (path === '/api/server/admin/wasm-apps/runtime') return { runtime: RUNTIME } as any
+      return {} as any
+    })
+    fireEvent.click(screen.getByTestId('save-limits'))
+
+    const feedback = await screen.findByTestId('limits-feedback')
+    const save = screen.getByTestId('save-limits')
+    // 反馈在按钮**之前**（按钮上方）……
+    expect(feedback.compareDocumentPosition(save) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    // ……且在**最后一格之后**（字段区早已滚过）——两条一起才等于"点保存时它就在眼前"
+    expect(input.compareDocumentPosition(feedback) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('保存成功的 flash 与错误块同址(反馈只有一处,成功也要看得见)', async () => {
+    render(<Limits />)
+    const input = await screen.findByTestId('lim-compile_timeout_seconds')
+    fireEvent.change(input, { target: { value: '45' } })
+    fireEvent.click(screen.getByTestId('save-limits'))
+
+    const flash = await screen.findByTestId('limits-flash')
+    const save = screen.getByTestId('save-limits')
+    expect(flash.compareDocumentPosition(save) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(input.compareDocumentPosition(flash) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 })
 

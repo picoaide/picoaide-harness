@@ -357,16 +357,22 @@ func TestParseStoredLegalizesOldLibraryCombos(t *testing.T) {
 
 	// ③ 边界（如实登记）：host_call ≤ busy timeout+1(=4) 时，"sql > 3"与"sql < host_call"
 	//    没有整数解 —— 唯一出路是把**外层**闸门放大，而那是本包明确拒绝的方向。
-	//    这种组合只能靠管理员刻意填出（默认值不会产生），因此仍判非法并点名 sql 字段；
+	//    这种组合只能靠管理员刻意填出（默认值不会产生），因此仍判非法；
 	//    上层会回落到档位并打出那条 warning —— 不是静默。
+	//
+	//    字段归属（2026-10-08 变更）：拒绝**点名 host_call_budget_seconds**，不再点名 sql。
+	//    原因：这一组值里 host_call=4 本身就已经越出可行区间（它必须严格大于单条 SQL 的
+	//    可行下限 4 ⇒ 至少 5），范围判据先于序关系分支命中，点名的正是"必须先改的那一格"。
+	//    旧形态点名 sql 只是因为序关系分支排在范围判据之后 —— 管理员照着"sql 不对"去调
+	//    sql，而 sql 怎么调都没有解。**判据的实质未变**：仍判非法、仍不靠放大外层闸门合法化。
 	bad := oldLibraryWith(func(l *applimits.Limits) {
 		l.HostCallBudgetSeconds = 4
 		l.SQLStatementBudgetSeconds = 3
 	})
 	if _, aerr := applimits.ParseStored(bad.Encode()); aerr == nil {
 		t.Fatal("无合法解的旧组合（sql=3 / host_call=4）必须仍被判非法：合法化不得靠放大外层闸门")
-	} else if got := fmt.Sprint(aerr.Details["field"]); got != "sql_statement_budget_seconds" {
-		t.Fatalf("拒绝理由必须点名 sql_statement_budget_seconds，得到 %q（%s）", got, aerr.Message)
+	} else if got := fmt.Sprint(aerr.Details["field"]); got != "host_call_budget_seconds" {
+		t.Fatalf("拒绝理由必须点名 host_call_budget_seconds（这一格才是先要改的），得到 %q（%s）", got, aerr.Message)
 	}
 }
 
@@ -629,12 +635,9 @@ func TestBudgetValidateRejectsBrokenOrdering(t *testing.T) {
 			// 否则外层先到点、应用拿到 HOST_CALL_OVER_BUDGET 而不是 DB_DENIED。
 			l.HostCallBudgetSeconds = l.SQLStatementBudgetSeconds
 		}, "sql_statement_budget_seconds"},
-		{"编译超时大于 ReadTimeout", func(l *applimits.Limits) {
-			l.CompileTimeoutSeconds = int(limits.ServerReadTimeout/time.Second) + 1
-		}, "compile_timeout_seconds"},
-		{"单条 SQL 不大于 busy timeout", func(l *applimits.Limits) {
-			l.SQLStatementBudgetSeconds = int(limits.AppDBBusyTimeout / time.Second)
-		}, "sql_statement_budget_seconds"},
+		// 注：`编译超时 > ReadTimeout` 与 `单条 SQL ≤ busy timeout` 这两条**不在这里**了 ——
+		// 自 2026-10-08 起它们由范围判据收口（上下界就是这两条规则推出来的），
+		// 用例搬到了 TestBudgetValidateRejectsOutOfRange（字段归属不变）。
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -668,20 +671,57 @@ func TestBudgetValidateRejectsBrokenOrdering(t *testing.T) {
 	}
 }
 
-// TestBudgetValidateRejectsOutOfRange 钉住六项的取值区间（含 guest 的单独上限）。
+// TestBudgetValidateRejectsOutOfRange 钉住六项的取值区间。
+//
+// 2026-10-08 起这里判的是**有效区间**（`Ranges()` 下发到控制台表单的那一份，
+// 由 applimits.effectiveBudgetBounds 从序关系推出），不再是"基础区间 + 后面的序关系分支"：
+// 现场形态是控制台把编译超时那一格写成 1–300，而服务端一律拒收 > 60 ——
+// 管理员照着提示填 90，点保存只得到一句拒绝，页面上看不出"这一格根本填不到那么大"。
+// 因此上下界两端、以及"为什么不能再往那边调"的解释都在这一批用例里判。
 func TestBudgetValidateRejectsOutOfRange(t *testing.T) {
+	busy := int(limits.AppDBBusyTimeout / time.Second)
+	readTimeout := int(limits.ServerReadTimeout / time.Second)
 	cases := []struct {
 		name  string
 		mut   func(*applimits.Limits)
 		field string
 	}{
 		{"guest 低于下限", func(l *applimits.Limits) { l.GuestBudgetSeconds = 0 }, "guest_budget_seconds"},
+		// guest 的可行下限不是 1 s：宿主调用不得超过 guest，而宿主调用必须严格大于
+		// 单条 SQL 硬超时（> busy）⇒ guest 至少 busy+2。
+		{"guest 低于可行下限（宿主调用/SQL 序关系推出来的）", func(l *applimits.Limits) {
+			l.GuestBudgetSeconds = busy + 1
+		}, "guest_budget_seconds"},
 		{"guest 超过独立上限", func(l *applimits.Limits) {
 			l.GuestBudgetSeconds = applimits.MaxGuestBudgetSeconds + 1
 			l.RequestWallClockSeconds = l.GuestBudgetSeconds + 1
 		}, "guest_budget_seconds"},
 		{"干跑低于下限", func(l *applimits.Limits) { l.DryRunBudgetSeconds = 0 }, "dry_run_budget_seconds"},
+		// 干跑的可行上限 = guest 的独立上限（干跑不得大于 guest，而 guest 最大 120）。
+		{"干跑超过可行上限（guest 的独立上限）", func(l *applimits.Limits) {
+			l.DryRunBudgetSeconds = applimits.MaxGuestBudgetSeconds + 1
+		}, "dry_run_budget_seconds"},
+		{"宿主调用低于可行下限（必须严格大于单条 SQL）", func(l *applimits.Limits) {
+			l.HostCallBudgetSeconds = busy + 1
+		}, "host_call_budget_seconds"},
+		{"宿主调用超过可行上限（guest 的独立上限）", func(l *applimits.Limits) {
+			l.HostCallBudgetSeconds = applimits.MaxGuestBudgetSeconds + 1
+		}, "host_call_budget_seconds"},
+		{"墙钟低于可行下限（必须严格大于 guest）", func(l *applimits.Limits) {
+			l.RequestWallClockSeconds = busy + 2
+		}, "request_wall_clock_seconds"},
 		{"墙钟超过通用上限", func(l *applimits.Limits) { l.RequestWallClockSeconds = applimits.MaxBudgetSeconds + 1 }, "request_wall_clock_seconds"},
+		// 自 2026-10-08 起这两条由范围判据收口（原先住在序关系分支里，现在结构上不可达，
+		// 解释与出路写进了范围判据的 hints）。字段归属不变，所以断言照旧。
+		{"单条 SQL 不大于 busy timeout", func(l *applimits.Limits) {
+			l.SQLStatementBudgetSeconds = busy
+		}, "sql_statement_budget_seconds"},
+		{"单条 SQL 超过可行上限（宿主调用可行上限 − 1）", func(l *applimits.Limits) {
+			l.SQLStatementBudgetSeconds = applimits.MaxGuestBudgetSeconds
+		}, "sql_statement_budget_seconds"},
+		{"编译超时大于 ReadTimeout", func(l *applimits.Limits) {
+			l.CompileTimeoutSeconds = readTimeout + 1
+		}, "compile_timeout_seconds"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -694,8 +734,234 @@ func TestBudgetValidateRejectsOutOfRange(t *testing.T) {
 			if got := fmt.Sprint(err.Details["field"]); got != c.field {
 				t.Fatalf("want %s, got %s（%s）", c.field, got, err.Message)
 			}
+			// 越界原因与出路必须写在信封里（旧形态只有一句"不得超过 ReadTimeout"，
+			// 控制台把它当作"客户端没解析"的哑保存 —— 现场就是这么来的）。
+			if len(err.Hints) == 0 {
+				t.Fatalf("越界拒绝必须给可操作 hint（%s）", err.Message)
+			}
 		})
 	}
+
+	// 编译超时那条的 hint 必须点名 ReadTimeout 与"怎么才能更长"（管理员唯一的下一步）。
+	l := applimits.Defaults()
+	l.CompileTimeoutSeconds = readTimeout + 1
+	err := l.Validate()
+	if err == nil {
+		t.Fatal("编译超时 > ReadTimeout 必须被拒")
+	}
+	all := err.Message + " " + strings.Join(err.Hints, " ")
+	for _, want := range []string{"ReadTimeout", fmt.Sprintf("%d–%d", applimits.MinBudgetSeconds, readTimeout)} {
+		if !strings.Contains(all, want) {
+			t.Fatalf("编译超时的拒绝文案必须含 %q（当前 message=%q hints=%v）", want, err.Message, err.Hints)
+		}
+	}
+}
+
+// budgetWitnessCandidates 是构造见证时给"其余字段"取的候选值。
+//
+// 集合必须包含每个字段区间的两端（含 ±1）：例如 sql 的上界 119 需要 host_call=120
+// （正是 host_call 的上界），候选集里没有它就会构造不出见证，把"可达性"误判成缺陷。
+func budgetWitnessCandidates() map[string][]int {
+	out := map[string][]int{}
+	for _, f := range applimits.FieldNames() {
+		r, ok := applimits.Ranges()[f]
+		if !ok {
+			continue
+		}
+		out[f] = []int{r.Min, r.Min + 1, r.Max - 1, r.Max}
+	}
+	d := applimits.Defaults()
+	for _, f := range applimits.FieldNames() {
+		out[f] = append(out[f], valueOf(d, f))
+	}
+	return out
+}
+
+// valueOf 按字段名读 Limits 里的值（测试内的小反射替身：字段集由 FieldNames 唯一给出）。
+func valueOf(l applimits.Limits, field string) int {
+	switch field {
+	case "max_instances":
+		return l.MaxInstances
+	case "app_running":
+		return l.AppRunning
+	case "app_queue":
+		return l.AppQueue
+	case "user_global_running":
+		return l.UserGlobalRunning
+	case "user_per_app_running":
+		return l.UserPerAppRunning
+	case "user_per_app_queued":
+		return l.UserPerAppQueued
+	case "instance_memory_mb":
+		return l.InstanceMemoryMB
+	case "module_cache_mb":
+		return l.ModuleCacheMB
+	case "module_cache_idle_min":
+		return l.ModuleCacheIdleMin
+	case "appdb_idle_min":
+		return l.AppDBIdleMin
+	case "appdb_cache_kib":
+		return l.AppDBCacheKiB
+	case "app_db_readers":
+		return l.AppDBReaders
+	case "guest_budget_seconds":
+		return l.GuestBudgetSeconds
+	case "dry_run_budget_seconds":
+		return l.DryRunBudgetSeconds
+	case "host_call_budget_seconds":
+		return l.HostCallBudgetSeconds
+	case "request_wall_clock_seconds":
+		return l.RequestWallClockSeconds
+	case "sql_statement_budget_seconds":
+		return l.SQLStatementBudgetSeconds
+	case "compile_timeout_seconds":
+		return l.CompileTimeoutSeconds
+	}
+	return 0
+}
+
+// setValueOf 按字段名写 Limits（同 valueOf 的字段集）。
+func setValueOf(l *applimits.Limits, field string, v int) {
+	switch field {
+	case "max_instances":
+		l.MaxInstances = v
+	case "app_running":
+		l.AppRunning = v
+	case "app_queue":
+		l.AppQueue = v
+	case "user_global_running":
+		l.UserGlobalRunning = v
+	case "user_per_app_running":
+		l.UserPerAppRunning = v
+	case "user_per_app_queued":
+		l.UserPerAppQueued = v
+	case "instance_memory_mb":
+		l.InstanceMemoryMB = v
+	case "module_cache_mb":
+		l.ModuleCacheMB = v
+	case "module_cache_idle_min":
+		l.ModuleCacheIdleMin = v
+	case "appdb_idle_min":
+		l.AppDBIdleMin = v
+	case "appdb_cache_kib":
+		l.AppDBCacheKiB = v
+	case "app_db_readers":
+		l.AppDBReaders = v
+	case "guest_budget_seconds":
+		l.GuestBudgetSeconds = v
+	case "dry_run_budget_seconds":
+		l.DryRunBudgetSeconds = v
+	case "host_call_budget_seconds":
+		l.HostCallBudgetSeconds = v
+	case "request_wall_clock_seconds":
+		l.RequestWallClockSeconds = v
+	case "sql_statement_budget_seconds":
+		l.SQLStatementBudgetSeconds = v
+	case "compile_timeout_seconds":
+		l.CompileTimeoutSeconds = v
+	}
+}
+
+// findValidCombination 在"其余字段取候选值"的格点上找一个过 Validate 的组合。
+//
+// 找到了 ⇒ 返回该组合（见证）；找不到 ⇒ 返回 false。**找不到不构成"不存在"的证明**
+// （候选集是有限的格点），所以它只用来证伪两件事：
+//   - 区间端点不可达（本该存在见证却找不到 ⇒ 表单把合法值挡住了）；
+//   - 区间外的值仍有合法组合（找到了 ⇒ 表单的区间比真实可行域窄，同一类缺陷的另一半）。
+//
+// 六项时间预算的可行域就是由这批序关系定义的，格点覆盖了每条界的端点，因此这两条
+// 方向的判定在本例里是充分的（推导本身保证"界只收紧到规则允许的极限"）。
+func findValidCombination(field string, v int) (applimits.Limits, bool) {
+	cands := budgetWitnessCandidates()
+	// 只枚举余下五个时间预算字段 + 一个"其余取默认"的基线：并发/内存那几项与预算
+	// 序关系无关，取值不影响判定（默认值本身就合法）。
+	free := make([]string, 0, len(budgetFieldNames))
+	for _, f := range budgetFieldNames {
+		if f != field {
+			free = append(free, f)
+		}
+	}
+	base := applimits.Defaults()
+	values := make([]int, len(free))
+	var walk func(i int) (applimits.Limits, bool)
+	walk = func(i int) (applimits.Limits, bool) {
+		if i == len(free) {
+			l := base
+			setValueOf(&l, field, v)
+			for j, f := range free {
+				setValueOf(&l, f, values[j])
+			}
+			if l.Validate() == nil {
+				return l, true
+			}
+			return applimits.Limits{}, false
+		}
+		for _, c := range cands[free[i]] {
+			values[i] = c
+			if got, ok := walk(i + 1); ok {
+				return got, true
+			}
+		}
+		return applimits.Limits{}, false
+	}
+	return walk(0)
+}
+
+// TestBudgetRangesAreReachable 是控制台区间的**"不许少"**方向：
+// 区间里的**每一个**整数都必须存在一个过 Validate 的组合。
+//
+// 为什么是"每一个"而不是"端点"：本次的缺陷形态（2026-10-08 现场）正是
+// **区间比真实可行域宽** —— 编译超时那一格声明 1–300，而 61–300 一个都存不进去。
+// 只探两端点是抓不到它的（max=300 被探到了……能抓到；但"61 到 299 里有一段填不进"
+// 这类形态端点探针会漏），所以这里逐值构造见证；反过来，**区间收得过紧**由
+// TestBudgetRangesAreSound 判（那个方向是"区间外的值竟然能存"）。
+//
+// 两条一起 = 声明区间恰好等于可行域在该字段上的投影。
+func TestBudgetRangesAreReachable(t *testing.T) {
+	for _, f := range budgetFieldNames {
+		r := applimits.Ranges()[f]
+		// 逐值见证：值域由 limits 常量封顶（≤300），全量扫描的成本远低于一次编译。
+		for v := r.Min; v <= r.Max; v++ {
+			if _, ok := findValidCombination(f, v); !ok {
+				t.Fatalf("%s=%d 取不到任何合法组合：控制台把它渲染成可填的一格（%d–%d），"+
+					"而服务端必然拒收 —— 管理员照着提示填，点保存只会得到一句拒绝",
+					f, v, r.Min, r.Max)
+			}
+		}
+	}
+}
+
+// TestBudgetRangesAreSound 是同一对判据的**"不许多"**方向：区间**外**的每一个值
+// （两侧各扫到基础区间的边界）都不允许存在任何合法组合 —— 否则表单会把一个能存的值挡住。
+//
+// 现场形态的另一半：编译超时那一格若只声明 1–60 而服务端接受 90，管理员就再也填不进
+// 90（而 90 是合法的）。变异验证：把 compile_timeout_seconds 的上界改成 30 ⇒ 本用例必红。
+func TestBudgetRangesAreSound(t *testing.T) {
+	for _, f := range budgetFieldNames {
+		r := applimits.Ranges()[f]
+		for _, outside := range []struct {
+			name string
+			from int
+			to   int
+		}{
+			{"下限之下", applimits.MinBudgetSeconds, r.Min - 1},
+			{"上限之上", r.Max + 1, applimits.MaxBudgetSeconds + 1},
+		} {
+			for v := outside.from; v <= outside.to; v++ {
+				if combination, ok := findValidCombination(f, v); ok {
+					t.Fatalf("%s=%d（%s）竟然有一个合法组合（%s）：声明区间 %d–%d 比可行域窄，"+
+						"表单会把一个能存的值挡住", f, v, outside.name, combination.Encode(), r.Min, r.Max)
+				}
+			}
+		}
+	}
+}
+
+// budgetFieldNames 是六个时间预算字段（顺序 = 表单顺序）。只在这里列一次：
+// 两条区间判据与 findValidCombination 都用它。
+var budgetFieldNames = []string{
+	"guest_budget_seconds", "dry_run_budget_seconds", "host_call_budget_seconds",
+	"request_wall_clock_seconds", "sql_statement_budget_seconds", "compile_timeout_seconds",
 }
 
 // TestBudgetRoundTripsThroughParse 钉住"控制台改过的预算能存能读"：

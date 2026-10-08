@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { request, ADMIN_API } from '../../api'
 import { Button } from '../../components/ui/button'
 import { Input } from '../../components/ui/input'
@@ -10,7 +10,7 @@ import { PageHeader } from '../../components/page-header'
 import { useFlash } from '../../lib/use-flash'
 import { hasPermission, PERM_CAP_READ, PERM_CAP_WRITE } from '../../lib/rbac'
 /** 服务端错误信封统一渲染(message + details.field + hints,P1-6)。 */
-import { errorText } from '../../lib/api-error'
+import { errorField, errorText } from '../../lib/api-error'
 import { AlertTriangle, RotateCcw, RefreshCw, Save } from 'lucide-react'
 
 /**
@@ -32,6 +32,19 @@ import { AlertTriangle, RotateCcw, RefreshCw, Save } from 'lucide-react'
  * 同一句话对**时间预算**那六项同样成立：序关系（guest < 墙钟、干跑/宿主调用 ≤ guest、
  * SQL ≤ 墙钟、编译 ≤ ReadTimeout）只在服务端校验，页面照实渲染服务端下发的
  * ranges/hints —— 前端不另写一份判据，否则两份判据必然漂移。
+ *
+ * ---- 保存被拒时，反馈必须出现在**点击处**（2026-10-08 现场）----
+ *
+ * 现场形态：管理员改完某一格（时间预算），滚到页面底部点「保存并生效」，
+ * 服务端回了 400 错误信封（message + details.field + hints），**页面上却什么都没发生** ——
+ * 错误块当时渲染在页面顶部（字段区之上），而点击处在最底部；保存失败又会把表单拉回
+ * 服务端真值（P2-2），于是管理员看到的是「填了值、点保存、值自己变回去」，
+ * 只能得出"不能保存 / 客户端没解析应答"的结论（实际应答解析得好好的）。
+ *
+ * 因此本页有两条硬约定（都由 AppPlatform.test.tsx 的用例钉住）：
+ *  1. 反馈区（成功 flash 与错误块）渲染在**动作按钮上方**，与点击处同屏；
+ *  2. 保存被拒时按 `details.field` 定位到**那一格**：输入框标 aria-invalid、
+ *     该格下方显示错误全文，并滚动/聚焦过去（找不到字段时退回滚动到错误块）。
  */
 interface Limits {
   max_instances: number
@@ -260,12 +273,51 @@ export default function Limits() {
   const [view, setView] = useState<LimitsView | null>(null)
   const [form, setForm] = useState<Limits | null>(null)
   const [err, setErr] = useState('')
+  /** 服务端 `details.field`：被拒的那一格（空串 = 服务端没点名，例如内存水位超标）。 */
+  const [errField, setErrField] = useState('')
+  /**
+   * 错误序号：同一句话连续被拒两次时 `err`/`errField` 都不变，effect 不会重跑 ——
+   * 而"再点一次保存"恰恰是最常见的第二次尝试，必须每次都把视图带到反馈处。
+   */
+  const [errSeq, setErrSeq] = useState(0)
   const [busy, setBusy] = useState(false)
   const [runtime, setRuntime] = useState<RuntimeView | null>(null)
   const [runtimeErr, setRuntimeErr] = useState('')
   const [flashMsg, flash] = useFlash()
   const canWrite = hasPermission(PERM_CAP_WRITE)
   const canRead = hasPermission(PERM_CAP_READ)
+  /** 反馈区（错误块）的锚点：服务端没点名字段时滚动到这里。 */
+  const errRef = useRef<HTMLDivElement | null>(null)
+
+  /** 设置错误 + 序号自增（唯一入口，避免某条出口忘了带 field 或忘了自增）。 */
+  const showError = useCallback((text: string, field = '') => {
+    setErr(text)
+    setErrField(field)
+    setErrSeq((n) => n + 1)
+  }, [])
+
+  /**
+   * 把反馈带到视口里（保存被拒的唯一"可见性"保障）。
+   *
+   * 优先定位被拒的那一格：管理员要改的是它，错误全文也渲染在它下面。
+   * 服务端没点名字段（如四笔账水位）时才退回错误块本身。
+   * `scrollIntoView` 用可选调用：jsdom 里没有这个方法（测试环境只打了桩），
+   * 不让它把渲染搞崩。
+   */
+  useEffect(() => {
+    if (err === '') return
+    const fieldNode = errField !== '' ? document.getElementById(`lim-${errField}`) : null
+    if (fieldNode) {
+      fieldNode.focus?.({ preventScroll: true })
+      fieldNode.scrollIntoView?.({ block: 'center' })
+      return
+    }
+    const banner = errRef.current
+    if (banner) {
+      banner.focus?.({ preventScroll: true })
+      banner.scrollIntoView?.({ block: 'center' })
+    }
+  }, [err, errField, errSeq])
 
   const fetchView = useCallback(async () => {
     const data = await request<LimitsView>(`${ADMIN_API}/wasm-apps/limits`)
@@ -278,12 +330,13 @@ export default function Limits() {
     try {
       await fetchView()
       setErr('')
+      setErrField('')
     } catch (e: any) {
       // P1-6:统一渲染 message + details.field + hints(此前只显示 message,
       // 服务端"还差什么条件"的那段建议被整段丢掉)。
-      setErr(errorText(e, '读取平台限制项失败'))
+      showError(errorText(e, '读取平台限制项失败'), errorField(e))
     }
-  }, [fetchView])
+  }, [fetchView, showError])
 
   /** 平台级运行时水位:独立请求,失败不影响限制项的读写(两块信息互不依赖)。 */
   const loadRuntime = useCallback(async () => {
@@ -401,7 +454,7 @@ export default function Limits() {
 
   const save = async () => {
     if (!form || !view || busy) return
-    setBusy(true); setErr('')
+    setBusy(true); setErr(''); setErrField('')
     try {
       /**
        * 并发/多标签（F5，审计 A2 实测：另一位管理员把 app_queue 改成 99，我只改
@@ -432,7 +485,7 @@ export default function Limits() {
       } catch {
         // 重读失败 ⇒ **不发 PUT**：拿不到最新值就无法保证不覆盖别人（fail-closed）。
         // 旧行为是直接提交旧快照，那正是"静默回滚他人改动"的成因。
-        setErr('保存已取消：读不到服务端最新的限制项，直接提交会把其他管理员刚保存的值覆盖掉。请点「刷新」后重试。')
+        showError('保存已取消：读不到服务端最新的限制项，直接提交会把其他管理员刚保存的值覆盖掉。请点「刷新」后重试。')
         return
       }
       const data = await request<LimitsView>(`${ADMIN_API}/wasm-apps/limits`, {
@@ -454,7 +507,11 @@ export default function Limits() {
       // 而绿色的"内存水位正常"徽标/预览是按本地表单算的 ⇒ 同一屏上红字与绿标互相
       // 矛盾,且没有任何入口回到服务端的真实值。
       // 现在:失败即以服务端为准重新拉取(预算判定的真源在服务端)。
-      setErr(errorText(e, '保存失败'))
+      //
+      // 同时把 `details.field`（服务端点名的字段）记下来：它决定错误全文渲染在**哪一格**
+      // 下面、以及视图被带到哪里（见文件头的"反馈必须出现在点击处"）。这是本页唯一
+      // 读取该字段的地方 —— 页面不自己判断"哪个值不合法"（判据只有服务端一份）。
+      showError(errorText(e, '保存失败'), errorField(e))
       try {
         await fetchView()
       } catch {
@@ -468,7 +525,7 @@ export default function Limits() {
 
   const reset = async () => {
     if (busy) return
-    setBusy(true); setErr('')
+    setBusy(true); setErr(''); setErrField('')
     try {
       const data = await request<LimitsView>(`${ADMIN_API}/wasm-apps/limits`, {
         method: 'PUT',
@@ -477,7 +534,7 @@ export default function Limits() {
       setView(data); setForm(data.limits)
       flash('已清空控制台设置，回到部署档位/默认值')
     } catch (e: any) {
-      setErr(errorText(e, '清空失败'))
+      showError(errorText(e, '清空失败'), errorField(e))
       try {
         await fetchView()
       } catch { /* 同上:保留原错误 */ }
@@ -531,19 +588,6 @@ export default function Limits() {
           </Button>
         }
       />
-      {/* R1-uxw-14：保存成功/失败都必须进 live 区，否则读屏用户点完"保存并生效"
-          听不到任何结果（保存失败此前只有一个普通 div）。 */}
-      {flashMsg && (
-        <div
-          data-testid="limits-flash"
-          role="status"
-          aria-live="polite"
-          className="rounded-md border border-border bg-muted px-3 py-2 text-sm"
-        >
-          {flashMsg}
-        </div>
-      )}
-      {err && <LimitsErrorBlock text={err} />}
 
       <Card>
         <CardHeader className="flex-row items-center justify-between space-y-0">
@@ -765,6 +809,8 @@ export default function Limits() {
               const r = view.ranges[f.key]
               const def = view.defaults?.[f.key]
               const deviated = typeof def === 'number' && form[f.key] !== def
+              /** 服务端点名了这一格 ⇒ 标红 + 在格内给出错误全文（见文件头的"反馈必须出现在点击处"）。 */
+              const rejected = err !== '' && errField === f.key
               return (
                 <div key={f.key} className="space-y-1">
                   <Label htmlFor={`lim-${f.key}`} data-testid={`lim-label-${f.key}`} className="flex flex-wrap items-center gap-2">
@@ -785,6 +831,8 @@ export default function Limits() {
                       max={r?.max}
                       value={String(form[f.key])}
                       disabled={!canWrite}
+                      aria-invalid={rejected || undefined}
+                      aria-describedby={rejected ? `lim-error-${f.key}` : undefined}
                       onChange={(e) => patch(f.key, e.target.value)}
                     />
                     <span className="w-12 shrink-0 text-xs text-muted-foreground">{r?.unit}</span>
@@ -798,12 +846,46 @@ export default function Limits() {
                   <p className="text-xs text-muted-foreground" data-testid={`lim-default-${f.key}`}>
                     {typeof def === 'number' ? `默认 ${def}${r?.unit ? ` ${r.unit}` : ''}` : '默认值：服务端未下发'}
                   </p>
+                  {/* 服务端拒了这一格（details.field）：错误全文渲染在**这一格**下面。
+                      不在这里另起 role=alert —— 反馈区的错误块（role=alert）已经播报过一次，
+                      这条只是同一句话的视觉落点（输入框用 aria-describedby 指过来）。 */}
+                  {rejected && (
+                    <p
+                      id={`lim-error-${f.key}`}
+                      data-testid={`lim-error-${f.key}`}
+                      className="rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1 text-xs text-destructive"
+                    >
+                      {err}
+                    </p>
+                  )}
                 </div>
               )
             })}
           </CardContent>
         </Card>
       ))}
+
+      {/* R1-uxw-14：保存成功/失败都必须进 live 区，否则读屏用户点完"保存并生效"
+          听不到任何结果（保存失败此前只有一个普通 div）。
+
+          位置（2026-10-08）：**紧贴动作按钮**（在字段区之后），不再渲染在字段区之上。
+          这一页有 18 格，点保存时视口停在最底部 —— 反馈渲染在顶部等于"点了没反应"，
+          现场据此得出了"客户端没解析服务端应答 / 不能保存"的结论。 */}
+      {(flashMsg || err) && (
+        <div ref={errRef} tabIndex={-1} className="space-y-2" data-testid="limits-feedback">
+          {flashMsg && (
+            <div
+              data-testid="limits-flash"
+              role="status"
+              aria-live="polite"
+              className="rounded-md border border-border bg-muted px-3 py-2 text-sm"
+            >
+              {flashMsg}
+            </div>
+          )}
+          {err && <LimitsErrorBlock text={err} />}
+        </div>
+      )}
 
       <div className="flex items-center gap-2">
         {/* R1-uxw-14：禁用原因不能只写在 title 上（禁用按钮不可聚焦 ⇒ 键盘/读屏
