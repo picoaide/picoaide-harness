@@ -5240,6 +5240,69 @@ exec "${concFakeAws}" "$@"
     check(existsSync(join(concStore, 'official', 'releases', '2.8.1', 'picoaide-server-2.8.1-amd64.zip')),
       '被拒的只是指针：旧版本本次的版本化资产仍必须照发')
   }
+
+  // ⑦ **预发布 → 同号正式版必须放行**（2026-10-08 v2.8.2 正式发版现场 = 发布面 P1）。
+  //
+  // 现场：beta 渠道的 `latest.json` 停在 `2.8.2-beta.7`；发布 `2.8.2` 时单调守卫用
+  // `sort -V` 判定"写下去会倒退"（GNU version sort 把**预发布排在正式版之前**，与
+  // semver §11.3 相反）⇒ **静默跳过写指针**、只留一行 `::warning::`：四渠道里三个前进到
+  // 2.8.2、beta 留在预发布版，而流水线全绿。
+  //
+  // 两层判据：⑦a 比较器真值表（含 §11.4 两条最容易写错的规则）；⑦b 端到端"必须写 /
+  // 必须拒"——只测比较器不测接线，等于放行"比较器修好了但守卫没用它"。
+  {
+    // ⑦a 比较器真值表。函数从**发布脚本本体**里抽出来自测（抽不到即红）。
+    const fnSource = /^semver_compare\(\) \{[\s\S]*?\n\}/mu.exec(readFileSync(publishScript, 'utf8'))?.[0]
+    check(typeof fnSource === 'string',
+      '必须能从 ci-publish-update-server.sh 里抽出 semver_compare（抽不到 = 判据没接线）')
+    const cmp = (a, b) => Number(execFileSync(
+      'bash', ['-c', `${fnSource}\nsemver_compare "$1" "$2"`, '--', a, b], { encoding: 'utf8' },
+    ).trim())
+    const semverTable = [
+      ['2.8.2', '2.8.2-beta.7', 1, '正式版 > 同号预发布（§11.3；`sort -V` 在这里是反的＝本次事故）'],
+      ['2.8.2-beta.7', '2.8.2', -1, '同上，反向'],
+      ['2.8.2', '2.8.2', 0, '同版相等（重跑同一个 tag 是常见动作）'],
+      ['2.10.0', '2.9.0', 1, '核心段按数值比，不能按字面序'],
+      ['10.0.0', '9.9.9', 1, '同上，跨位数'],
+      ['2.8.2-rc.1', '2.8.2-beta.9', 1, '§11.4 字母数字标识符按 ASCII 序（rc > beta）'],
+      ['2.8.2-alpha', '2.8.2-alpha.1', -1, '§11.4 前缀相同者段数多的大'],
+      ['2.8.2-1', '2.8.2-alpha', -1, '§11.4 数字标识符 < 字母数字标识符'],
+      ['2.8.2+build.9', '2.8.2', 0, '§10 build metadata 不参与比较'],
+      ['2.8.2-beta.7+build.1', '2.8.2-beta.7', 0, '同上（带预发布）'],
+    ]
+    for (const [a, b, want, why] of semverTable) {
+      check(cmp(a, b) === want, `semver_compare(${a}, ${b}) 应为 ${want}，实际 ${cmp(a, b)} —— ${why}`)
+    }
+
+    // ⑦b 端到端：先让指针落在预发布版，再发同号正式版 ⇒ 必须真的写进去。
+    rmSync(pointerPath, { force: true }) // ⑤ 把指针写成了垃圾正文，这里从"首次发布"重新播种
+    stageBundle('2.8.2-beta.7')
+    const seededPre = publish('2.8.2-beta.7')
+    check(seededPre.status === 0,
+      `播种预发布版指针应成功，实际退出 ${String(seededPre.status)}: ${seededPre.stderr ?? ''}`)
+    check(safeJson(readFileSync(pointerPath, 'utf8'))?.server?.version === '2.8.2-beta.7',
+      '播种后指针应为 2.8.2-beta.7（否则下面的对照没有基准）')
+
+    stageBundle('2.8.2')
+    const preToRelease = publish('2.8.2')
+    check(preToRelease.status === 0,
+      `预发布指针 + 同号正式版发布应成功，实际退出 ${String(preToRelease.status)}: ${preToRelease.stderr ?? ''}`)
+    check(safeJson(readFileSync(pointerPath, 'utf8'))?.server?.version === '2.8.2',
+      '**预发布 → 同号正式版（beta 线转正）必须写指针** —— 这是 2026-10-08 现场的直接回归；'
+      + `实际停在 ${String(safeJson(readFileSync(pointerPath, 'utf8'))?.server?.version)}`)
+    check(!`${preToRelease.stdout ?? ''}${preToRelease.stderr ?? ''}`.includes('::warning::'),
+      '预发布 → 同号正式版是**前进**，不得给出倒退告警')
+
+    // ⑦c 反向对照：指针在正式版时，发同号的**预发布**版必须拒写（守卫不能被改宽成恒写）。
+    stageBundle('2.8.2-beta.9')
+    const releaseToPre = publish('2.8.2-beta.9')
+    check(releaseToPre.status === 0,
+      `更旧的预发布版发布不应整体失败（只拒指针），实际退出 ${String(releaseToPre.status)}`)
+    check(safeJson(readFileSync(pointerPath, 'utf8'))?.server?.version === '2.8.2',
+      '正式版指针遇到同号预发布版必须**拒写**（预发布比正式版旧 —— §11.3）')
+    check(`${releaseToPre.stdout ?? ''}${releaseToPre.stderr ?? ''}`.includes('::warning::'),
+      '拒绝写指针必须留可检索的 ::warning::')
+  }
 }
 
 // ---- 7. 品牌渠道产物私密中转(不经公开 artifact) ----
