@@ -311,6 +311,49 @@ describe('bundled agent runtimes are signed into the release bundle', () => {
       .toThrow(/but the application carries none/)
   })
 
+  it('脚本入口（真载荷里的 pnpm.mjs）不做独立验签，但仍要真跑（2026-10-08 tag 的假红）', () => {
+    // 真载荷：node / python3 是 Mach-O（必须 Developer ID 重签），pnpm 是**脚本**。
+    // `codesign --verify --strict pnpm.mjs` ⇒ "code object is not signed at all" ⇒
+    // v2.8.3-beta.1 的 macOS job 在发布校验处退 1。修法=按魔数分流：脚本不送验签，
+    // 但它的可运行性由 shim 真跑兜住 —— 这一条同时钉住两侧（少验签 vs 少跑）。
+    const appPath = runtimeApp({ entryKinds: { pnpm: 'script' } })
+    const runtimeRoot = join(appPath, 'Contents', 'Resources', 'runtimes')
+    const { runs, captureSpy } = signed(appPath, (command) => {
+      const name = basename(command)
+      if (name === 'python3') return `Python ${MAC_BUNDLE_RUNTIME_VERSIONS.python}`
+      if (name === 'pnpm') return MAC_BUNDLE_RUNTIME_VERSIONS.pnpm
+      return `v${MAC_BUNDLE_RUNTIME_VERSIONS.node}`
+    })
+
+    expect(runs).toEqual([
+      { command: 'codesign', args: ['--verify', '--strict', '--verbose=2', join(runtimeRoot, 'node', 'bin', 'node')] },
+      { command: 'codesign', args: ['--verify', '--strict', '--verbose=2', join(runtimeRoot, 'python', 'bin', 'python3')] },
+    ])
+    expect(captureSpy.mock.calls).toEqual([
+      [join(runtimeRoot, 'bin', 'node'), ['-v']],
+      [join(runtimeRoot, 'bin', 'pnpm'), ['-v']],
+      [join(runtimeRoot, 'bin', 'python3'), ['-V']],
+    ])
+  })
+
+  it('三个入口都是 Mach-O 时逐个验签（脚本跳过不得把 Mach-O 一起放过）', () => {
+    // 与上一条成对：同一个函数，只有魔数不同 —— 三条验签 vs 两条验签。把 Mach-O 一起
+    // 跳过（例如"凡 `.mjs`/脚本判据写反"）会让这条红。
+    const appPath = runtimeApp()
+    const runtimeRoot = join(appPath, 'Contents', 'Resources', 'runtimes')
+    const { runs } = signed(appPath, (command) => {
+      const name = basename(command)
+      if (name === 'python3') return `Python ${MAC_BUNDLE_RUNTIME_VERSIONS.python}`
+      if (name === 'pnpm') return MAC_BUNDLE_RUNTIME_VERSIONS.pnpm
+      return `v${MAC_BUNDLE_RUNTIME_VERSIONS.node}`
+    })
+    expect(runs.map(entry => entry.args[entry.args.length - 1])).toEqual([
+      join(runtimeRoot, 'node', 'bin', 'node'),
+      join(runtimeRoot, 'pnpm', 'bin', 'pnpm.mjs'),
+      join(runtimeRoot, 'python', 'bin', 'python3'),
+    ])
+  })
+
   it('清单 schema 不认即红', () => {
     expect(() => signed(runtimeApp({ schema: 2 }))).toThrow(/declares schema 2/)
   })
