@@ -1,7 +1,17 @@
 /** Verify the signed application sealed inside one macOS release DMG. */
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmdirSync, statSync } from 'node:fs'
+import {
+  closeSync,
+  existsSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  readSync,
+  rmdirSync,
+  statSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -97,6 +107,42 @@ function defaultOptions(): MacReleaseVerificationOptions {
   }
 }
 
+/**
+ * Mach-O 魔数（32/64 位、两种字节序，以及 fat/universal）—— 判"这个文件是不是**要独立
+ * 签名**的代码对象"。
+ *
+ * 为什么要判而不是一律 `codesign --verify`：三个入口里 `pnpm` 是 **Node 脚本**
+ * （`pnpm/bin/pnpm.mjs`，我们始终用 `node <path>` 启动），macOS 的 `codesign` 对"带可执行位
+ * 的脚本"报 `code object is not signed at all` —— 那是**假红**：脚本不是 Mach-O、不需要独立
+ * 签名，完整性由 bundle 签名（`CodeResources` 逐文件哈希）保证，运行能力由下面的 shim 真跑
+ * 覆盖。载荷里本来就带着几十个可执行脚本（npm 自带的 `which.js`、`node-gyp` 的 `gyp_main.py`
+ * 与 `gyp` shim…），"脚本也要独立签名"等于要求给整棵第三方载荷逐个签名。
+ *
+ * 2026-10-08 的 v2.8.3-beta.1 tag 就停在这条假红上（macOS job 在
+ * `verify-mac-release.ts … --unnotarized` 处退 1；同一次日志里 `node` 那条验签是通过的）。
+ */
+const MACH_O_MAGICS: readonly number[] = [0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe, 0xcafebabe, 0xbebafeca]
+
+/**
+ * 读前 4 字节判断是不是 Mach-O（读不出、太短、不是普通文件一律当"不是"）。
+ *
+ * 只读 4 字节而不是整文件：`python3` 那份是 ~10 MB 的二进制。
+ * @param path - 载荷入口的绝对路径（符号链接按目标读，与 `codesign` 同）。
+ * @returns 是 Mach-O 时为 true。
+ */
+function isMachO(path: string): boolean {
+  let handle: number | undefined
+  try {
+    handle = openSync(path, 'r')
+    const head = Buffer.alloc(4)
+    return readSync(handle, head, 0, 4, 0) === 4 && MACH_O_MAGICS.includes(head.readUInt32BE(0))
+  } catch {
+    return false
+  } finally {
+    if (handle !== undefined) closeSync(handle)
+  }
+}
+
 /** 随包 agent 运行时清单里本判据要用的字段。 */
 interface BundledRuntimesManifestShape {
   readonly schema?: unknown
@@ -113,9 +159,10 @@ interface BundledRuntimesManifestShape {
  * 公证逐字排除 ad hoc 证书），也不保证它们真能执行（丢可执行位、被 Gatekeeper 拦下都不会
  * 让 `--deep` 变红）。这两类缺陷的表现都是"员工点一下创造模式就报 ENOENT / 被系统拒绝"。
  *
- * 判据三条，缺一不可：① 三个入口逐个 `codesign --verify --strict`；② 三个 shim **真跑
- * 一次**并逐字比对清单里的版本；③ 载荷清单必须在（与 afterPack 同口径：本构建声明了
- * 运行时就必须在）。
+ * 判据三条，缺一不可：① 三个入口里**是 Mach-O 的那些**逐个 `codesign --verify --strict`
+ * （脚本入口按 {@link isMachO} 排除 —— 见那里的注释：对带可执行位的脚本独立验签是假红）；
+ * ② 三个 shim **真跑一次**并逐字比对清单里的版本；③ 载荷清单必须在（与 afterPack 同口径：
+ * 本构建声明了运行时就必须在）。
  * @param appPath - 已挂载的 `.app` 路径。
  * @param run - 命令执行（非零退出即抛）。
  * @param capture - 取回输出的执行（版本判据读 stdout）。
@@ -144,12 +191,18 @@ export function assertBundledRuntimesSigned(
   if (entries.length !== 3) {
     throw new Error(`macOS release verification: ${manifestPath} declares ${String(entries.length)} runtime commands, expected 3`)
   }
+  const scriptEntries: string[] = []
   for (const [key, relative] of entries) {
     if (typeof relative !== 'string') throw new Error(`macOS release verification: ${key} has no command path`)
     const target = join(runtimeRoot, relative)
     if (!existsSync(target)) throw new Error(`macOS release verification: bundled runtime ${key} is missing at ${target}`)
-    // 逐个 Mach-O 严格验签（`codesign --verify` 会跟随 `bin/python3` 这类符号链接）。
-    run('codesign', ['--verify', '--strict', '--verbose=2', target])
+    // 逐个 Mach-O 严格验签（`codesign --verify` 会跟随 `bin/python3` 这类符号链接）；
+    // 脚本入口（`pnpm.mjs`）由 bundle 签名封存，对它单独验签是假红。
+    if (isMachO(target)) {
+      run('codesign', ['--verify', '--strict', '--verbose=2', target])
+    } else {
+      scriptEntries.push(key)
+    }
   }
   const versions = manifest.versions ?? {}
   const expectations: readonly [string, readonly string[], string][] = [
@@ -168,8 +221,10 @@ export function assertBundledRuntimesSigned(
     }
   }
   console.log(
-    `dsh-plugin-desktop: bundled agent runtimes signed and runnable (node ${String(versions.node)} / `
-    + `pnpm ${String(versions.pnpm)} / python ${String(versions.python)})`,
+    `dsh-plugin-desktop: bundled agent runtimes verified (mach-o signature checked: `
+    + `${entries.filter(([key]) => !scriptEntries.includes(key)).map(([key]) => key).join(', ') || 'none'}; `
+    + `script entry sealed by the bundle signature: ${scriptEntries.join(', ') || 'none'}; `
+    + `runnable: node ${String(versions.node)} / pnpm ${String(versions.pnpm)} / python ${String(versions.python)})`,
   )
 }
 

@@ -136,6 +136,14 @@ export function writeValidMacBundle(
 /** 夹具写入的随包运行时版本（形状与 `build/runtimes/manifest.json` 一致，具体取值无关紧要）。 */
 export const MAC_BUNDLE_RUNTIME_VERSIONS = { node: '24.21.0', pnpm: '11.7.0', python: '3.12.15' } as const
 
+/**
+ * 夹具里"是真 Mach-O 的入口"写的前 4 字节（64 位小端 `MH_MAGIC_64`）。
+ *
+ * macOS 判据按魔数分流：Mach-O 必须逐个验签，脚本入口（`pnpm.mjs`）由 bundle 签名封存。
+ * 写文本会让两条路径混成一条（要么脚本被送去验签=假红，要么 Mach-O 逃过验签=假绿）。
+ */
+export const MACH_O_FIXTURE_MAGIC = Buffer.from([0xcf, 0xfa, 0xed, 0xfe])
+
 /** 随包运行时入口的键（= 清单 `commands` 的键）。 */
 export type BundledRuntimeCommand = 'node' | 'pnpm' | 'python3'
 
@@ -153,6 +161,13 @@ export interface BundledRuntimesFixtureOptions {
   readonly omitEntry?: BundledRuntimeCommand
   /** 不写某个 `bin/*` shim（用于"shim 不在"用例）。 */
   readonly omitShim?: BundledRuntimeCommand
+  /**
+   * 某个入口写"脚本"而不是 Mach-O（缺省三个都是 Mach-O）。
+   *
+   * 真载荷里 `pnpm` 就是脚本（`pnpm/bin/pnpm.mjs`）—— 2026-10-08 的 tag 因为对它也做
+   * `codesign --verify` 而停下；这条覆盖项让"脚本入口不验签、但必须真跑"两侧都有用例。
+   */
+  readonly entryKinds?: Partial<Record<BundledRuntimeCommand, 'mach-o' | 'script'>>
 }
 
 /**
@@ -185,7 +200,12 @@ export function writeBundledRuntimesFixture(
     if (command === options.omitEntry) continue
     const target = join(root, relative)
     mkdirSync(dirname(target), { recursive: true })
-    writeFileSync(target, 'mach-o')
+    if (options.entryKinds?.[command as BundledRuntimeCommand] === 'script') {
+      writeFileSync(target, '#!/usr/bin/env node\n// 脚本入口（真载荷里 pnpm 就是这个形状）\n')
+      chmodSync(target, 0o755)
+    } else {
+      writeFileSync(target, MACH_O_FIXTURE_MAGIC)
+    }
   }
 
   for (const command of declared) {
