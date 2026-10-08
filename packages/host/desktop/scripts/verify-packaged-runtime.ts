@@ -21,7 +21,12 @@ import AdmZip from 'adm-zip'
 import { normalizeAsarEntry, toAsarEntryPath } from './asar-entry-path.ts'
 import { asarLayoutLogLine, assertMacBundleConsistency } from './mac-bundle-consistency.ts'
 import { packagedAppId } from './channel-build.ts'
-import { assertRuntimeBudget, readRuntimeManifest, runtimeTreeDigest } from './fetch-bundled-runtimes.mjs'
+import {
+  assertRuntimeBudget,
+  normalizeRuntimePlatform,
+  readRuntimeManifest,
+  runtimeTreeDigest,
+} from './fetch-bundled-runtimes.mjs'
 import type { RuntimeManifest, RuntimePin } from './fetch-bundled-runtimes.mjs'
 import {
   FORBIDDEN_MACOS_NATIVE_ENTRIES,
@@ -579,6 +584,25 @@ function runBundledRuntimeCommand(command: string, args: readonly string[]): str
 }
 
 /**
+ * 随包 node 自报的 `platform-arch` → 载荷目标键。
+ *
+ * **平台名必须归一**：node 在 Windows 上自报 `win32`，而载荷键（`runtimes.json` 的
+ * targets、清单 `target`）一律是 `win`。不归一的话 Windows 上这条判据恒定失败
+ * ——2026-10-08 CI 实测 `bundled node runs on "win32" but the payload claims "win-x64"`，
+ * Windows job 在 afterPack 处整条红掉（判据本身是对的，是我方两侧的键不同形）。
+ *
+ * 归档键的平台段从不含 `-`，所以只按**第一个** `-` 切分；形状意外的输入原样返回
+ * （交回调用方报错，而不是在这里猜）。
+ * @param reported - node 打印的 `platform-arch`（如 `win32-x64`）。
+ * @returns 载荷键（如 `win-x64`；`linux-x64` 原样）。
+ */
+export function normalizeProbedRuntimeTarget(reported: string): string {
+  const separator = reported.indexOf('-')
+  if (separator <= 0) return reported
+  return `${normalizeRuntimePlatform(reported.slice(0, separator))}-${reported.slice(separator + 1)}`
+}
+
+/**
  * 正例侧：**声明了随包 agent 运行时，产物里就必须有、而且真的能跑**（2026-10-08）。
  *
  * 与 `assertBundledSpeechModelPackaged` 同一姿势（`extraResources` 源目录缺失时
@@ -586,7 +610,8 @@ function runBundledRuntimeCommand(command: string, args: readonly string[]): str
  *   · **没有"本次构建不含该能力"这一档** —— 运行时是所有渠道的固定交付面（没有渠道开关），
  *     源树缺载荷只能说明"打包没走 `prepareChannelPackaging()`"，那是必须拦下的错误；
  *   · **能力判据**：三个 shim 各跑一次并逐字比对钉死版本，另外让 node 自报
- *     `process.platform-process.arch` 与清单 `target` 对齐（拿错平台的载荷当场现形）。
+ *     `process.platform-process.arch` 并按 {@link normalizeProbedRuntimeTarget} 归一到载荷键，
+ *     与清单 `target` 对齐（拿错平台的载荷当场现形）。
  * @param resourcesRoot - 产物的 `resources/` 目录（`app.asar` 的父目录）。
  * @param packageRoot - desktop 包根（`packages/host/desktop`）。
  * @param pin - 钉死清单（测试接缝；缺省读 `runtimes.json`，体积预算真源就在它里面）。
@@ -654,9 +679,11 @@ export function assertBundledRuntimesPackaged(
     throw new Error(`dsh-plugin-desktop: bundled node reports ${JSON.stringify(reportedNode)}, manifest pins v${nodeVersion}`)
   }
   const reportedTarget = runBundledRuntimeCommand(nodeShim, ['-p', 'process.platform + "-" + process.arch'])
-  if (reportedTarget !== packaged.target) {
+  const probedTarget = normalizeProbedRuntimeTarget(reportedTarget)
+  if (probedTarget !== packaged.target) {
     throw new Error(
-      `dsh-plugin-desktop: bundled node runs on ${JSON.stringify(reportedTarget)} but the payload claims `
+      `dsh-plugin-desktop: bundled node runs on ${JSON.stringify(reportedTarget)} `
+      + `(payload target key ${JSON.stringify(probedTarget)}) but the payload claims `
       + `${JSON.stringify(packaged.target)} — the payload was fetched for another platform`,
     )
   }

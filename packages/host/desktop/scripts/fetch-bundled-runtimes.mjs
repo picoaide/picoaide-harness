@@ -125,11 +125,25 @@ export function runtimeBudget(pin, target) {
 }
 
 /**
+ * Node 平台名 → 载荷键里的平台段。
+ *
+ * `process.platform` 在 Windows 上是 `win32`，而载荷键（`runtimes.json` 的 targets、
+ * 发布清单的资产键、artifact 名）一律用 `win`。**这一条规则必须处处一致**：
+ * 打包期（本脚本）与运行期（`src/bundled-runtimes.ts` 的 `bundledRuntimeTarget`）
+ * 各有一处实现，两侧由 `tests/bundled-runtimes.spec.ts` 的矩阵用例对拍 —— 不一致的
+ * 后果是 Windows 客户端的随包运行时被静默忽略（清单 target 对不上 ⇒ 当作没有运行时）。
+ * @param platform - Node 平台名。
+ * @returns 载荷键的平台段（`win32` → `win`，其余原样）。
+ */
+export function normalizeRuntimePlatform(platform) {
+  return platform === 'win32' ? 'win' : platform
+}
+
+/**
  * 目标平台键（未知目标 fail-loud：宁可不产出，也不产出跑不起来的载荷）。
  *
- * **Windows 的平台名要归一**：Node 的 `process.platform` 是 `win32`，而本仓的载荷键
- * （`runtimes.json`、发布清单的资产键、artifact 名）一律用 `win`。不归一的话 Windows
- * runner 上的默认目标算成 `win32-x64` ⇒ 声明表里没有 ⇒ 打包当场 fail-loud
+ * 平台段先过 {@link normalizeRuntimePlatform}：不归一的话 Windows runner 上的默认目标
+ * 算成 `win32-x64` ⇒ 声明表里没有 ⇒ 打包当场 fail-loud
  * （2026-10-08 CI 实测：`不支持的目标平台 win32-x64（runtimes.json 只声明了
  * linux-x64, darwin-arm64, win-x64）` —— Windows job 一分半即红，整条发布链卡在这里）。
  * @param platform - Node 平台名（缺省 `process.platform`）。
@@ -138,7 +152,7 @@ export function runtimeBudget(pin, target) {
  * @returns 载荷键，例如 `linux-x64` / `darwin-arm64` / `win-x64`。
  */
 export function resolveRuntimeTarget(platform = process.platform, arch = process.arch, pin = readRuntimePin()) {
-  const target = `${platform === 'win32' ? 'win' : platform}-${arch}`
+  const target = `${normalizeRuntimePlatform(platform)}-${arch}`
   if (!pin.targets.includes(target)) {
     throw new Error(`不支持的目标平台 ${target}（runtimes.json 只声明了 ${pin.targets.join(', ')}）`)
   }

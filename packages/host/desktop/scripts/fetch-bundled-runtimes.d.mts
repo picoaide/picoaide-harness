@@ -101,6 +101,14 @@ export function readRuntimePin(pinFile?: string): RuntimePin
 /** 宿主平台 + 架构 → 载荷目标键（未知目标抛错）。 */
 export function resolveRuntimeTarget(platform?: NodeJS.Platform, arch?: string, pin?: RuntimePin): string
 
+/**
+ * Node 平台名 → 载荷键的平台段（`win32` → `win`，其余原样）。
+ *
+ * 入参刻意收 `string`（不是 `NodeJS.Platform`）：afterPack 门禁把 node **自报**的字符串
+ * 按第一个 `-` 切开再归一，那一半在类型上只是普通字符串。
+ */
+export function normalizeRuntimePlatform(platform: string): string
+
 /** 校验一份制品：字节数 + sha256（+ 可选的 npm SRI）。 */
 export function verifyArtifact(path: string, artifact: RuntimeArtifact, integrity?: string): Promise<boolean>
 

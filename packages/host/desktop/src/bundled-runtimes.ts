@@ -82,9 +82,23 @@ export interface BundledRuntimesOptions {
   readonly readManifest?: (path: string) => unknown
 }
 
-/** 运行平台 + 架构 → 载荷目标键（与 `runtimes.json` 的 targets 同形）。 */
+/**
+ * 运行平台 + 架构 → 载荷目标键（与 `runtimes.json` 的 targets 同形）。
+ *
+ * **Windows 的平台名要归一**：`process.platform` 是 `win32`，而载荷键（`runtimes.json`
+ * 的 targets、发布清单的资产键、artifact 名）一律用 `win`。不归一的话运行时清单里的
+ * `win-x64` 与这里的 `win32-x64` 对不上 ⇒ {@link resolveBundledRuntimes} 当作"没有随包
+ * 运行时"返回 undefined —— Windows 客户端静默退回系统 PATH（2026-10-08 CI 实测：打包期
+ * 的 afterPack 门禁先在 `assertBundledRuntimesPackaged` 处把它打红）。
+ *
+ * 打包期那份实现在 `scripts/fetch-bundled-runtimes.mjs` 的 `normalizeRuntimePlatform`；
+ * 两侧由 `tests/bundled-runtimes.spec.ts` 的矩阵用例对拍（同一规则、两处实现，必须一致）。
+ * @param platform - Node 平台名。
+ * @param arch - 架构。
+ * @returns 载荷键，例如 `linux-x64` / `darwin-arm64` / `win-x64`。
+ */
 export function bundledRuntimeTarget(platform: NodeJS.Platform, arch: string): string {
-  return `${platform}-${arch}`
+  return `${platform === 'win32' ? 'win' : platform}-${arch}`
 }
 
 /** 读一条字符串字段（缺/空即 undefined，不抛）。 */

@@ -49,10 +49,12 @@ import {
   BUNDLED_RUNTIMES_PAYLOAD_DIR,
   assertBundledRuntimesPackaged,
   bundledRuntimesBuildDir,
+  normalizeProbedRuntimeTarget,
 } from '../scripts/verify-packaged-runtime.ts'
 import {
   assertRuntimeBudget,
   materializeBundledRuntimes,
+  normalizeRuntimePlatform,
   prunePackagerSkippedNames,
   readRuntimePin,
   resolveRuntimeTarget,
@@ -61,7 +63,9 @@ import {
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 const repoRoot = join(packageRoot, '..', '..', '..')
-const hostTarget = `${process.platform}-${process.arch}`
+// 宿主机的载荷目标键。**刻意不调用被测函数**（用它算期望值就等于没判据）：
+// 这里只把 `win32 → win` 这条键名规则**独立写一遍**（Windows 上才会走到）。
+const hostTarget = `${process.platform === 'win32' ? 'win' : process.platform}-${process.arch}`
 const versions = { node: '99.1.2', pnpm: '98.3.4', python: '97.5.6' }
 
 const temporaryDirs: string[] = []
@@ -246,6 +250,39 @@ describe('随包运行时的客户端解析与接线（src/bundled-runtimes.ts�
     ).toContain('desktopProfileContext(prepared, bundledRuntimes)')
     // 反向：不得把 packageManager 内联在 main.ts 里（那会让冒烟测的不是生产路径）。
     expect(source).not.toContain('packageManager:')
+  })
+})
+
+describe('平台名归一（`win32` → `win`）：三处实现必须同形（2026-10-08 CI 实测踩到）', () => {
+  it('打包期（fetch 脚本）与运行期（bundledRuntimeTarget）在完整矩阵上给出同一个键', () => {
+    // 载荷键在两处各有一份实现：`scripts/fetch-bundled-runtimes.mjs`（写清单 target）与
+    // `src/bundled-runtimes.ts`（读清单时算目标键）。两侧不同形不会报错，只会让
+    // Windows 客户端"看到清单却不是自己那份" ⇒ 静默退回系统 PATH。
+    for (const platform of ['win32', 'linux', 'darwin', 'freebsd'] as NodeJS.Platform[]) {
+      for (const arch of ['x64', 'arm64']) {
+        expect(bundledRuntimeTarget(platform, arch)).toBe(`${normalizeRuntimePlatform(platform)}-${arch}`)
+      }
+    }
+    expect(normalizeRuntimePlatform('win32')).toBe('win')
+    expect(normalizeRuntimePlatform('linux')).toBe('linux')
+    expect(bundledRuntimeTarget('win32', 'x64')).toBe('win-x64')
+  })
+
+  it('Windows runner 上 resolveRuntimeTarget 解析出 win-x64（不归一 ⇒ 打包当场 fail-loud）', () => {
+    const pin = readRuntimePin()
+    expect(pin.targets).toContain('win-x64')
+    expect(resolveRuntimeTarget('win32', 'x64', pin)).toBe('win-x64')
+    // 负向：清单里没有的目标仍须 fail-loud（归一不得把未知目标一起放过）。
+    expect(() => resolveRuntimeTarget('win32', 'ia32', pin)).toThrow(/不支持的目标平台 win-ia32/u)
+  })
+
+  it('afterPack 的 node 自报值按同一规则归一再比清单（否则 Windows 恒红）', () => {
+    expect(normalizeProbedRuntimeTarget('win32-x64')).toBe('win-x64')
+    expect(normalizeProbedRuntimeTarget('linux-x64')).toBe('linux-x64')
+    expect(normalizeProbedRuntimeTarget('darwin-arm64')).toBe('darwin-arm64')
+    // 形状意外的输出原样返回（交回调用方报错，不在这里猜）。
+    expect(normalizeProbedRuntimeTarget('weird')).toBe('weird')
+    expect(normalizeProbedRuntimeTarget('')).toBe('')
   })
 })
 
