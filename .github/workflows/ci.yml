@@ -1271,6 +1271,16 @@ jobs:
       # 随包 agent 运行时的制品缓存落点（fetch-bundled-runtimes.mjs 读它；
       # 与上面 "Cache bundled agent runtimes" 步骤的 path 必须一致）。
       PICOAI_RUNTIME_CACHE: ${{ runner.temp }}/picoaide-runtimes
+      # Windows 安装器的 7z 压缩级别（2026-10-08 定案）。app-builder-lib 的
+      # `compute7zCompressArgs` 读这个变量：非空即以 `-mx=<n>` 覆盖配置里的级别，
+      # 并跳过 `-mfb=258 -mpass=15`（那两条是 maximum 档额外耗时的来源）。
+      # 为什么降级：随包运行时之后 Windows 安装包涨到 345 MiB，-mx=9 让单个渠道的
+      # 打包时间明显变长（v2.8.2 正式 tag 实测渠道 1/2 各约 22 分钟，4 渠道顺序打包
+      # 撞上当时的 60 分钟预算而被杀）。用户 2026-10-08 明确接受"安装包变大换速度"：
+      # 3 级比 9 级约快 70%，Setup 由 345 MiB 涨到约 415–425 MiB（约 +23%）。
+      # **只设在这个 job**：同一个变量也被 dmg-builder 读（它会把 DMG 格式切成 UDZO），
+      # 设在 workflow 级会连 macOS 的交付件一起改。
+      ELECTRON_BUILDER_COMPRESSION_LEVEL: '3'
     steps:
       - uses: actions/checkout@v7
         with:
