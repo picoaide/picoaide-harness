@@ -38,6 +38,14 @@ packages/host/desktop/build/channel-electron-builder.cjs
 # 它是**第三方权重而不是本仓源码** —— 公开仓里 `git add -A` 会把 230 MiB 二进制连同
 # 再分发许可问题一起提交。产物侧经 extraResources 进 resources/speech-model/。
 packages/host/desktop/build/speech-model/
+# 随包 agent 运行时载荷(2026-10-08):由 scripts/fetch-bundled-runtimes.mjs 按
+# runtimes.json 钉死的版本/字节/sha256 拉取 node + pnpm + python 三套官方制品
+# (压缩制品约 90 MiB，展开约 240 MiB，3800+ 文件)。它是**第三方二进制而不是本仓
+# 源码** —— 公开仓里 `git add -A` 会把几百 MiB 二进制连同再分发许可问题一起提交。
+# 同目录的 runtimes-cache/ 是同一次下载的缓存(同样不入库)。
+# 产物侧经 build.extraResources 进 resources/runtimes/(不进 asar:裸二进制要可执行)。
+packages/host/desktop/build/runtimes/
+packages/host/desktop/build/runtimes-cache/
 # 第三方厂商 CLI 二进制(旧 prefetch-cli.mjs 的预取产物,每个约 10 MB × 8 个):
 # 预取脚本已在 90463530be 移除、`build/cli` 不再生成,但历史工作树里仍会残留
 # 这 96 MB —— 公开仓里 `git add -A` 会把它们连同再分发许可风险一起提交。
