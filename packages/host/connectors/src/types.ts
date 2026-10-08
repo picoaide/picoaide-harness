@@ -9,8 +9,18 @@
  */
 import type { ConnectorErrorCode } from './connector-error.ts'
 
-/** Authentication modes (决策 2026-08-25:CLI 已移除——CLI 即 skill)。 */
-type ConnectorAuthMode = 'oauth' | 'device' | 'token' | 'server-side'
+/**
+ * Authentication modes (决策 2026-08-25:CLI 已移除——CLI 即 skill)。
+ *
+ * `auto` (2026-10-08) is the mode a **standard MCP configuration** lands in
+ * (`{"serverName": {"type": "streamableHttp", "url": "…"}}`): the definition
+ * names no authorization because a spec-compliant MCP server describes its own
+ * in the 401 challenge. The runtime decides at connect time — declared
+ * credential fields → token form, otherwise probe the endpoint (2xx = public,
+ * 401 = RFC 9728 → RFC 8414 → DCR → PKCE), no endpoint → nothing to authorize.
+ * See `policy.ts` `resolveAuthMode`.
+ */
+type ConnectorAuthMode = 'oauth' | 'device' | 'token' | 'server-side' | 'auto'
 
 /** OAuth authorization-code flow (supports RFC 8414 discovery + RFC 7591 dynamic registration + PKCE). */
 export interface OAuthAuthConfig {

@@ -16,6 +16,7 @@ import { REFRESH_LEAD_MS, REFRESH_SWEEP_INTERVAL_MS } from './token-lifetime.ts'
 import { userScopePath, unscopedConnectorPath } from './user-scope.ts'
 import { ConnectorApprovalStore } from './approvals.ts'
 import {
+  autoOAuthConfig,
   CONNECTOR_AUTH_MODES,
   CONNECTOR_ID_PATTERN,
   credentialFieldProblem,
@@ -23,8 +24,10 @@ import {
   isDeniedEnvKey,
   mcpDefinitionProblem,
   mcpServerProblem,
+  resolveAuthMode,
   sanitizeMcpEnv,
   stdioApprovalFingerprint,
+  streamableHttpEndpoint,
   streamableHttpUrl,
 } from './policy.ts'
 import {
@@ -504,14 +507,23 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
    * shape without touching the engine.
    */
   const oauthTargetOf = (def: ConnectorDef): OAuthTarget | null => {
-    if (def.authMode !== 'oauth') return null
+    // `auto` resolves to the flow its content implies; only a definition that
+    // ends up running OAuth has a refresh target (`none`/`token`/`device` do
+    // not — a token connector's `${FIELD}` headers are re-rendered from the
+    // store on every registration, there is nothing to refresh).
+    if (resolveAuthMode(def) !== 'oauth') return null
     // The MCP endpoint doubles as the RFC 8707 resource the SDK validates
     // against; prefer a streamable-http URL when the definition has one.
     // Prefer the streamable-http endpoint; a stdio-only connector still has an
     // MCP identity, and its bearer token belongs to the same resource.
-    const resourceUrl = (def.mcp.find(server => server.transport === 'streamable-http' && typeof server.url === 'string')
-      ?? def.mcp.find(server => typeof server.url === 'string'))?.url
-    const auth = def.auth as {
+    const resourceUrl = streamableHttpEndpoint(def)
+      ?? def.mcp.find(server => typeof server.url === 'string')?.url
+    // An `auto` connector that declares no endpoints authorizes against the MCP
+    // endpoint itself — the same default `runAuth` uses, resolved through the
+    // one implementation (`autoOAuthConfig`) so the live SDK target, the saved
+    // discovery state and our own refresh all name the same authorization
+    // server. `resourceUrl` stays the resource indicator either way.
+    const auth = (def.authMode === 'auto' ? autoOAuthConfig(def) : def.auth) as {
       discoveryUrl?: string
       tokenUrl?: string
       authorizeUrl?: string
@@ -2888,9 +2900,9 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   ): boolean => {
     if (credential === null || credential === undefined) return false
     if (missingDeclaredFields(def, credential).length > 0) return false
-    // Widened on purpose: a definition handed straight to `apply()` (a profile
-    // row, a test fixture) may carry no mode at all — see the `undefined` arm.
-    const mode: string | undefined = def.authMode
+    // The flow the definition actually runs (`auto` resolved from its content —
+    // a standard MCP configuration declares no mode of its own).
+    const mode = resolveAuthMode(def)
     if (mode === 'token') return true
     // CN-3 (audit 2026-09-23): `device` used to pass through unconditionally, so
     // a device flow that produced nothing but `{updatedAt}` registered its MCP
@@ -2903,10 +2915,11 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     // (a local MCP server that needs no credential) must stay usable exactly as
     // it was before CN-3. See `declaresDeviceFlow`.
     if (mode === 'device') return declaresDeviceFlow(def) ? hasDeviceAuthorization(credential) : true
-    // A definition that declares no authorization mode at all is the
-    // credential-less shape as well (V3 review): nothing was declared, so there
-    // is nothing to authorize and nothing to gate.
-    if (mode === undefined) return true
+    // A definition with nothing to authorize (no mode declared, or an `auto`
+    // connector with neither credentials nor a reachable endpoint) is the
+    // credential-less shape as well: nothing was declared, so there is nothing
+    // to gate.
+    if (mode === 'none') return true
     // A public MCP endpoint answers without an authorization challenge, so the
     // discovery result is the whole credential: requiring an accessToken here
     // dropped its tools on every restart (2026-09-15 audit, BUG-06).
@@ -2928,8 +2941,8 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
    * @returns true when the row is expected to hold a credential.
    */
   const requiresCredential = (def: ConnectorDef): boolean => {
-    const mode: string | undefined = def.authMode
-    if (mode === undefined) return false
+    const mode = resolveAuthMode(def)
+    if (mode === 'none') return false
     if (mode === 'device' && !declaresDeviceFlow(def)) return false
     return true
   }
@@ -2992,7 +3005,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // fields are present they register directly (settings above are only a
       // pre-connect gate). This also guarantees the token form is shown when a
       // required field is missing, even when settings and tokenFields coexist.
-      if (def.authMode === 'token') {
+      // `auto` counts here when it declares credential fields — that is the
+      // static-key MCP shape (a `${FIELD}` header the user fills in), and it
+      // must not be sent through an authorization flow it has no endpoint for.
+      if (resolveAuthMode(def) === 'token') {
         if (missingDeclaredFields(def, existing).length > 0) {
           if (!intentLive(id, intent)) return
           requestDeclaredFields(id, def)
@@ -3154,7 +3170,9 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // connector: continue the REAL authorization flow first. Registering MCP
       // here would mark the row connected without ever starting OAuth; asking
       // for tokenFields before OAuth would dead-end the authorization too.
-      if (kind === 'settings' && def.authMode !== 'token') {
+      // The comparison is against the RESOLVED flow, so an `auto` connector
+      // that declares credential fields follows the token path here too.
+      if (kind === 'settings' && resolveAuthMode(def) !== 'token') {
         await startConnect(id)
         return
       }
@@ -3287,6 +3305,11 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         }
         // Refresh OAuth tokens before restoring (official SDK refresh flow),
         // then register the MCP servers.
+        // The flow this definition actually runs (`auto` resolved once here):
+        // the branch below is about "who can fill the missing fields", and for
+        // an `auto` connector that is decided by the same rule as the connect
+        // path — never re-derived per site.
+        const restoreFlow = resolveAuthMode(def)
         const effective = credential.refreshToken === undefined
           || isDeadGrant(scope, def.id, credential)
           ? credential
@@ -3327,7 +3350,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
             continue
           }
           setState(def.id, { status: 'connected', everConnected: true, error: undefined, errorCode: undefined })
-        } else if (def.authMode === 'token' || def.authMode === 'device') {
+        } else if (restoreFlow === 'token' || restoreFlow === 'device') {
           // Fields-only connector whose required fields were removed/truncated:
           // ask for them again instead of silently staying disconnected.
           requestDeclaredFields(def.id, def)

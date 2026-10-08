@@ -24,7 +24,7 @@
  * @module
  */
 import { createHash } from 'node:crypto'
-import type { ConnectorDef, ConnectorMcp } from './types.ts'
+import type { ConnectorDef, ConnectorMcp, OAuthAuthConfig } from './types.ts'
 import { assertOutboundUrlAllowed, isOutboundUrlAllowed } from './outbound.ts'
 import { DEFAULT_HOST_LOCALE, hostT, type HostLocale } from './host-copy.ts'
 
@@ -35,7 +35,109 @@ const SERVER_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/
 export const CONNECTOR_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/
 
 /** Auth modes the runtime understands (mirrors `ConnectorAuthMode`). */
-export const CONNECTOR_AUTH_MODES: readonly string[] = ['oauth', 'device', 'token', 'server-side']
+export const CONNECTOR_AUTH_MODES: readonly string[] = ['oauth', 'device', 'token', 'server-side', 'auto']
+
+/** Auth modes that name a flow directly (everything except `auto`). */
+const DECLARED_AUTH_MODES: readonly string[] = ['oauth', 'device', 'token', 'server-side']
+
+/**
+ * The flow a connector actually runs.
+ *
+ * `auto` (2026-10-08) is not a flow: it is the mode a **standard MCP
+ * configuration** lands in, because a spec-compliant MCP server describes its
+ * own authorization in the 401 challenge (`WWW-Authenticate: resource_metadata`
+ * → RFC 9728 → RFC 8414 → dynamic registration → PKCE). Deciding it in one
+ * place keeps every consumer (connect, restore, refresh target, credential
+ * usability) on the same answer instead of each re-deriving it.
+ *
+ * `none` means "nothing to authorize": a credential-less MCP server (a local
+ * stdio server, or a definition that declares neither credentials nor a
+ * reachable endpoint). It is the historical shape of a `device` connector
+ * without a declared device flow, and of a definition with no mode at all.
+ */
+export type ResolvedAuthMode = 'oauth' | 'device' | 'token' | 'server-side' | 'none'
+
+/** The definition facts {@link resolveAuthMode} reads (all optional on purpose). */
+export interface AuthModeSource {
+  authMode?: string | undefined
+  auth?: unknown
+  tokenFields?: readonly unknown[] | undefined
+  mcp?: readonly ConnectorMcp[] | undefined
+}
+
+/**
+ * The first streamable-http endpoint of a definition, if it has one.
+ * @param def - definition to inspect.
+ * @returns the endpoint URL, or undefined.
+ */
+export function streamableHttpEndpoint(def: { mcp?: readonly ConnectorMcp[] | undefined }): string | undefined {
+  const server = (def.mcp ?? []).find(
+    item => item?.transport === 'streamable-http' && typeof item.url === 'string' && item.url !== '',
+  )
+  return server?.url
+}
+
+/**
+ * The OAuth configuration an `auto` connector authorizes with, or `undefined`
+ * when it cannot be authorized at all.
+ *
+ * Precedence — an explicit declaration ALWAYS wins over the endpoint default,
+ * so an `auto` connector that carries static endpoints keeps behaving exactly
+ * like the pre-2026-10-08 `oauth` shape (discovery is never bolted onto a
+ * definition that named its own authorization server):
+ *
+ * 1. `auth.discoveryUrl` → discovery, as declared;
+ * 2. `auth.authorizeUrl` + `auth.tokenUrl` → static endpoints, no discovery;
+ * 3. otherwise the MCP endpoint itself becomes the discovery URL — the
+ *    "configuration is just a URL" case: probe, 2xx = public, 401 = authorize.
+ *
+ * The synthesized object fills the fields the static shape requires with empty
+ * strings: with discovery in play `runOAuth` resolves every endpoint (and
+ * `discoverMcpOAuth` throws a classified `auth-required` when it cannot), so an
+ * empty `authorizeUrl`/`tokenUrl` is never silently requested.
+ * @param def - definition declaring `authMode: 'auto'`.
+ * @returns the OAuth config to run with, or undefined for the credential-less shape.
+ */
+export function autoOAuthConfig(def: AuthModeSource): OAuthAuthConfig | undefined {
+  const declared = def.auth as Partial<OAuthAuthConfig> | undefined
+  if (declared !== undefined) {
+    if (typeof declared.discoveryUrl === 'string' && declared.discoveryUrl.trim() !== '') {
+      return declared as OAuthAuthConfig
+    }
+    const authorizesStatically = typeof declared.authorizeUrl === 'string' && declared.authorizeUrl.trim() !== ''
+      && typeof declared.tokenUrl === 'string' && declared.tokenUrl.trim() !== ''
+    if (authorizesStatically) return declared as OAuthAuthConfig
+  }
+  const endpoint = streamableHttpEndpoint(def)
+  if (endpoint === undefined) return undefined
+  return {
+    authorizeUrl: '',
+    tokenUrl: '',
+    clientId: '',
+    redirectUri: '',
+    pkce: true,
+    publicClient: true,
+    discoveryUrl: endpoint,
+  }
+}
+
+/**
+ * Resolve the flow a definition runs.
+ * @param def - connector definition (server-issued or locally assembled).
+ * @returns the flow to run; `none` when there is nothing to authorize.
+ */
+export function resolveAuthMode(def: AuthModeSource): ResolvedAuthMode {
+  const declared: string | undefined = def.authMode
+  if (declared === undefined) return 'none'
+  if (declared !== 'auto') {
+    return DECLARED_AUTH_MODES.includes(declared) ? declared as ResolvedAuthMode : 'none'
+  }
+  // `auto`: a declared credential form means the user supplies the secret
+  // (the `tokenFields` + `${FIELD}` header shape); otherwise the endpoint
+  // decides between public and standard MCP OAuth.
+  if ((def.tokenFields?.length ?? 0) > 0) return 'token'
+  return autoOAuthConfig(def) === undefined ? 'none' : 'oauth'
+}
 
 /**
  * Environment keys a connector definition may never set. They are either

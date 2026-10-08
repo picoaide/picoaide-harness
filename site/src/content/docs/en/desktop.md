@@ -84,8 +84,22 @@ Connectors plug external systems into the Agent over **MCP (Model Context Protoc
 
 | Connector | Description |
 |---|---|
-| **SalesEasy NeoCRM** | Official streamable-HTTP MCP (`mcp.xiaoshouyi.com`), RFC 8414 OAuth (authorization code + PKCE + dynamic client registration); query customers/leads/opportunities/contacts, execute XOQL and metadata operations |
+| **SalesEasy NeoCRM** | Official streamable-HTTP MCP (`mcp.xiaoshouyi.com`); authorization is described by the endpoint itself (RFC 9728 / RFC 8414 discovery + dynamic client registration + PKCE); query customers/leads/opportunities/contacts, execute XOQL and metadata operations |
 | **Remote MCP example** | A generic remote MCP connector: OAuth 2.1 + PKCE + authorization-server metadata discovery (RFC 9728 / RFC 8414) + streamable-HTTP; the endpoint and fields are filled in by an administrator for the actual service (`mcp.example.com` is a placeholder) |
+
+### Add an MCP connector (generic)
+
+The **Import from JSON** action on the admin **Connectors** page accepts the standard configuration a vendor documents — a transport and an endpoint are enough:
+
+```json
+{ "mcpServers": { "neo-crm": { "type": "streamableHttp", "url": "https://mcp.example.com/mcp" } } }
+```
+
+- `type` accepts `streamableHttp` / `http` / `stdio` (omitted: inferred from `url` or `command`); `stdio` uses `command` / `args` / `env`;
+- The auth mode defaults to **auto**: at connect time the endpoint is probed — 2xx means a public endpoint; a 401 follows the `WWW-Authenticate` declaration through RFC 9728 → RFC 8414 discovery + dynamic client registration + a PKCE loopback callback;
+  a declared credential form (`tokenFields` plus `${field}` in a request header) switches to that form instead; no endpoint and no form means no credential at all;
+- Unregistered keys are an error rather than silently dropped (a missing letter is never ignored), and `type: "sse"` is explicitly unsupported;
+- A local `stdio` MCP still requires **local confirmation** on first run (command, arguments and environment variables disclosed one by one), and process-bootstrap variables such as `PATH`/`NODE_OPTIONS` are never injected.
 
 - Authorization uses **OAuth authorization code + PKCE** (`offline_access` for a refresh token), with state validation and a 60s timeout against CSRF;
 - Credentials are **encrypted and stored locally** under the user scope path (`0600/0700`, atomic write, anti-symlink); after a successful connection the tool **registers the MCP dynamically** via `ctx.plugin`, so the model can call its tools;

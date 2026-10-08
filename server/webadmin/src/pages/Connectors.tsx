@@ -15,6 +15,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Plus, RefreshCw, Trash2, Pencil, Plug, Copy, ClipboardPaste, Wand2 } from 'lucide-react'
 import { useFlash } from '../lib/use-flash'
 import { uid as utilsUid } from '../lib/utils'
+import { standardMcpServersToDefinition } from './connectors-mcp-servers'
 
 /**
  * 连接器目录管理页(图形化)。
@@ -39,7 +40,7 @@ interface ConnectorRow {
   id: string
   name: string
   description: string
-  auth_mode: 'oauth' | 'device' | 'token' | 'server-side'
+  auth_mode: 'oauth' | 'device' | 'token' | 'server-side' | 'auto'
   definition: string
   enabled: boolean
   updated_at: string
@@ -49,6 +50,7 @@ interface ConnectorRow {
 type AuthMode = ConnectorRow['auth_mode']
 
 const AUTH_META: Record<AuthMode, { label: string; variant: 'secondary' | 'outline' | 'success' | 'destructive' }> = {
+  auto: { label: '自动', variant: 'outline' },
   oauth: { label: 'OAuth', variant: 'outline' },
   device: { label: 'Device', variant: 'secondary' },
   token: { label: 'Token', variant: 'success' },
@@ -134,7 +136,9 @@ function emptyForm(): ConnectorForm {
     id: '',
     name: '',
     description: '',
-    authMode: 'token',
+    // `auto` 是缺省：管理员多数时候只需要一个 MCP 端点 URL（标准 mcpServers
+    // 配置里也只有它），认证交给端点自述。需要固定端点或凭据表单时再切模式。
+    authMode: 'auto',
     discoveryUrl: '',
     authorizeUrl: '',
     tokenUrl: '',
@@ -172,11 +176,15 @@ const TEMPLATES: { label: string; name: string; description: string; authMode: A
     json: '{"tokenFields":[{"key":"GLITCHTIP_BASE_URL","label":"服务地址(必填,如自部署地址或 app.glitchtip.com)","type":"text","required":true},{"key":"GLITCHTIP_TOKEN","label":"API Token(Auth Tokens 页创建,需 org:read / project:read / event:read)","type":"password","required":true},{"key":"GLITCHTIP_ORGANIZATION","label":"组织 slug(如 picoaide)","type":"text","required":true}],"examples":["查询当前未解决的错误 issue","查看最近一次异常的堆栈详情"],"mcp":[{"serverName":"glitchtip","transport":"stdio","command":"npx","args":["-y","glitchtip-mcp"],"env":{}}]}',
   },
   {
-    label: '销售易(远程 MCP + OAuth 注册)',
+    label: '销售易(标准 MCP 配置)',
     name: '销售易',
     description: '销售易 NeoCRM 官方 MCP:查询客户、线索、商机、联系人。',
-    authMode: 'oauth',
-    json: '{"auth":{"authorizeUrl":"https://mcp.xiaoshouyi.com/oauth/authorize","tokenUrl":"https://mcp.xiaoshouyi.com/oauth/token","registrationEndpoint":"https://mcp.xiaoshouyi.com/oauth/register","clientId":"","redirectUri":"","scopes":"offline_access","pkce":true,"publicClient":true},"examples":["查询最近赢单的 10 个商机","统计各行业客户数量"],"mcp":[{"serverName":"neo-crm","transport":"streamable-http","url":"https://mcp.xiaoshouyi.com/mcp"}]}',
+    authMode: 'auto',
+    // 厂商文档给的就是这一份标准配置（只有 type 与 url）：认证全自动 —— 端点回
+    // 401 + resource_metadata，客户端按 RFC 9728 → RFC 8414 发现授权服务器并动态
+    // 注册，再走 PKCE 回环回调。标准形状由「从 JSON 导入」翻成定义（唯一实现在
+    // connectors-mcp-servers.ts）。
+    json: '{"mcpServers":{"neo-crm":{"type":"streamableHttp","url":"https://mcp.xiaoshouyi.com/mcp"}}}',
   },
 ]
 
@@ -186,7 +194,10 @@ const TEMPLATES: { label: string; name: string; description: string; authMode: A
  *  服务端 UpdateConnector 是整列替换,表单没建模 ≠ 可以丢(审计 R7 branding-2)。 */
 function buildDefinition(form: ConnectorForm): string {
   const def: Record<string, unknown> = { authMode: form.authMode, ...form.raw }
-  if (form.authMode === 'oauth') {
+  if (form.authMode === 'oauth' || form.authMode === 'auto') {
+    // `auto` 与 `oauth` 共用同一组输入：**全部留空**就是"按端点自动发现 + 动态
+    // 注册"（标准 MCP 配置的形状），填了则用于固定端点。因此空值一律不写进定义，
+    // 免得留下一串空字符串让人以为配置过了。
     const a: Record<string, unknown> = { ...form.rawAuth, pkce: form.pkce, publicClient: form.publicClient }
     if (form.discoveryUrl.trim()) a.discoveryUrl = form.discoveryUrl.trim()
     if (form.authorizeUrl.trim()) a.authorizeUrl = form.authorizeUrl.trim()
@@ -196,6 +207,18 @@ function buildDefinition(form: ConnectorForm): string {
     if (form.scopes.trim()) a.scopes = form.scopes.trim()
     if (form.redirectUri.trim()) a.redirectUri = form.redirectUri.trim()
     def.auth = a
+    // `auto` + 凭据表单 = 静态密钥型 MCP（headers 里的 ${FIELD}）：表单字段要留下。
+    if (form.authMode === 'auto') {
+      const fields = form.tokenFields
+        .filter((f) => f.key.trim() !== '')
+        .map((f) => {
+          const o: Record<string, unknown> = { key: f.key.trim(), label: f.label.trim(), type: f.type }
+          if (f.required) o.required = true
+          if (f.defaultValue.trim() !== '') o.defaultValue = f.defaultValue.trim()
+          return o
+        })
+      if (fields.length > 0) def.tokenFields = fields
+    }
   } else if (form.authMode === 'device') {
     const a: Record<string, unknown> = { ...form.rawAuth }
     if (form.verificationUrl.trim()) a.verificationUrl = form.verificationUrl.trim()
@@ -259,8 +282,14 @@ function parseDefinition(def: string, fallbackMode: AuthMode): ConnectorForm {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('定义必须是 JSON 对象')
   let authMode = (raw.authMode as AuthMode) || fallbackMode || ''
   if (!authMode) {
+    // 与服务端归一化（connector_mcp_servers.go）同一顺序：声明了凭据表单 → token；
+    // 声明了 auth 配置 → oauth；只有远程 MCP 端点 → auto（该鉴权鉴权）；其余按
+    // device 保守处理（历史行为）。
+    const hasRemote = Array.isArray(raw.mcp)
+      && raw.mcp.some((m: any) => m?.transport === 'streamable-http' && typeof m?.url === 'string' && m.url !== '')
     if (Array.isArray(raw.tokenFields) && raw.tokenFields.length > 0) authMode = 'token'
     else if (raw.auth) authMode = 'oauth'
+    else if (hasRemote) authMode = 'auto'
     else authMode = 'device'
   }
   const oauth = raw.auth && typeof raw.auth === 'object' ? raw.auth : {}
@@ -293,7 +322,8 @@ function parseDefinition(def: string, fallbackMode: AuthMode): ConnectorForm {
     if (!MODELED_TOP_KEYS.has(k)) rawTop[k] = v
   }
   const rawAuth: Record<string, unknown> = {}
-  const authEditedByForm = authMode === 'oauth' || authMode === 'device'
+  // `auto` 与 oauth 共用同一组表单字段(可留空),所以它也算"表单接管 auth"。
+  const authEditedByForm = authMode === 'oauth' || authMode === 'device' || authMode === 'auto'
   for (const [k, v] of Object.entries(oauth as Record<string, unknown>)) {
     // oauth/device 模式下 auth 由表单接管(只透传它没建模的子键);这两种模式
     // 之外表单根本不编辑 auth,整份原样保留 —— 否则"模式与 auth 同时存在"的
@@ -331,6 +361,7 @@ function validateForm(form: ConnectorForm): string {
   if (form.mcp.some((m) => m.transport === 'streamable-http' && m.url.trim() === '')) return 'streamable-http 传输的 MCP 必须填写端点 URL'
   if (form.mcp.some((m) => m.transport === 'stdio' && m.command.trim() === '')) return 'stdio 传输的 MCP 必须填写执行命令 command'
   if (form.authMode === 'oauth' && !form.discoveryUrl.trim() && (!form.authorizeUrl.trim() || !form.tokenUrl.trim())) return 'OAuth 未填写 MCP OAuth 发现地址时,授权端点与 Token 端点必填'
+  // `auto` 不设必填:留空即"按端点自动发现并动态注册",填了则用它固定端点。
   if (form.authMode === 'device' && form.verificationUrl.trim() === '') return 'Device 模式必须填写用户授权页 URL(verificationUrl)'
   if (form.authMode === 'token' && form.tokenFields.filter((f) => f.key.trim() !== '').length === 0) return 'Token 模式至少配置一个表单字段'
   return ''
@@ -422,9 +453,21 @@ export default function Connectors() {
 
   const set = (patch: Partial<ConnectorForm>) => setForm((prev) => ({ ...prev, ...patch }))
 
+  /**
+   * 一份粘贴进来的 JSON 可能是两种形状：厂商文档给的标准 MCP 配置
+   * （`{"mcpServers": {...}}` / 裸 `{"name": {...}}`），或我们自己的规范定义。
+   * 前者先翻成规范定义（唯一实现 connectors-mcp-servers.ts，与服务端落库口径
+   * 一致），再走同一个 parseDefinition —— 不给导入框开第二条解析路径。
+   */
+  const definitionTextOf = (text: string): string => {
+    const parsed: unknown = JSON.parse(text)
+    const standard = standardMcpServersToDefinition(parsed)
+    return standard === null ? text : JSON.stringify(standard)
+  }
+
   const applyImport = () => {
     try {
-      const f = parseDefinition(importText, form.authMode)
+      const f = parseDefinition(definitionTextOf(importText), form.authMode)
       setForm({ ...f, id: form.id, name: form.name, description: form.description })
       setImportText('')
       setShowImport(false)
@@ -436,8 +479,8 @@ export default function Connectors() {
 
   const applyTemplate = (t: (typeof TEMPLATES)[number]) => {
     try {
-      const f = parseDefinition(t.json, t.authMode)
-      setForm({ ...f, id: form.id, name: t.name, description: t.description, authMode: t.authMode })
+      const f = parseDefinition(definitionTextOf(t.json), t.authMode)
+      setForm({ ...f, id: form.id, name: t.name, description: t.description, authMode: f.authMode })
       setFormError('')
     } catch {
       setFormError('示例模板加载失败')
@@ -642,6 +685,7 @@ export default function Connectors() {
             <Select value={form.authMode} onValueChange={(v) => set({ authMode: v as AuthMode })}>
               <SelectTrigger id="conn-auth"><SelectValue /></SelectTrigger>
               <SelectContent>
+                <SelectItem value="auto">自动(按 MCP 端点鉴权)</SelectItem>
                 <SelectItem value="oauth">OAuth(授权码+PKCE)</SelectItem>
                 <SelectItem value="device">Device(设备码)</SelectItem>
                 <SelectItem value="token">Token(表单)</SelectItem>
@@ -649,14 +693,24 @@ export default function Connectors() {
               </SelectContent>
             </Select>
             <p className="text-xs text-muted-foreground">
-              服务端模式由企业网关注入 token,无需在表单填写任何认证字段;仅需在下方配置 MCP 服务器。
+              「自动」= 连接时按端点自述决定:探测 2xx 即公开端点、401 走 MCP 授权规范
+              (发现 + 动态注册 + PKCE)、声明了凭据表单则走表单、既无端点又无表单即免凭据。
+              服务端模式由企业网关注入 token,无需在表单填写任何认证字段;两种模式都只需在下方配置 MCP 服务器。
             </p>
           </div>
 
           {/* 认证配置 */}
-          {form.authMode === 'oauth' && (
+          {(form.authMode === 'oauth' || form.authMode === 'auto') && (
             <div className="space-y-3 rounded-md border p-3">
-              <h3 className="text-sm font-semibold">OAuth 认证配置</h3>
+              <h3 className="text-sm font-semibold">
+                {form.authMode === 'auto' ? 'OAuth 端点(可留空)' : 'OAuth 认证配置'}
+              </h3>
+              {form.authMode === 'auto' && (
+                <p className="text-xs text-muted-foreground">
+                  留空即完全按 MCP 端点自述工作(发现地址默认取上方 MCP 端点的 URL)。
+                  只有在授权服务器不能自动发现、或服务方要求预注册客户端时才需要填写。
+                </p>
+              )}
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="space-y-1 sm:col-span-2">
                   <Label htmlFor="conn-oauth-discovery">MCP OAuth 发现地址(可选,推荐)</Label>
@@ -732,9 +786,20 @@ export default function Connectors() {
             </div>
           )}
 
-          {form.authMode === 'token' && (
+          {(form.authMode === 'token' || form.authMode === 'auto') && (
             <div className="space-y-3 rounded-md border p-3">
-              <h3 className="text-sm font-semibold">Token 表单字段(连接时提示用户填写)</h3>
+              <h3 className="text-sm font-semibold">
+                {form.authMode === 'auto'
+                  ? 'Token 表单字段(可选:填了就改走凭据表单)'
+                  : 'Token 表单字段(连接时提示用户填写)'}
+              </h3>
+              {form.authMode === 'auto' && (
+                <p className="text-xs text-muted-foreground">
+                  只给「不支持标准 OAuth、只认一个静态密钥」的 MCP 用:在这里声明字段名,
+                  再在上面 MCP 服务器的请求头里用 <code>{'${字段名}'}</code> 引用它
+                  (如 <code>Authorization: Bearer {'${API_KEY}'}</code>)。留空则完全按端点自述鉴权。
+                </p>
+              )}
               <div className="space-y-2">
                 <div className="grid grid-cols-12 items-center gap-2 text-xs font-medium text-muted-foreground">
                   <span className="col-span-2">字段 key</span>
@@ -923,12 +988,12 @@ export default function Connectors() {
                     ))}
                   </div>
                 ) : (
-                  <p className="text-xs text-muted-foreground">粘贴已有连接器的标准定义 JSON(与客户端 ConnectorDef 对齐),解析后自动填充表单。</p>
+                  <p className="text-xs text-muted-foreground">粘贴连接器定义 JSON（与客户端 ConnectorDef 对齐），或厂商文档给的标准 MCP 配置（{"{"}"mcpServers":{"{"}"name":{"{"}"type","url"{"}"}{"}"}{"}"}），解析后自动填充表单。</p>
                 )}
                 <div className="space-y-1">
                   <Label htmlFor="conn-import">JSON</Label>
                   <Textarea id="conn-import" rows={6} spellCheck={false} className="font-mono text-xs"
-                    placeholder='{"auth":{...},"tokenFields":[...],"examples":["..."],"mcp":[{"serverName":"x","transport":"streamable-http","url":"https://..."}]}'
+                    placeholder={'{"mcpServers":{"neo-crm":{"type":"streamableHttp","url":"https://mcp.example.com/mcp"}}}'}
                     value={importText} onChange={(e) => setImportText(e.target.value)} />
                 </div>
                 <div className="flex justify-end gap-2">

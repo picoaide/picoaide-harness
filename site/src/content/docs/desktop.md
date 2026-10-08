@@ -84,8 +84,22 @@ description: PicoAide Harness 桌面客户端的完整功能与操作指南：�
 
 | 连接器 | 说明 |
 |---|---|
-| **销售易 NeoCRM** | 官方 streamable-HTTP MCP（`mcp.xiaoshouyi.com`），RFC 8414 OAuth（授权码 + PKCE + 动态客户端注册），查询客户/线索/商机/联系人，执行 XOQL 与元数据操作 |
+| **销售易 NeoCRM** | 官方 streamable-HTTP MCP（`mcp.xiaoshouyi.com`），认证由端点自述（RFC 9728 / RFC 8414 发现 + 动态客户端注册 + PKCE），查询客户/线索/商机/联系人，执行 XOQL 与元数据操作 |
 | **远程 MCP 示例** | 通用远程 MCP 连接器：OAuth 2.1 + PKCE + 授权服务器元数据发现（RFC 9728 / RFC 8414）+ streamable-HTTP；端点与字段由管理员按实际服务填写（`mcp.example.com` 为占位值） |
+
+### 添加一个 MCP 连接器（通用）
+
+管理端「连接器」页的**从 JSON 导入**接受厂商文档给的标准配置——只有传输与端点也能跑：
+
+```json
+{ "mcpServers": { "neo-crm": { "type": "streamableHttp", "url": "https://mcp.example.com/mcp" } } }
+```
+
+- `type` 支持 `streamableHttp` / `http` / `stdio`（省略则按 `url` 或 `command` 推断）；`stdio` 用 `command` / `args` / `env`；
+- 认证模式默认 **自动**：连接时探测端点——2xx 即公开端点；401 按 `WWW-Authenticate` 的声明走 RFC 9728 → RFC 8414 发现 + 动态客户端注册 + PKCE 回环回调；
+  声明了凭据表单（`tokenFields` + 请求头里的 `${字段}`）则改走表单；既无端点又无表单即免凭据；
+- 未登记的键一律报错而不是忽略（少写一个字母不会被静默丢掉），`type: "sse"` 明确不支持；
+- 本地 `stdio` MCP 首次运行仍需**本地确认**（命令、参数、环境变量逐条披露），`PATH`/`NODE_OPTIONS` 一类进程引导变量永不注入。
 
 - 授权走 **OAuth 授权码 + PKCE**（`offline_access` 获取刷新令牌），state 校验与 60s 超时防 CSRF；
 - 凭据**本地加密存储**在用户 scope 路径（`0600/0700`、原子写、防符号链接）；连接成功后通过 `ctx.plugin` **动态注册 MCP**，模型即可调用其工具；

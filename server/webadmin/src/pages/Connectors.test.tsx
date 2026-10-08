@@ -90,6 +90,35 @@ describe('Connectors 连接器目录页', () => {
     })
   })
 
+  it('从 JSON 导入:粘贴标准 MCP 配置(mcpServers)同样解析并落成规范定义', async () => {
+    render(<Connectors />)
+    await screen.findByText('示例 MCP 智能体')
+    fireEvent.click(screen.getByRole('button', { name: '新建连接器' }))
+    const dialog = within(await screen.findByRole('dialog'))
+    fireEvent.change(dialog.getByLabelText('编号(不可改,客户端按 id 匹配凭证)'), { target: { value: 'neo-crm' } })
+    fireEvent.change(dialog.getByLabelText('名称'), { target: { value: '销售易' } })
+    fireEvent.click(dialog.getByRole('button', { name: '从 JSON 导入' }))
+    // 厂商文档给的原样一份:只有 type 与 url,没有任何认证字段。
+    fireEvent.change(dialog.getByLabelText('JSON'), {
+      target: { value: '{"mcpServers":{"neo-crm":{"type":"streamableHttp","url":"https://mcp.example.com/mcp"}}}' },
+    })
+    fireEvent.click(dialog.getByRole('button', { name: '解析导入' }))
+    expect((dialog.getByLabelText('服务器名 serverName(名称空间,小写)') as HTMLInputElement).value).toBe('neo-crm')
+    expect((dialog.getByLabelText('端点 URL(必填)') as HTMLInputElement).value).toBe('https://mcp.example.com/mcp')
+    // 认证方式落到 auto（该鉴权鉴权），且 OAuth 端点全部留空。
+    expect(dialog.getByLabelText('认证方式').textContent).toContain('自动')
+    expect((dialog.getByLabelText('MCP OAuth 发现地址(可选,推荐)') as HTMLInputElement).value).toBe('')
+    const preview = dialog.getByLabelText('定义 JSON(与客户端 ConnectorDef 对齐,实时生成)') as HTMLTextAreaElement
+    expect(preview.value).toContain('"authMode": "auto"')
+    fireEvent.click(dialog.getByRole('button', { name: '保存' }))
+    await waitFor(() => {
+      expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/connectors', expect.objectContaining({
+        method: 'POST',
+        body: expect.stringContaining('"auth_mode":"auto"'),
+      }))
+    })
+  })
+
   it('从示例模板开始:一键填充 OAuth + 远程 MCP', async () => {
     render(<Connectors />)
     await screen.findByText('示例 MCP 智能体')
