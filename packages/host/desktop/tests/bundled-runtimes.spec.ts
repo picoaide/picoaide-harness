@@ -100,11 +100,20 @@ function syntheticPayload(options: {
   target?: string
   omit?: 'node' | 'pnpm' | 'python'
   versionOverride?: Partial<typeof versions>
-  nodeReports?: string
+  /**
+   * 假 node 自报的 platform / arch（缺省 = 从 `target` 反推，`win` → `win32` 与真 node 同形）。
+   * 用来构造"node 自报值与清单不符"的坏包。
+   */
+  reports?: { platform?: string, arch?: string }
 } = {}): { root: string, resources: string, manifest: Record<string, unknown> } {
   const target = options.target ?? hostTarget
   const pinned = { ...versions, ...options.versionOverride }
-  const reports = options.nodeReports ?? target
+  // 真 node 的 `process.platform` 在 Windows 上是 `win32`，而载荷键写 `win` —— 夹具也照这个
+  // 形状自报，否则门禁的归一那一半在夹具上根本走不到。
+  const targetPlatform = target.slice(0, target.lastIndexOf('-'))
+  const targetArch = target.slice(target.lastIndexOf('-') + 1)
+  const reportedPlatform = options.reports?.platform ?? (targetPlatform === 'win' ? 'win32' : targetPlatform)
+  const reportedArch = options.reports?.arch ?? targetArch
   const resources = temporaryDir('dsh-payload-')
   const root = join(resources, BUNDLED_RUNTIMES_DIR)
   mkdirSync(root, { recursive: true })
@@ -113,11 +122,18 @@ function syntheticPayload(options: {
     pnpm: 'pnpm/bin/pnpm.mjs',
     python: 'python/bin/python3',
   }
-  // 真 node 的行为按参数分派：`-v` 报版本、`-p <expr>` 报目标平台（门禁两条都跑）。
-  writeScript(
-    join(root, commands.node),
-    `case "$1" in\n  -v) echo v${pinned.node} ;;\n  -p) echo ${reports} ;;\n  *) echo v${pinned.node} ;;\nesac\n`,
-  )
+  // 真 node 的行为按参数分派：`-v` 报版本、`-p <表达式>` 按表达式报平台或架构
+  //（门禁三条都跑，而且**表达式逐字**决定回答 —— 单参数硬编码会让"问平台"与"问架构"
+  // 拿到同一个值，门禁的归一与比对就变成走过场）。
+  const nodeScript = `case "$1" in\n`
+    + `  -v) echo v${pinned.node} ;;\n`
+    + `  -p) case "$2" in\n`
+    + `    process.platform) echo ${reportedPlatform} ;;\n`
+    + `    process.arch) echo ${reportedArch} ;;\n`
+    + `    *) echo ${reportedPlatform} ;;\n`
+    + `  esac ;;\n`
+    + `  *) echo v${pinned.node} ;;\nesac\n`
+  writeScript(join(root, commands.node), nodeScript)
   writeScript(join(root, commands.pnpm), `echo ${pinned.pnpm}\n`)
   writeScript(join(root, commands.python), `echo "Python ${pinned.python}"\n`)
   for (const key of ['node', 'pnpm', 'python'] as const) {
@@ -131,7 +147,7 @@ function syntheticPayload(options: {
     return { runtime: key, path: relative, bytes: statSync(join(root, relative)).size }
   })
   const bin = join(root, BUNDLED_RUNTIMES_SHIM_DIR)
-  writeScript(join(bin, 'node'), `case "$1" in\n  -v) echo v${pinned.node} ;;\n  -p) echo ${reports} ;;\n  *) echo v${pinned.node} ;;\nesac\n`)
+  writeScript(join(bin, 'node'), nodeScript)
   writeScript(join(bin, 'pnpm'), `echo ${pinned.pnpm}\n`)
   writeScript(join(bin, 'python3'), `echo "Python ${pinned.python}"\n`)
   const manifest = {
@@ -277,12 +293,9 @@ describe('平台名归一（`win32` → `win`）：三处实现必须同形（20
   })
 
   it('afterPack 的 node 自报值按同一规则归一再比清单（否则 Windows 恒红）', () => {
-    expect(normalizeProbedRuntimeTarget('win32-x64')).toBe('win-x64')
-    expect(normalizeProbedRuntimeTarget('linux-x64')).toBe('linux-x64')
-    expect(normalizeProbedRuntimeTarget('darwin-arm64')).toBe('darwin-arm64')
-    // 形状意外的输出原样返回（交回调用方报错，不在这里猜）。
-    expect(normalizeProbedRuntimeTarget('weird')).toBe('weird')
-    expect(normalizeProbedRuntimeTarget('')).toBe('')
+    expect(normalizeProbedRuntimeTarget('win32', 'x64')).toBe('win-x64')
+    expect(normalizeProbedRuntimeTarget('linux', 'x64')).toBe('linux-x64')
+    expect(normalizeProbedRuntimeTarget('darwin', 'arm64')).toBe('darwin-arm64')
   })
 })
 
@@ -349,6 +362,20 @@ describe('afterPack 门禁：随包运行时必须在、且真跑得起来（ass
     writeFileSync(manifestPath, `${JSON.stringify({ ...manifest, versions: { ...manifest.versions, node: '77.0.0' } }, null, 2)}\n`)
     expect(() => assertBundledRuntimesPackaged(fixture.resourcesRoot, fixture.packageRoot))
       .toThrow(/bundled node reports/u)
+  })
+
+  it('Windows 载荷：node 自报 `win32` 也必须认（否则 Windows 包永远过不了门禁）', () => {
+    // 判据跑在 Linux 上，但被测行为是 Windows 的键形态：清单 target 是 `win-x64`，
+    // node 自报 `win32` + `x64`。少了平台名归一这一步，这条会以
+    // `runs on "win32-x64" … claims "win-x64"` 拒包 —— 2026-10-08 的 Windows job 正是如此。
+    const fixture = packagedFixture({ target: 'win-x64', reports: { platform: 'win32', arch: 'x64' } })
+    expect(() => assertBundledRuntimesPackaged(fixture.resourcesRoot, fixture.packageRoot)).not.toThrow()
+  })
+
+  it('node 自报的平台与清单不符 ⇒ 拒包，并同时打印自报值与归一后的键', () => {
+    const fixture = packagedFixture({ target: 'win-x64', reports: { platform: 'linux', arch: 'x64' } })
+    expect(() => assertBundledRuntimesPackaged(fixture.resourcesRoot, fixture.packageRoot))
+      .toThrow(/runs on "linux-x64" \(payload target key "linux-x64"\) but the payload claims "win-x64"/u)
   })
 
   it('打包器按名字跳过的文件不进摘要，也不留在载荷里（.gitkeep/.DS_Store）', () => {

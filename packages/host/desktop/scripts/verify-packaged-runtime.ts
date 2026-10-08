@@ -584,22 +584,23 @@ function runBundledRuntimeCommand(command: string, args: readonly string[]): str
 }
 
 /**
- * 随包 node 自报的 `platform-arch` → 载荷目标键。
+ * 随包 node 自报的 platform / arch → 载荷目标键。
  *
  * **平台名必须归一**：node 在 Windows 上自报 `win32`，而载荷键（`runtimes.json` 的
  * targets、清单 `target`）一律是 `win`。不归一的话 Windows 上这条判据恒定失败
  * ——2026-10-08 CI 实测 `bundled node runs on "win32" but the payload claims "win-x64"`，
  * Windows job 在 afterPack 处整条红掉（判据本身是对的，是我方两侧的键不同形）。
  *
- * 归档键的平台段从不含 `-`，所以只按**第一个** `-` 切分；形状意外的输入原样返回
- * （交回调用方报错，而不是在这里猜）。
- * @param reported - node 打印的 `platform-arch`（如 `win32-x64`）。
- * @returns 载荷键（如 `win-x64`；`linux-x64` 原样）。
+ * 平台与架构**分两次问**（各一个不含空格、不含引号的 `-p` 表达式）：Windows 上这条命令
+ * 经 `cmd.exe`（`.cmd` 垫片必须过 shell），而 `cmd` 会把命令行按空格切碎 —— 同一个 CI 轮次
+ * 里 `-p 'process.platform + "-" + process.arch'` 被切成多个 argv，node 只求值了第一个
+ * `process.platform`，自报值变成光秃秃的 `win32`（错误信息里能直接看到）。
+ * @param platform - node 自报的 `process.platform`（如 `win32`）。
+ * @param arch - node 自报的 `process.arch`（如 `x64`）。
+ * @returns 载荷键（如 `win-x64`）。
  */
-export function normalizeProbedRuntimeTarget(reported: string): string {
-  const separator = reported.indexOf('-')
-  if (separator <= 0) return reported
-  return `${normalizeRuntimePlatform(reported.slice(0, separator))}-${reported.slice(separator + 1)}`
+export function normalizeProbedRuntimeTarget(platform: string, arch: string): string {
+  return `${normalizeRuntimePlatform(platform)}-${arch}`
 }
 
 /**
@@ -678,11 +679,13 @@ export function assertBundledRuntimesPackaged(
   if (reportedNode !== `v${nodeVersion}`) {
     throw new Error(`dsh-plugin-desktop: bundled node reports ${JSON.stringify(reportedNode)}, manifest pins v${nodeVersion}`)
   }
-  const reportedTarget = runBundledRuntimeCommand(nodeShim, ['-p', 'process.platform + "-" + process.arch'])
-  const probedTarget = normalizeProbedRuntimeTarget(reportedTarget)
+  // 平台/架构分两次问（表达式里没有空格与引号 —— 见 normalizeProbedRuntimeTarget 的头注释）。
+  const probedPlatform = runBundledRuntimeCommand(nodeShim, ['-p', 'process.platform'])
+  const probedArch = runBundledRuntimeCommand(nodeShim, ['-p', 'process.arch'])
+  const probedTarget = normalizeProbedRuntimeTarget(probedPlatform, probedArch)
   if (probedTarget !== packaged.target) {
     throw new Error(
-      `dsh-plugin-desktop: bundled node runs on ${JSON.stringify(reportedTarget)} `
+      `dsh-plugin-desktop: bundled node runs on ${JSON.stringify(`${probedPlatform}-${probedArch}`)} `
       + `(payload target key ${JSON.stringify(probedTarget)}) but the payload claims `
       + `${JSON.stringify(packaged.target)} — the payload was fetched for another platform`,
     )
