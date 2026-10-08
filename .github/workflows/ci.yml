@@ -1094,6 +1094,10 @@ jobs:
     permissions:
       contents: read
       actions: write
+    env:
+      # 随包 agent 运行时的制品缓存落点（fetch-bundled-runtimes.mjs 读它；
+      # 与上面 "Cache bundled agent runtimes" 步骤的 path 必须一致）。
+      PICOAI_RUNTIME_CACHE: ${{ runner.temp }}/picoaide-runtimes
     steps:
       - uses: actions/checkout@v7
         with:
@@ -1110,6 +1114,17 @@ jobs:
             ~/.cache/electron
             ~/.cache/electron-builder
           key: desktop-cache-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
+      # 随包 agent 运行时（node/pnpm/python）的**制品缓存**（2026-10-08）：三套官方预编译
+      # 制品约 90MB/平台，就位发生在打包入口内（`prepareChannelPackaging()`，无需额外步骤）；
+      # 缓存让重复打包跳过下载。key 挂 `runtimes.json` 的哈希 —— 它与 `yarn.lock` 无关
+      # （换运行时版本只改那一个文件）。`PICOAI_RUNTIME_CACHE` 由 job 级 env 给所有步骤。
+      - name: Cache bundled agent runtimes
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/picoaide-runtimes
+          key: runtimes-${{ runner.os }}-${{ hashFiles('packages/host/desktop/runtimes.json') }}
+          restore-keys: |
+            runtimes-${{ runner.os }}-
       - run: yarn install --immutable
       - uses: actions/download-artifact@v7
         with:
@@ -1246,6 +1261,10 @@ jobs:
     permissions:
       contents: read
       actions: write
+    env:
+      # 随包 agent 运行时的制品缓存落点（fetch-bundled-runtimes.mjs 读它；
+      # 与上面 "Cache bundled agent runtimes" 步骤的 path 必须一致）。
+      PICOAI_RUNTIME_CACHE: ${{ runner.temp }}/picoaide-runtimes
     steps:
       - uses: actions/checkout@v7
         with:
@@ -1262,6 +1281,17 @@ jobs:
             ~/AppData/Local/electron/Cache
             ~/AppData/Local/electron-builder/Cache
           key: desktop-cache-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
+      # 随包 agent 运行时（node/pnpm/python）的**制品缓存**（2026-10-08）：三套官方预编译
+      # 制品约 90MB/平台，就位发生在打包入口内（`prepareChannelPackaging()`，无需额外步骤）；
+      # 缓存让重复打包跳过下载。key 挂 `runtimes.json` 的哈希 —— 它与 `yarn.lock` 无关
+      # （换运行时版本只改那一个文件）。`PICOAI_RUNTIME_CACHE` 由 job 级 env 给所有步骤。
+      - name: Cache bundled agent runtimes
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/picoaide-runtimes
+          key: runtimes-${{ runner.os }}-${{ hashFiles('packages/host/desktop/runtimes.json') }}
+          restore-keys: |
+            runtimes-${{ runner.os }}-
       - run: yarn install --immutable
       - uses: actions/download-artifact@v7
         with:
@@ -1369,6 +1399,10 @@ jobs:
     permissions:
       contents: read
       actions: write
+    env:
+      # 随包 agent 运行时的制品缓存落点（fetch-bundled-runtimes.mjs 读它；
+      # 与上面 "Cache bundled agent runtimes" 步骤的 path 必须一致）。
+      PICOAI_RUNTIME_CACHE: ${{ runner.temp }}/picoaide-runtimes
     steps:
       - uses: actions/checkout@v7
         with:
@@ -1385,6 +1419,17 @@ jobs:
             ~/Library/Caches/electron
             ~/Library/Caches/electron-builder
           key: desktop-cache-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
+      # 随包 agent 运行时（node/pnpm/python）的**制品缓存**（2026-10-08）：三套官方预编译
+      # 制品约 90MB/平台，就位发生在打包入口内（`prepareChannelPackaging()`，无需额外步骤）；
+      # 缓存让重复打包跳过下载。key 挂 `runtimes.json` 的哈希 —— 它与 `yarn.lock` 无关
+      # （换运行时版本只改那一个文件）。`PICOAI_RUNTIME_CACHE` 由 job 级 env 给所有步骤。
+      - name: Cache bundled agent runtimes
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/picoaide-runtimes
+          key: runtimes-${{ runner.os }}-${{ hashFiles('packages/host/desktop/runtimes.json') }}
+          restore-keys: |
+            runtimes-${{ runner.os }}-
       - run: yarn install --immutable
       - uses: actions/download-artifact@v7
         with:

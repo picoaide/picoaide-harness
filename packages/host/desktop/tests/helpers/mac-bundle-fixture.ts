@@ -14,7 +14,7 @@
 
 import { chmodSync, mkdirSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 /** 最小 asar 的字节与头部摘要。 */
 export interface MinimalAsar {
@@ -131,4 +131,79 @@ export function writeValidMacBundle(
     + '\t\t</dict>\n\t</dict>\n</dict>\n</plist>\n',
   )
   return asar
+}
+
+/** 夹具写入的随包运行时版本（形状与 `build/runtimes/manifest.json` 一致，具体取值无关紧要）。 */
+export const MAC_BUNDLE_RUNTIME_VERSIONS = { node: '24.21.0', pnpm: '11.7.0', python: '3.12.15' } as const
+
+/** 随包运行时入口的键（= 清单 `commands` 的键）。 */
+export type BundledRuntimeCommand = 'node' | 'pnpm' | 'python3'
+
+/** `writeBundledRuntimesFixture` 的覆盖项（每个都对应一条负向判据）。 */
+export interface BundledRuntimesFixtureOptions {
+  /** 版本覆盖（缺省 {@link MAC_BUNDLE_RUNTIME_VERSIONS}）。 */
+  readonly versions?: Partial<Record<'node' | 'pnpm' | 'python', string>>
+  /** 清单 `schema` 覆盖值（缺省 1）。 */
+  readonly schema?: number
+  /** 清单里只声明前 N 个命令（缺省 3；用于"命令数不符"用例）。 */
+  readonly commandCount?: number
+  /** 根本不写清单（用于"本构建声明了运行时、包里却没有"用例）。 */
+  readonly omitManifest?: boolean
+  /** 不写某个入口载荷（用于"入口不在"用例）。 */
+  readonly omitEntry?: BundledRuntimeCommand
+  /** 不写某个 `bin/*` shim（用于"shim 不在"用例）。 */
+  readonly omitShim?: BundledRuntimeCommand
+}
+
+/**
+ * 往 `.app` 写一份最小随包运行时载荷（清单 + 三个入口 + 三个 shim）。
+ *
+ * 存在的理由：macOS 发布判据（`scripts/verify-mac-release.ts` 的
+ * `assertBundledRuntimesSigned`）把"验签 + 真跑 + 版本逐字比对"绑在发布路径上，
+ * 于是"结构对了"的假包对它不再够用。载荷本身可以是**假字节**（命令执行是注入的
+ * 接缝），但**目录形状与清单字段必须真的可解析**，否则用例测的不是判据。
+ * @param appPath - `.app` 目录绝对路径。
+ * @param options - 覆盖项（每个都是某个负向用例的构造手段）。
+ */
+export function writeBundledRuntimesFixture(
+  appPath: string,
+  options: BundledRuntimesFixtureOptions = {},
+): void {
+  const root = join(appPath, 'Contents', 'Resources', 'runtimes')
+  mkdirSync(join(root, 'bin'), { recursive: true })
+  if (options.omitManifest === true) return
+
+  const commands: Readonly<Record<BundledRuntimeCommand, string>> = {
+    node: 'node/bin/node',
+    pnpm: 'pnpm/bin/pnpm.mjs',
+    python3: 'python/bin/python3',
+  }
+  const declared = (Object.keys(commands) as BundledRuntimeCommand[])
+    .slice(0, options.commandCount ?? 3)
+
+  for (const [command, relative] of Object.entries(commands)) {
+    if (command === options.omitEntry) continue
+    const target = join(root, relative)
+    mkdirSync(dirname(target), { recursive: true })
+    writeFileSync(target, 'mach-o')
+  }
+
+  for (const command of declared) {
+    if (command === options.omitShim) continue
+    const shim = join(root, 'bin', command)
+    writeFileSync(shim, 'shim')
+    chmodSync(shim, 0o755)
+  }
+
+  const manifest = {
+    schema: options.schema ?? 1,
+    target: 'darwin-arm64',
+    platform: 'darwin',
+    arch: 'arm64',
+    versions: { ...MAC_BUNDLE_RUNTIME_VERSIONS, ...options.versions },
+    commands: Object.fromEntries(declared.map(command => [command, commands[command]])),
+    shims: declared.map(command => `bin/${command}`),
+    tree: { files: 4, bytes: 4, digest: '0'.repeat(64) },
+  }
+  writeFileSync(join(root, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`)
 }

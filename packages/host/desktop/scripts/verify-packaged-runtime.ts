@@ -21,6 +21,8 @@ import AdmZip from 'adm-zip'
 import { normalizeAsarEntry, toAsarEntryPath } from './asar-entry-path.ts'
 import { asarLayoutLogLine, assertMacBundleConsistency } from './mac-bundle-consistency.ts'
 import { packagedAppId } from './channel-build.ts'
+import { assertRuntimeBudget, readRuntimeManifest, runtimeTreeDigest } from './fetch-bundled-runtimes.mjs'
+import type { RuntimeManifest, RuntimePin } from './fetch-bundled-runtimes.mjs'
 import {
   FORBIDDEN_MACOS_NATIVE_ENTRIES,
   MACOS_ARM64_NATIVE_ENTRIES,
@@ -518,6 +520,163 @@ export function assertBundledSpeechModelPackaged(
     )
   }
   return 'verified'
+}
+
+/**
+ * 随包 agent 运行时载荷的目录名（源树 `build/` 下与产物 `resources/` 下同名）。
+ *
+ * 与 `src/bundled-runtimes.ts` 的 `BUNDLED_RUNTIMES_DIR` **必须逐字相同**
+ * （客户端按那个名字解析；`tests/bundled-runtimes.spec.ts` 对拍两侧）。
+ */
+export const BUNDLED_RUNTIMES_PAYLOAD_DIR = 'runtimes'
+
+/** 随包运行时载荷的清单文件名（打包期由 `fetch-bundled-runtimes.mjs` 写出）。 */
+export const BUNDLED_RUNTIMES_MANIFEST_FILE = 'manifest.json'
+
+/** 源树里随包运行时的载荷目录（打包输入）。 */
+export function bundledRuntimesBuildDir(packageRoot: string): string {
+  return join(packageRoot, 'build', BUNDLED_RUNTIMES_PAYLOAD_DIR)
+}
+
+/** 载荷内一条 shim 的路径（POSIX 无扩展名 / Windows `.cmd`）。 */
+function runtimeShimPath(root: string, command: string, platform: string): string {
+  return join(root, 'bin', platform === 'win32' ? `${command}.cmd` : command)
+}
+
+/**
+ * 跑一条随包运行时命令并返回它的 stdout（真执行：这是"能不能用"的唯一判据）。
+ *
+ * 为什么必须**真跑**而不是只看文件在不在：`extraResources` 的源目录缺失时
+ * electron-builder 只打一行 warning（与语音模型同一条），而"载荷在但跑不起来"还有
+ * 一整类形态 —— 平台拿错（linux 载荷进 Windows 包）、二进制被截断、POSIX 丢了可执行位、
+ * macOS 上没被重签（Gatekeeper/`codesign --verify` 拒绝执行）。这些在文件存在性判据下
+ * **全绿**，只有真起一次进程才看得见。
+ * @param command - 可执行文件（POSIX）或 `.cmd` 垫片（Windows）。
+ * @param args - 参数。
+ * @returns 合并后的 stdout/stderr 文本。
+ * @throws 起不来、超时、或退出码非 0。
+ */
+function runBundledRuntimeCommand(command: string, args: readonly string[]): string {
+  const result = spawnSync(command, [...args], {
+    encoding: 'utf8',
+    timeout: 60_000,
+    // Windows 上 `.cmd` 不是可执行映像：必须过一遍 shell（`cmd.exe /c`）。
+    shell: process.platform === 'win32',
+    // **不许因为探测就改写载荷**：CPython 运行期会往 `__pycache__` 写 `.pyc`（内容含
+    // 源文件 mtime/size ⇒ 字节数会变），而载荷的树摘要正是按字节数算的 —— 一次不带
+    // 这个变量的探测就能让下一次打包判"载荷与清单不一致"并整份重新解包（本轮实测到
+    // 123 字节的差异）。客户端侧另有 `PYTHONPYCACHEPREFIX` 把缓存重定向到数据根。
+    env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
+  })
+  if (result.error !== undefined) {
+    throw new Error(`dsh-plugin-desktop: bundled runtime ${command} could not start: ${result.error.message}`)
+  }
+  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`.trim()
+  if (result.status !== 0) {
+    throw new Error(`dsh-plugin-desktop: bundled runtime ${command} exited with ${String(result.status)}: ${output}`)
+  }
+  return output
+}
+
+/**
+ * 正例侧：**声明了随包 agent 运行时，产物里就必须有、而且真的能跑**（2026-10-08）。
+ *
+ * 与 `assertBundledSpeechModelPackaged` 同一姿势（`extraResources` 源目录缺失时
+ * electron-builder 只 warning），但有两点更强：
+ *   · **没有"本次构建不含该能力"这一档** —— 运行时是所有渠道的固定交付面（没有渠道开关），
+ *     源树缺载荷只能说明"打包没走 `prepareChannelPackaging()`"，那是必须拦下的错误；
+ *   · **能力判据**：三个 shim 各跑一次并逐字比对钉死版本，另外让 node 自报
+ *     `process.platform-process.arch` 与清单 `target` 对齐（拿错平台的载荷当场现形）。
+ * @param resourcesRoot - 产物的 `resources/` 目录（`app.asar` 的父目录）。
+ * @param packageRoot - desktop 包根（`packages/host/desktop`）。
+ * @param pin - 钉死清单（测试接缝；缺省读 `runtimes.json`，体积预算真源就在它里面）。
+ * @returns 载荷清单（供调用方打印版本）。
+ * @throws 载荷缺失、平台不符、树摘要不符、体积超预算、或三个命令任一跑不起来/版本不符。
+ */
+export function assertBundledRuntimesPackaged(
+  resourcesRoot: string,
+  packageRoot: string,
+  pin?: RuntimePin,
+): RuntimeManifest {
+  const buildRoot = bundledRuntimesBuildDir(packageRoot)
+  const buildManifestPath = join(buildRoot, BUNDLED_RUNTIMES_MANIFEST_FILE)
+  if (!existsSync(buildManifestPath)) {
+    throw new Error(
+      `dsh-plugin-desktop: ${buildManifestPath} is missing — this build declares no bundled agent runtimes. `
+      + 'Package through the desktop scripts (they call scripts/channel-prepare.ts → fetch-bundled-runtimes.mjs); '
+      + 'a bare `electron-builder` run would ship a client whose agent has no node/pnpm/python.',
+    )
+  }
+  const buildManifest = readRuntimeManifest(buildRoot)
+  const packagedRoot = join(resourcesRoot, BUNDLED_RUNTIMES_PAYLOAD_DIR)
+  const packagedManifestPath = join(packagedRoot, BUNDLED_RUNTIMES_MANIFEST_FILE)
+  if (!existsSync(packagedManifestPath)) {
+    throw new Error(
+      `dsh-plugin-desktop: packaged runtime at ${resourcesRoot} has no ${BUNDLED_RUNTIMES_PAYLOAD_DIR}/ payload `
+      + `(expected ${packagedManifestPath}) — verify build.extraResources carries `
+      + `"build/${BUNDLED_RUNTIMES_PAYLOAD_DIR}" → "${BUNDLED_RUNTIMES_PAYLOAD_DIR}"`,
+    )
+  }
+  const packaged = readRuntimeManifest(packagedRoot)
+  if (packaged.target !== buildManifest.target) {
+    throw new Error(
+      `dsh-plugin-desktop: packaged bundled runtimes target ${JSON.stringify(packaged.target)} does not match the `
+      + `build input ${JSON.stringify(buildManifest.target)} — a payload for another platform would be dead weight `
+      + '(and, for a foreign OS, not executable at all)',
+    )
+  }
+  const digest = runtimeTreeDigest(packagedRoot, [packagedManifestPath])
+  if (digest.files !== buildManifest.tree.files
+    || digest.bytes !== buildManifest.tree.bytes
+    || digest.digest !== buildManifest.tree.digest) {
+    throw new Error(
+      `dsh-plugin-desktop: packaged bundled runtimes at ${packagedRoot} do not match the build input `
+      + `(files ${String(digest.files)}/${String(buildManifest.tree.files)}, `
+      + `bytes ${String(digest.bytes)}/${String(buildManifest.tree.bytes)}) `
+      + '— the copy into resources/ truncated, or the payload was rebuilt after packing',
+    )
+  }
+  // 再分发的许可文本必须随包（缺一份 = 合规缺口，而"少一个 .txt"在体积/功能判据下全绿）。
+  const missingLicenses = (packaged.licenses ?? [])
+    .filter(entry => !existsSync(join(packagedRoot, entry.path)) || statSync(join(packagedRoot, entry.path)).size !== entry.bytes)
+    .map(entry => entry.path)
+  if ((packaged.licenses ?? []).length === 0 || missingLicenses.length > 0) {
+    throw new Error(
+      `dsh-plugin-desktop: packaged bundled runtimes at ${packagedRoot} are missing their license texts `
+      + `(${missingLicenses.join(', ') || 'none recorded in the manifest'}) — redistributing node/pnpm/CPython `
+      + 'requires shipping their own license files (run scripts/fetch-bundled-runtimes.mjs again)',
+    )
+  }
+  const { node: nodeVersion, pnpm: pnpmVersion, python: pythonVersion } = packaged.versions
+  const nodeShim = runtimeShimPath(packagedRoot, 'node', packaged.platform)
+  const reportedNode = runBundledRuntimeCommand(nodeShim, ['-v'])
+  if (reportedNode !== `v${nodeVersion}`) {
+    throw new Error(`dsh-plugin-desktop: bundled node reports ${JSON.stringify(reportedNode)}, manifest pins v${nodeVersion}`)
+  }
+  const reportedTarget = runBundledRuntimeCommand(nodeShim, ['-p', 'process.platform + "-" + process.arch'])
+  if (reportedTarget !== packaged.target) {
+    throw new Error(
+      `dsh-plugin-desktop: bundled node runs on ${JSON.stringify(reportedTarget)} but the payload claims `
+      + `${JSON.stringify(packaged.target)} — the payload was fetched for another platform`,
+    )
+  }
+  const reportedPnpm = runBundledRuntimeCommand(runtimeShimPath(packagedRoot, 'pnpm', packaged.platform), ['-v'])
+  if (reportedPnpm !== pnpmVersion) {
+    throw new Error(`dsh-plugin-desktop: bundled pnpm reports ${JSON.stringify(reportedPnpm)}, manifest pins ${pnpmVersion}`)
+  }
+  const reportedPython = runBundledRuntimeCommand(runtimeShimPath(packagedRoot, 'python3', packaged.platform), ['-V'])
+  if (!reportedPython.includes(pythonVersion)) {
+    throw new Error(`dsh-plugin-desktop: bundled python reports ${JSON.stringify(reportedPython)}, manifest pins ${pythonVersion}`)
+  }
+  // 体积预算（2026-10-08）：判据落**产物**（不是构建输入）—— 用户拿到的安装包背的就是这份载荷。
+  // 与 `fetch-bundled-runtimes.mjs` 同一条实现（`assertRuntimeBudget`），上限真源在 runtimes.json。
+  const size = assertRuntimeBudget(packaged, pin)
+  console.log(
+    `dsh-plugin-desktop: bundled agent runtimes verified at ${packagedRoot} `
+    + `(${packaged.target}; node ${nodeVersion} / pnpm ${pnpmVersion} / python ${pythonVersion}; `
+    + `${(size.bytes / 1024 / 1024).toFixed(1)} MiB, budget ${(size.budget.bytes / 1024 / 1024).toFixed(1)} MiB)`,
+  )
+  return packaged
 }
 
 /**
@@ -1872,6 +2031,7 @@ export function verifyPackagedRuntime(
   exists: FileProbe = existsSync,
   readEntry: PackageEntryReader = readPackagedEntry,
   speechModelPackageRoot: string | null = desktopProductRoot(),
+  runtimesPackageRoot: string | null = desktopProductRoot(),
 ): void {
   // 平台无关的产物身份判据（2026-09-26 复审 B-6）：electron-builder 实际收到的 `appId`
   // 必须逐字等于**本次构建声明的身份**（随包 channel.json 的 `desktop.app_id`，公共渠道
@@ -2022,6 +2182,14 @@ export function verifyPackagedRuntime(
   if (speechModelPackageRoot !== null && existsSync(dirname(asarPath))) {
     const speechModel = assertBundledSpeechModelPackaged(dirname(asarPath), speechModelPackageRoot)
     if (speechModel === 'verified') console.log(`dsh-plugin-desktop: bundled speech model verified at ${join(dirname(asarPath), SPEECH_MODEL_PAYLOAD_DIR)}`)
+  }
+  // 随包 agent 运行时（2026-10-08，node + pnpm + python）：**没有"本次构建不含该能力"这一档**
+  // —— 它是所有渠道的固定交付面（`prepareChannelPackaging()` 无条件就位），源树缺载荷只能
+  // 说明打包没走那条路，必须拦下。判据不止"文件在"：三个 shim 各**真跑一次**并逐字比对
+  // 钉死版本，node 还要自报 platform/arch 与清单一致（理由见该函数注释）。
+  // 显式实参的理由同语音模型：单测传 `null` 表示"本次不声明载荷"，免得不跑打包的单测变红。
+  if (runtimesPackageRoot !== null && existsSync(dirname(asarPath))) {
+    assertBundledRuntimesPackaged(dirname(asarPath), runtimesPackageRoot)
   }
   if (context.electronPlatformName === 'darwin' && context.arch === 4) {
     const forbidden = FORBIDDEN_MACOS_NATIVE_ENTRIES

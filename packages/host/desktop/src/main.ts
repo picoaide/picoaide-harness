@@ -72,6 +72,7 @@ import { maskSecrets } from './mask-secrets.ts'
 import { reclaimOrphanedDocumentLocks, documentLockRecoveryLogLines } from './document-lock-recovery.ts'
 import { resolveDesktopShellEnvironment } from './shell-environment.ts'
 import { installProfilePackageResolver } from './module-resolution.ts'
+import { bundledRuntimesLogLine, installBundledRuntimes } from './bundled-runtimes.ts'
 import { installAsarSpawnRewrite } from './asar-spawn.ts'
 import { DesktopPluginsService } from './desktop-plugins.ts'
 import {
@@ -529,6 +530,17 @@ async function start(): Promise<void> {
   // exits 1) instead of silently writing user data there. This is the same
   // `isSafeDshHome` check the enterprise installers enforce.
   const homeDir = applyInstallDshHome({ productDir: CHANNEL_PROFILE?.homeDir })
+  // 随包 agent 运行时（2026-10-08）：node + pnpm + python 随客户端分发，agent 的
+  // shell / MCP stdio 子进程直接可用，`plugin_manager` 的 `install_bundle` 也因此
+  // 有了真正的包管理器（此前客户端不带 pnpm ⇒ 那条作者化路径必然 ENOENT）。
+  //
+  // **必须在这里**：PATH 前置只有发生在**任何子进程 spawn 之前**才生效 —— agent 的
+  // bash/pwsh、MCP stdio 服务、plugin_manager 的 pnpm 全都从 `process.env.PATH` 继承
+  // （上游 `scrubbedParentEnv()` 明确保留 PATH）。载荷缺席（开发运行、未带载荷的构建）
+  // 时返回 undefined：只是没有这三套运行时，不阻断启动；"声明了就必须在"由 afterPack
+  // 门禁判（`scripts/verify-packaged-runtime.ts` 的 `assertBundledRuntimesPackaged`）。
+  const bundledRuntimes = installBundledRuntimes({ home: homeDir })
+  if (bundledRuntimes !== undefined) electronLogger.error(`${BIN_NAME}: ${bundledRuntimesLogLine(bundledRuntimes)}`)
   // 孤儿写锁回收：上游的文档写锁只在 `finally` 里自删，任何一次"建锁后崩溃"都会留下
   // 永久孤儿锁，此后该文档的写入静默失败（现场事故：settings 写不进 protocol ⇒ 每个
   // 模型请求 401「缺少认证令牌」）。**必须在这里**——`prepareDesktopProfile`/`boot`
@@ -634,7 +646,7 @@ async function start(): Promise<void> {
         // ⚠️ 成对约束：provide 之后上游 `hmr` 行也会跟着激活，而它要求 `appReady`
         // （只有 cmdline 会 provide，桌面不走 cmdline）⇒ 整棵树加载失败。所以
         // `cordis.patch.yml` 里显式关闭了 `hmr` 行，两处必须一起改。
-        hostCtx.provide('profileContext', desktopProfileContext(prepared))
+        hostCtx.provide('profileContext', desktopProfileContext(prepared, bundledRuntimes))
         // 协议 handler 的实际注册面（默认 session + 每个浏览器分区）经这个适配器
         // 交给插件：`provide` 发生在 boot 的 prepare 回调里，**早于** profile 树的
         // 任何插件 apply（dsh-app-boot 的 boot(): prepare → mountRootInclude）。

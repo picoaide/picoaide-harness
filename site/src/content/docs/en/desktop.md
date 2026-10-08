@@ -188,6 +188,19 @@ instead — append a row to `~/.picoaide-harness/cordis.patch.yml`, which the ap
 
 The app ships its own DSH dependencies and does not modify the system-wide PATH or shell config. After plugin changes, restart the app to enter the Loader composition.
 
+### Bundled runtimes (node / pnpm / python)
+
+The client ships Node.js 24 (LTS), pnpm 11 and CPython 3.12 (each platform's official prebuilt
+distribution, under the app's `resources/runtimes/`, never inside the asar). At startup the app
+prepends `resources/runtimes/bin` to **its own** `PATH` — this affects only child processes the app
+spawns (the agent's shell commands, MCP stdio servers, the pnpm used to package plugins) and leaves
+the system environment untouched; Python's `pip install` target and `.pyc` cache are redirected into
+the app data root, so nothing is written into the installation directory. The agent can therefore
+write code and run `node`/`python3` directly, and the upstream "package a capability as a bundle, then
+install it with `plugin_manager`" path no longer fails for want of a package manager. Installing
+dependencies from a registry needs network access; a local bundle inside the workspace still works
+offline.
+
 ## Troubleshooting
 
 - **App only goes to the tray**: right-click the tray → "Export diagnostics…" → generates and opens `diagnostics-*.zip`;

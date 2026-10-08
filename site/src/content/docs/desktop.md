@@ -195,6 +195,16 @@ Agent 驱动的内嵌浏览器位于**独立浏览器窗口**（2026-08-20 窗�
 
 应用自带 DSH 依赖，不改系统全局 PATH 或 shell 配置。插件变更后需重启应用才进入 Loader 组合。
 
+### 随包运行时（node / pnpm / python）
+
+客户端随包分发 Node.js 24（LTS）、pnpm 11 与 CPython 3.12（各平台官方预编译发行包，位于应用的
+`resources/runtimes/`，不进 asar）。应用启动时把 `resources/runtimes/bin` 前置到**自己的**
+`PATH` —— 只影响应用派生的子进程（agent 的 shell 命令、MCP stdio 服务、打包插件用的 pnpm），
+不改系统环境；Python 的 `pip install` 与 `.pyc` 缓存被重定向到应用数据根，不写进安装目录。
+于是 agent 可以直接写代码并运行 `node`/`python3`，上游「把能力打成 bundle 再用
+`plugin_manager` 安装」的路径也不再因缺少包管理器而失败。从 registry 安装依赖需要出网；
+离线环境仍可安装工作区里的本地 bundle。
+
 ## 排查
 
 - **应用能进托盘**：右键托盘 →「导出诊断信息…」→ 生成并打开 `diagnostics-*.zip`；
