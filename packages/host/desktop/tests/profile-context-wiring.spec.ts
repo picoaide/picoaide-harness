@@ -251,6 +251,32 @@ describe('desktop profileContext wiring (issue #130)', () => {
     expect(context.overlays).toEqual(prepared.overlays)
   })
 
+  it('packageManager 只在随包运行时在位时出现，并指向随包 pnpm（2026-10-08）', async () => {
+    const home = temporaryHome()
+    const prepared = await prepareDesktopProfile('1', home, 'linux')
+    // 没有随包运行时（开发运行 / 未带载荷的构建）：**不提供** packageManager ——
+    // 编造入口只会把"这台机器没有包管理器"伪装成"命令不存在"（缺省回落 PATH 上的 pnpm）。
+    expect(desktopProfileContext(prepared).packageManager).toBeUndefined()
+
+    const runtimes = {
+      root: '/opt/runtimes',
+      binDir: '/opt/runtimes/bin',
+      node: '/opt/runtimes/node/bin/node',
+      pnpm: '/opt/runtimes/pnpm/bin/pnpm.mjs',
+      python: '/opt/runtimes/python/bin/python3',
+      target: 'linux-x64',
+      versions: { node: '24.21.0', pnpm: '11.7.0', python: '3.12.15' },
+    }
+    // 在位时：command = 随包 node、args = 随包 pnpm 入口（上游 `runProfilePnpm` 把
+    // `[...args, ...pnpmArgs]` 交给 execa，env 与 scrubbedParentEnv 合并）——
+    // 这就是 `plugin_manager` 的 `install_bundle` 在客户端上从 ENOENT 变成可用的那一处。
+    expect(desktopProfileContext(prepared, runtimes).packageManager).toEqual({
+      command: runtimes.node,
+      args: [runtimes.pnpm],
+      env: {},
+    })
+  })
+
   it('overlays 是 patches 的**真**尾段，且重算路径上不产生重复行（分界挪到 0 即红）', async () => {
     const home = temporaryHome()
     const prepared = await prepareDesktopProfile('1', home, 'linux')

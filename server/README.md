@@ -56,7 +56,7 @@ PICOAI_ADMIN_PASSWORD=admin123 bin/picoaide-server \
 | [docs/03-api-reference.md](docs/03-api-reference.md) | 全部 HTTP 端点（管理面 + 客户端面 + 网关） |
 | [docs/04-auth.md](docs/04-auth.md) | 认证体系（local / LDAP / OIDC / token / 管理端 CSRF） |
 | [docs/05-agent-system.md](docs/05-agent-system.md) | 客户端 Agent 引擎（历史存档） |
-| [docs/06-database.md](docs/06-database.md) | PostgreSQL 表结构 / 迁移（0001–0082） / 分区账本 |
+| [docs/06-database.md](docs/06-database.md) | PostgreSQL 表结构 / 迁移（0001–0084） / 分区账本 |
 | [docs/07-marketplace.md](docs/07-marketplace.md) | 技能商城 / 授权 / 共享内容 |
 | [docs/08-development.md](docs/08-development.md) | 开发指南 / TDD / 契约 |
 | [docs/09-agent-share.md](docs/09-agent-share.md) | 共享 Agent（上传 / 审核 / 授权 / 双门制） |

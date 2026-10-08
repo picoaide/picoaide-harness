@@ -7,6 +7,7 @@ import { assertOutboundUrlAllowed, OutboundTimeoutError, OutboundUrlBlockedError
 import { expiryFromResponse } from './token-lifetime.ts'
 import { DEFAULT_HOST_LOCALE, hostT, type HostLocale } from './host-copy.ts'
 import { ConnectorError } from './connector-error.ts'
+import { autoOAuthConfig, resolveAuthMode } from './policy.ts'
 
 /**
  * Stable code of an interactive-flow failure that means "the user has to
@@ -279,6 +280,51 @@ interface OAuthServerMetadata {
   scopes_supported?: string[]
 }
 
+/** RFC 9728 protected-resource metadata (only the fields this flow reads). */
+interface ProtectedResourceMetadata {
+  authorization_servers?: string[]
+  /**
+   * Scopes that accessing THIS resource requires (RFC 9728 §2). It is the
+   * resource's own answer, so it outranks the authorization server's list.
+   */
+  scopes_supported?: string[]
+}
+
+/**
+ * Deduplicated, trimmed scope names (blanks and duplicates dropped, order kept
+ * so the request is deterministic).
+ * @param values - advertised `scopes_supported`, if the document had it.
+ * @returns the scope names to request.
+ */
+function scopeList(values: readonly string[] | undefined): string[] {
+  if (!Array.isArray(values)) return []
+  const seen = new Set<string>()
+  const scopes: string[] = []
+  for (const value of values) {
+    if (typeof value !== 'string') continue
+    const scope = value.trim()
+    if (scope === '' || seen.has(scope)) continue
+    seen.add(scope)
+    scopes.push(scope)
+  }
+  return scopes
+}
+
+/**
+ * Build the single space-delimited `scope` request (RFC 6749 §3.3).
+ *
+ * Requesting everything the server advertises is deliberate: the list comes
+ * from the server's own metadata, so every entry is supported by construction,
+ * and asking for a subset silently produces tokens that are missing privileges
+ * (a 403 much later, with nothing pointing back at the connector).
+ * @param values - scope names to request.
+ * @returns the scope parameter value, or undefined when there is nothing to ask for.
+ */
+function scopeRequest(values: readonly string[]): string | undefined {
+  const scopes = scopeList(values)
+  return scopes.length === 0 ? undefined : scopes.join(' ')
+}
+
 /** MCP OAuth discovery result (spec 2025-06-18): public endpoint or the resolved OAuth endpoints. */
 export interface McpOAuthDiscovery {
   publicMcp?: boolean
@@ -329,7 +375,7 @@ export async function discoverMcpOAuth(mcpUrl: string, outbound: OutboundCallOpt
     const metadataCall = outboundCall({ headers: { Accept: 'application/json' } }, outbound)
     const metadataResponse = await outboundFetch(metadataUrl, 'OAuth resource metadata', metadataCall.init, metadataCall.options)
     if (!metadataResponse.ok) continue
-    const resourceMetadata = (await metadataResponse.json()) as { authorization_servers?: string[] }
+    const resourceMetadata = (await metadataResponse.json()) as ProtectedResourceMetadata
     const authorizationServer = resourceMetadata.authorization_servers?.[0]
     if (!authorizationServer) continue
 
@@ -359,9 +405,25 @@ export async function discoverMcpOAuth(mcpUrl: string, outbound: OutboundCallOpt
     const registrationEndpoint = meta.registration_endpoint === undefined
       ? undefined
       : assertOutboundUrlAllowed(meta.registration_endpoint, 'OAuth 客户端注册端点', locale).toString()
-    const scopes = meta.scopes_supported?.includes('offline_access')
-      ? 'offline_access'
-      : meta.scopes_supported?.[0]
+    // Scope request (RFC 6749 §3.3: one space-delimited list).
+    //
+    // EVERY advertised scope is requested, and the protected resource's own
+    // `scopes_supported` (RFC 9728 — what accessing THIS resource needs) wins
+    // over the authorization server's list. Requesting only one scope was a
+    // real defect: an MCP server advertising `["mcp:tools","people:read"]`
+    // with no `offline_access` used to get `mcp:tools` alone, so the issued
+    // token was missing `people:read` and every tool that touches that API
+    // failed with a 403 the user could not explain (2026-10-08, the second
+    // vendor integrated through the generic connector).
+    //
+    // `offline_access` is the one thing added to the resource's list when the
+    // authorization server advertises it: it is what makes the server issue a
+    // refresh token, and without one the connector would demand a fresh
+    // interactive sign-in every time the access token lapses.
+    const resourceScopes = scopeList(resourceMetadata.scopes_supported)
+    const serverScopes = scopeList(meta.scopes_supported)
+    const offlineAccess = serverScopes.includes('offline_access') ? ['offline_access'] : []
+    const scopes = scopeRequest(resourceScopes.length > 0 ? [...resourceScopes, ...offlineAccess] : serverScopes)
     return {
       // The issuer identifier includes its path; returning only the origin
       // would make the SDK treat a path-based issuer as a different server.
@@ -751,14 +813,28 @@ async function runServerSide(def: ConnectorDef, options: AuthRunOptions): Promis
 
 /** Run the auth flow for a connector; returns the credential patch to persist. */
 export async function runAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Partial<ConnectorCredential>> {
-  switch (def.authMode) {
-    case 'oauth':
-      return runOAuth(def, options)
+  // `auto` is resolved HERE, from the definition (policy.ts owns the rule):
+  // declared credential fields → the token form; otherwise the MCP endpoint
+  // authorizes itself (probe → public, or the standard MCP OAuth chain). The
+  // synthesized config is passed as a definition copy so `runOAuth` keeps
+  // reading `def.auth` exactly as it does for a declared `oauth` connector —
+  // one code path, not two.
+  switch (resolveAuthMode(def)) {
+    case 'oauth': {
+      const auth = def.authMode === 'auto' ? autoOAuthConfig(def) : def.auth as OAuthAuthConfig
+      return runOAuth(auth === undefined ? def : { ...def, auth }, options)
+    }
     case 'device':
       return runDevice(def, options)
     case 'token':
       return runToken(def, options)
     case 'server-side':
       return runServerSide(def, options)
+    case 'none':
+      // Nothing to authorize: a local stdio server, or a definition that names
+      // no credentials and no endpoint. Persist the marker so the row has a
+      // credential to be "usable" with — the same shape a `device` connector
+      // without a verification URL has always written.
+      return { updatedAt: Date.now() } satisfies Partial<ConnectorCredential>
   }
 }

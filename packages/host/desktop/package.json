@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-desktop",
-  "version": "2.8.2",
+  "version": "2.8.3-beta.1",
   "description": "PicoAide Harness: an Electron shell composed as a DeepSeek Harness Cordis plugin",
   "license": "MIT",
   "publishConfig": {
@@ -385,6 +385,10 @@
       {
         "from": "build/speech-model",
         "to": "speech-model"
+      },
+      {
+        "from": "build/runtimes",
+        "to": "runtimes"
       }
     ],
     "electronFuses": {
@@ -584,7 +588,10 @@
         "!**/node_modules/node-addon-require-builtin-linux-arm*/*",
         "!**/node_modules/node-pty/prebuilds/win32-*/**",
         "!**/node_modules/node-pty/prebuilds/darwin-*/**",
-        "!**/node_modules/node-pty/prebuilds/linux-arm*/**"
+        "!**/node_modules/node-pty/prebuilds/linux-arm*/**",
+        "!build/runtimes/**",
+        "!build/runtimes-cache/**",
+        "!build/speech-model/**"
       ]
     }
   }

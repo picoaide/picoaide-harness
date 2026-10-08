@@ -448,6 +448,18 @@
       "file": "0082_report_subscription_retry.sql",
       "bytes": 3042,
       "sha256": "d7a1bad79545e283906dcf0fcb80a5ccb129220d86c29cfb88f42dae69f7fc2f"
+    },
+    {
+      "version": "0083",
+      "file": "0083_connectors_auth_mode_auto.sql",
+      "bytes": 2108,
+      "sha256": "8d1fb18f1aedbe1cbccfb31a6cc67d76588fbb5e273634b5c48666130563b0b3"
+    },
+    {
+      "version": "0084",
+      "file": "0084_sales_easy_endpoint_discovery.sql",
+      "bytes": 3081,
+      "sha256": "245eb7e944b583cb5aad8148bd78f04617db17e2b7a1432ec6ee85e7996ef147"
     }
   ]
 }

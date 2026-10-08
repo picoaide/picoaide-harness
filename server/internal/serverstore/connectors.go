@@ -33,8 +33,13 @@ var (
 var connectorIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
 
 // connectorAuthModes 是合法的认证模式(与客户端 ConnectorAuthMode 对齐)。
+//
+// `auto`(2026-10-08)="该鉴权鉴权":定义只给 MCP 端点时，客户端在连接那一刻按
+// 端点自述决定 —— 探测 2xx 即公开端点、401 走 MCP 授权规范(RFC 9728 → 8414 →
+// 动态注册 → PKCE)，声明了 tokenFields 则走凭据表单，既无 URL 又无表单即免凭据。
+// 标准 mcpServers 形状经 connector_mcp_servers.go 归一后默认填这个模式。
 var connectorAuthModes = map[string]bool{
-	"oauth": true, "device": true, "token": true, "server-side": true,
+	"oauth": true, "device": true, "token": true, "server-side": true, "auto": true,
 }
 
 func validateConnector(c *Connector) error {
@@ -859,6 +864,11 @@ func GetConnector(db *sql.DB, id string) (*Connector, error) {
 
 // CreateConnector inserts a new connector row (id conflict → ErrDuplicate)。
 func CreateConnector(db *sql.DB, c *Connector) error {
+	// 写入前归一：标准 MCP 配置(mcpServers 形状)在**这里**翻成规范 ConnectorDef，
+	// 库里因此只有一份形状，客户端不需要第二条解析路径。
+	if err := normalizeConnector(c); err != nil {
+		return err
+	}
 	if err := validateConnector(c); err != nil {
 		return err
 	}
@@ -875,6 +885,10 @@ func CreateConnector(db *sql.DB, c *Connector) error {
 
 // UpdateConnector updates name/description/auth_mode/definition/enabled.
 func UpdateConnector(db *sql.DB, c *Connector) error {
+	// 同 CreateConnector：更新路径也必须归一（管理员把标准配置贴回编辑框再保存）。
+	if err := normalizeConnector(c); err != nil {
+		return err
+	}
 	if err := validateConnector(c); err != nil {
 		return err
 	}

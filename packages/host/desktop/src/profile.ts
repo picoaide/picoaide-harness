@@ -33,6 +33,7 @@ import { resolveDshHome } from './desktop-home.ts'
 import { parseDocument } from 'yaml'
 import type { DesktopShellMode } from './runtime.ts'
 import { resolveBundledSpeechModel } from './speech-model-bundle.ts'
+import { bundledPackageManager, type BundledRuntimes } from './bundled-runtimes.ts'
 import {
   activeDesktopProfileLayers,
   readDesktopDisabledBundles,
@@ -1302,18 +1303,23 @@ export async function prepareDesktopProfile(
  *   · `cwd` —— 启动器的工作目录，语义与上游 CLI 相同（`process.cwd()`）。它只被用来
  *     锚定"安装 bundle"时的**相对**路径参数，绝对路径不受影响。
  *
- * `packageManager` **有意不提供**：随包不带 pnpm，也不带任何可执行包管理器入口
- * （`package.json` 的 `files`/`asarUnpack` 与 `tests/package.spec.ts` 里
- * `installDesktopPnpmRuntime` 的反向断言共同保证这一点）。编造入口只会把"这台机器没有
- * 包管理器"伪装成"命令不存在"。缺省时 `PluginManager` 用 `pnpmCommand: 'pnpm'`，即回落到
- * PATH 上的 pnpm：**插件服务本身照常可用**（`list_plugins`/`list_bundles`/启停都工作），
- * 只有 `install_bundle`/`remove_bundle` 这类包操作会因 `ENOENT` 失败——上游把 pnpm 的
- * stderr 原样回给模型（`runProfilePnpm` → `plugin_manager` 工具结果），失败是 loud 的，
- * 不是静默降级。
+ * `packageManager` —— 2026-10-08 起**提供**，指向**随包 pnpm**：客户端随包分发
+ * node + pnpm（`extraResources` → `<resources>/runtimes/`，见 `src/bundled-runtimes.ts`），
+ * `command` = 随包 node、`args` = 随包 `pnpm.mjs`。此前这一项**有意不提供**（随包不带任何
+ * 包管理器入口）⇒ `PluginManager` 回落到 PATH 上的 `pnpm`，`install_bundle`/`remove_bundle`
+ * 在客户端上必然 `ENOENT`（上游把 pnpm 的 stderr 原样回给模型，失败是 loud 的）——
+ * 而"把能力打成 bundle 再 install"正是创造模式文档里的作者化路径，于是那条路在客户端
+ * 上走不通。载荷缺席时（开发运行、未带载荷的构建）**仍然不提供**，语义回到上面那段：
+ * 回落 PATH，不编造入口。
  * @param prepared - the prepared desktop generation this context describes.
+ * @param runtimes - 本次启动解析出的随包运行时（缺省 = 无；`main.ts` 传
+ *   `installBundledRuntimes()` 的结果，冒烟/单测按需注入）。
  * @returns the launcher-owned context passed to `ctx.provide('profileContext', …)`.
  */
-export function desktopProfileContext(prepared: PreparedDesktopProfile): ProfileContext {
+export function desktopProfileContext(
+  prepared: PreparedDesktopProfile,
+  runtimes?: BundledRuntimes | undefined,
+): ProfileContext {
   return {
     name: DESKTOP_PROFILE_NAME,
     dir: prepared.profile.dir,
@@ -1324,6 +1330,7 @@ export function desktopProfileContext(prepared: PreparedDesktopProfile): Profile
     home: prepared.homeDir,
     overlays: prepared.overlays,
     telemetryDisabledEnv: prepared.telemetryDisabledEnv,
+    ...runtimes === undefined ? {} : { packageManager: bundledPackageManager(runtimes) },
   }
 }
 

@@ -19,7 +19,7 @@ import {
   resolveSpeechModelPayloadAction,
   type ChannelPrepareOptions,
 } from '../scripts/channel-prepare.ts'
-import type { SpeechModelPayloadDeps } from '../scripts/channel-prepare.ts'
+import type { SpeechModelPayloadDeps, BundledRuntimesPayloadDeps } from '../scripts/channel-prepare.ts'
 
 /**
  * 载荷读写的**替身**：所有用例都经 {@link prepareChannelPackaging} 注入它。
@@ -45,9 +45,31 @@ function speechModelStub(): SpeechModelPayloadDeps & { materialized: string[], c
   }
 }
 
-/** 打包准备（测试入口）：自动注入载荷替身。 */
+/**
+ * 随包 agent 运行时（node/pnpm/python）的载荷替身（2026-10-08 起**所有渠道默认随包**）。
+ *
+ * 同语音模型：真实现要联网拉三套运行时（展开 ~240MiB），单测不能依赖公网也不该花这个
+ * 时间。替身只记录调用与参数；真实的下载/校验/解包由 `fetch-bundled-runtimes.mjs`
+ * 自己的实测与 afterPack 门禁（`assertBundledRuntimesPackaged`）负责。
+ */
+function runtimesStub(): BundledRuntimesPayloadDeps & { materialized: { out?: string, target?: string }[] } {
+  const materialized: { out?: string, target?: string }[] = []
+  return {
+    materialized,
+    materializeBundledRuntimes: async (options) => {
+      materialized.push(options ?? {})
+      return {
+        out: options?.out ?? '',
+        target: options?.target ?? 'linux-x64',
+        manifest: { versions: { node: '0.0.0-probe', pnpm: '0.0.0-probe', python: '0.0.0-probe' } },
+      }
+    },
+  }
+}
+
+/** 打包准备（测试入口）：自动注入两个载荷替身。 */
 function prepareChannelPackaging(options: ChannelPrepareOptions = {}) {
-  return prepareChannelPackagingReal({ speechModel: speechModelStub(), ...options })
+  return prepareChannelPackagingReal({ speechModel: speechModelStub(), runtimes: runtimesStub(), ...options })
 }
 import { SPEECH_MODEL_PAYLOAD_DIR } from '../scripts/verify-packaged-runtime.ts'
 import { generateTrayIcons } from '../scripts/generate-tray-icons.mjs'

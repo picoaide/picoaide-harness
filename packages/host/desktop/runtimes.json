@@ -1,0 +1,146 @@
+{
+  "schema": 1,
+  "note": "Pinned agent-runtime payload for the desktop client: node + pnpm + python. Every entry is authoritative — bytes/sha256 come from the vendor's own manifest (nodejs.org SHASUMS256.txt, the npm registry SRI, the GitHub release digest). scripts/fetch-bundled-runtimes.mjs verifies these before anything is staged; never hand-edit a digest without re-fetching from the source named in `source`.",
+  "targets": [
+    "linux-x64",
+    "darwin-arm64",
+    "win-x64"
+  ],
+  "budget": {
+    "note": "随包运行时载荷的**体积上限**（棘轮）：bytes/files 是钉死版本实测出来的值，门禁只允许 ≤。任何运行时版本升级、裁剪清单收缩、shim 增加都会让它变红 —— 这是有意的：那类改动会同时抬高每个平台的安装包体积（载荷未压缩，交付件按约 1/4.5 计），必须由作者在这一处显式改写数字并说明理由，而不是悄悄胖一圈。改这里要连带跑 scripts/fetch-bundled-runtimes.mjs --check 复核实测值（三个目标各自 materialize 一次）。",
+    "targets": {
+      "linux-x64": { "bytes": 252050678, "files": 3840 },
+      "darwin-arm64": { "bytes": 216524742, "files": 3840 },
+      "win-x64": { "bytes": 188763356, "files": 5792 }
+    }
+  },
+  "node": {
+    "version": "24.21.0",
+    "source": "https://nodejs.org/dist/v24.21.0/SHASUMS256.txt",
+    "base": "https://nodejs.org/dist/v24.21.0/",
+    "targets": {
+      "linux-x64": {
+        "asset": "node-v24.21.0-linux-x64.tar.gz",
+        "kind": "tar.gz",
+        "bytes": 58088022,
+        "sha256": "6e1db87ef58b8819e5d5402eff1536491b18edd8eb7bee5ef7897876e88dc5ff"
+      },
+      "darwin-arm64": {
+        "asset": "node-v24.21.0-darwin-arm64.tar.gz",
+        "kind": "tar.gz",
+        "bytes": 52909993,
+        "sha256": "bed7eea5325e1108f32ce5228ddd6a5f0f08a499ee42aa7442aea583702f6057"
+      },
+      "win-x64": {
+        "asset": "node-v24.21.0-win-x64.zip",
+        "kind": "zip",
+        "bytes": 37618919,
+        "sha256": "158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541"
+      }
+    },
+    "prune": [
+      "include",
+      "share/doc",
+      "share/man",
+      "share/systemtap",
+      "CHANGELOG.md",
+      "README.md",
+      "bin/corepack",
+      "bin/corepack.cmd",
+      "bin/corepack.ps1",
+      "lib/node_modules/corepack"
+    ],
+    "commands": {
+      "posix": {
+        "node": "bin/node",
+        "npm": "bin/npm",
+        "npx": "bin/npx"
+      },
+      "win": {
+        "node": "node.exe",
+        "npm": "npm.cmd",
+        "npx": "npx.cmd"
+      }
+    }
+  },
+  "pnpm": {
+    "version": "11.7.0",
+    "source": "https://registry.npmjs.org/pnpm/11.7.0",
+    "base": "https://registry.npmjs.org/pnpm/-/",
+    "integrity": "sha512-GcyFLBIMcSV2DyRD7mvgyltA+fUFmN4aCaHxd1A+AQ5Xwjx3ZG4B52HeWb+HT7IqM5jDOrlpH8E+uUa28PTWIA==",
+    "targets": {
+      "linux-x64": {
+        "asset": "pnpm-11.7.0.tgz",
+        "kind": "tar.gz",
+        "bytes": 4590455,
+        "sha256": "deafa7ec98a1218b6a047289b92fbe2395c1e22d3495bb711653013218ee15ee"
+      },
+      "darwin-arm64": {
+        "asset": "pnpm-11.7.0.tgz",
+        "kind": "tar.gz",
+        "bytes": 4590455,
+        "sha256": "deafa7ec98a1218b6a047289b92fbe2395c1e22d3495bb711653013218ee15ee"
+      },
+      "win-x64": {
+        "asset": "pnpm-11.7.0.tgz",
+        "kind": "tar.gz",
+        "bytes": 4590455,
+        "sha256": "deafa7ec98a1218b6a047289b92fbe2395c1e22d3495bb711653013218ee15ee"
+      }
+    },
+    "prune": [],
+    "entry": "bin/pnpm.mjs"
+  },
+  "python": {
+    "version": "3.12.15",
+    "release": "20261003",
+    "source": "https://github.com/astral-sh/python-build-standalone/releases/tag/20261003",
+    "base": "https://github.com/astral-sh/python-build-standalone/releases/download/20261003/",
+    "targets": {
+      "linux-x64": {
+        "asset": "cpython-3.12.15+20261003-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
+        "kind": "tar.gz",
+        "bytes": 34285590,
+        "sha256": "731af898886c5f821890dc901eca3c651cca8e51fa7308c159d12a1194aeac91"
+      },
+      "darwin-arm64": {
+        "asset": "cpython-3.12.15+20261003-aarch64-apple-darwin-install_only_stripped.tar.gz",
+        "kind": "tar.gz",
+        "bytes": 25013243,
+        "sha256": "ad8d0c637c0a36b967b310e2c07254f4d2ca8cabaa7699e55ed6290aceb481a2"
+      },
+      "win-x64": {
+        "asset": "cpython-3.12.15+20261003-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+        "kind": "tar.gz",
+        "bytes": 22011023,
+        "sha256": "6fba7f2ae506facf41d457ea8293c7497910a675c69a4e954875169410a50402"
+      }
+    },
+    "prune": [
+      "lib/python3.12/test",
+      "lib/python3.12/idlelib",
+      "lib/python3.12/turtledemo",
+      "lib/python3.12/lib2to3",
+      "lib/python3.12/config-3.12-x86_64-linux-gnu",
+      "lib/python3.12/config-3.12-darwin",
+      "lib/libpython3.12.a",
+      "share",
+      "bin/2to3",
+      "bin/2to3-3.12",
+      "bin/idle3",
+      "bin/idle3.12",
+      "bin/pydoc3",
+      "bin/pydoc3.12"
+    ],
+    "commands": {
+      "posix": {
+        "python": "bin/python3",
+        "python3": "bin/python3",
+        "pip3": "bin/pip3"
+      },
+      "win": {
+        "python": "python.exe"
+      }
+    }
+  }
+}
