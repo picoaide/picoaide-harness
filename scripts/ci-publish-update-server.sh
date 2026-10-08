@@ -56,6 +56,72 @@ set -euo pipefail
 # shellcheck source=scripts/ci-brand-mask.sh
 . "$(dirname "$0")/ci-brand-mask.sh"
 
+# 语义化版本比较(semver 2.0.0 §11;忽略 build metadata)。
+#
+#   semver_compare <a> <b>  →  stdout 一个整数:-1 = a<b、0 = 相等、1 = a>b
+#
+# ## 为什么不能用 `sort -V`(2026-10-08 v2.8.2 正式发版现场)
+#
+# GNU version sort **不实现 semver 的预发布语义**:同一个号里它把**预发布版排在正式版
+# 之前**,而 semver §11.3 规定相反(`2.8.2-beta.7` < `2.8.2`)。实测:
+#
+#     printf '2.8.2\n2.8.2-beta.7\n' | sort -V | head -1   →  2.8.2
+#
+# 后果(线上真实发生):beta 渠道的 `latest.json` 停在 `2.8.2-beta.7`,发布 `2.8.2` 时
+# 单调守卫拿这行判定"写下去会倒退",于是**静默跳过写指针**(只有一行 `::warning::`)——
+# 四渠道里三个前进到 2.8.2、beta 留在预发布版,而流水线全绿。
+#
+# 本仓库对这件事其实早有记录:`sort -rV` 的同一语义让"正式版一出就被自己的预发布挤到
+# 第 KEEP+1 位",保留策略(见下面 prune 段的长注释)为此专门把 `$VER` 排除在淘汰之外 +
+# 把留存个数与相对次序解耦。也就是说:**同一个错误次序在一处被绕开、在另一处直接咬人**。
+# 因此判据面(单调守卫的三处)改用这份实现;保留策略保持它自己那套已登记的补偿口径不动
+# (它的语义是"留存个数与版本序无关",不依赖正确次序)。
+#
+# 边界:调用点必须先用具名正则确认形状(`^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$`),
+# 本函数不做形状校验 —— 非 semver 输入的结果无定义。
+semver_compare() {
+  LC_ALL=C awk -v A="$1" -v B="$2" '
+    function strip(v) { sub(/\+.*$/, "", v); return v }            # §10:先剥 build metadata
+    function core(v)  { sub(/-.*$/, "", v); return v }
+    function pre(v)   { return (index(v, "-") > 0) ? substr(v, index(v, "-") + 1) : "" }
+    function isnum(s) { return (s ~ /^[0-9]+$/) }
+    function cmpnum(x, y,   nx, ny) {
+      nx = x + 0; ny = y + 0
+      return (nx < ny) ? -1 : ((nx > ny) ? 1 : 0)
+    }
+    # §11.4:数字标识符 < 字母数字标识符;数字按数值比,字母数字按 ASCII 字典序。
+    function cmpident(x, y) {
+      if (x == y) return 0
+      if (isnum(x) && isnum(y)) return cmpnum(x, y)
+      if (isnum(x)) return -1
+      if (isnum(y)) return 1
+      return (x < y) ? -1 : 1
+    }
+    function cmppre(p, q,   np, nq, i, n, xp, xq, r) {
+      if (p == "" && q == "") return 0
+      if (p == "") return 1                                        # 无预发布 > 有预发布
+      if (q == "") return -1
+      np = split(p, xp, "."); nq = split(q, xq, ".")
+      n = (np < nq) ? np : nq
+      for (i = 1; i <= n; i++) {
+        r = cmpident(xp[i], xq[i]); if (r != 0) return r
+      }
+      return (np == nq) ? 0 : ((np > nq) ? 1 : -1)                 # 前缀相同:段数多者大
+    }
+    BEGIN {
+      a = strip(A); b = strip(B)
+      ca = core(a); cb = core(b)
+      na = split(ca, xa, "."); nb = split(cb, xb, ".")
+      n = (na < nb) ? na : nb
+      for (i = 1; i <= n; i++) {
+        r = cmpident(xa[i], xb[i]); if (r != 0) { print r; exit }
+      }
+      if (na != nb) { print (na > nb) ? 1 : -1; exit }
+      print cmppre(pre(a), pre(b))
+    }
+  '
+}
+
 LIST="channels.list"
 BUNDLE="release-bundle"
 while [ $# -gt 0 ]; do
@@ -590,8 +656,11 @@ while IFS= read -r channel; do
       echo "::error::更新服务器发布失败(渠道 ${INDEX}:现有版本指针的正文里解析不出可比的版本号(形状不是本流水线写的 schema 1 清单))—— 拒绝写指针,请人工核对 ${pointer_key}" >&2
       exit 1
     fi
+    # 判定用 {@link semver_compare}(**不是** `sort -V`):预发布版升到同号的正式版
+    # (`2.8.2-beta.7` → `2.8.2`)必须放行 —— 那是 beta 线转正的**正常**路径,而
+    # `sort -V` 会把正式版判成更旧(2026-10-08 v2.8.2 现场:beta 指针因此停在预发布版)。
     if [ "$pointer_ver" != "$VER" ] \
-      && [ "$(printf '%s\n%s\n' "$pointer_ver" "$VER" | sort -V | head -n1)" = "$VER" ]; then
+      && [ "$(semver_compare "$VER" "$pointer_ver")" -lt 0 ]; then
       pointer_regressed=1
       echo "::warning::更新服务器跳过写版本指针(渠道 ${INDEX}:现有指针是 ${pointer_ver}、本次发布的是 ${VER} —— 写下去会把更新指针倒退;并发的另一个 tag 已经发过更新的版本)。本次的版本目录与 GitHub Release 不受影响,指针保持 ${pointer_ver} 不动。"
     fi
@@ -720,8 +789,9 @@ JSON
         rm -f "$manifest"
         exit 1
       fi
+      # 与 3b) 同一份判定(同一理由:`sort -V` 会把"预发布 → 同号正式版"判成倒退)。
       if [ "$cas_ver" != "$VER" ] \
-        && [ "$(printf '%s\n%s\n' "$cas_ver" "$VER" | sort -V | head -n1)" = "$VER" ]; then
+        && [ "$(semver_compare "$VER" "$cas_ver")" -lt 0 ]; then
         pointer_regressed=1
         echo "::warning::更新服务器跳过写版本指针(渠道 ${INDEX}:条件写被拒后发现现有指针是 ${cas_ver}、本次发布的是 ${VER} —— 并发的另一个 tag 已经发过更新的版本)。本次的版本目录与 GitHub Release 不受影响,指针保持 ${cas_ver} 不动。"
         break
@@ -752,7 +822,7 @@ JSON
       superseded_ver="$(printf '%s\n' "$superseded_body" \
         | sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*$/\1/p' | head -n1)"
       if [ -n "$superseded_ver" ] && [ "$superseded_ver" != "$VER" ] \
-        && [ "$(printf '%s\n%s\n' "$superseded_ver" "$VER" | sort -V | tail -n1)" = "$superseded_ver" ]; then
+        && [ "$(semver_compare "$superseded_ver" "$VER")" -gt 0 ]; then
         pointer_regressed=1
         echo "::warning::更新服务器跳过写版本指针(渠道 ${INDEX}:本次条件写成功后,并发的另一个 tag 已经把指针更新到 ${superseded_ver}(本次 ${VER})—— 指针保持更新的那个版本)。本次的版本目录与 GitHub Release 不受影响。"
       else
