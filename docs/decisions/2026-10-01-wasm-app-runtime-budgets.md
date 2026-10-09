@@ -158,3 +158,34 @@ AssertionError: 客户端出站超时 30s 必须严格大于 guest_budget 30s: e
 （`appserver.requestBudgets` 每请求读 `CurrentLimits()`；干跑路径
 `api.dryRunBudgets` 同源），`sql_statement_budget_seconds` 的生效范围如实标注为
 **下一个新建的应用库句柄**（不是"即时生效"）。
+
+## 2026-10-08 追加：控制台区间 = **有效区间**（现场"改了时间预算保存不了"）
+
+**现场**：管理员在 `admin/app-center/limits` 把「编译超时」改到 60 s 以上，点「保存并生效」
+后**页面上什么都没发生** —— 于是被报成"时间预算修改后不能保存 / 客户端没解析服务端应答"。
+
+拆开是两件事，两件都修了：
+
+1. **区间写的是基础区间，不是有效区间**：`applimits.Ranges()` 对六项时间预算给的是
+   `MinBudgetSeconds..MaxBudgetSeconds`（编译超时 1–300），而 `Validate` 实际上界是
+   `ServerReadTimeout`（60 s）—— 控制台把 `max=300` 与「（1–300）」照实渲染出来，
+   **把管理员引到一个必然被拒的值上**。同类还有：干跑/宿主调用的 300（实际 ≤ guest 的
+   独立上限 120）、单条 SQL 的 1（实际 > busy timeout ⇒ ≥4）与 300（实际 < 宿主调用 ⇒ ≤119）、
+   guest 的 1（宿主调用必须严格大于 SQL ⇒ guest 的可行下限是 5）。
+   现在区间由 `effectiveBudgetBounds` **从同一批序关系推导**（迭代到不动点），
+   `Ranges()` 与 `Validate` 的范围判据共用它；原先靠序关系分支兜底的两条
+   （`编译 ≤ ReadTimeout`、`SQL > busy timeout`）结构上不再可达，其解释与出路搬进了
+   范围判据的 hints。判据是一对**双向**用例：`TestBudgetRangesAreReachable`（区间内每个值
+   都要有见证 ⇒ 声明不得宽于可行域）与 `TestBudgetRangesAreSound`（区间外每个值都不得有
+   合法组合 ⇒ 声明不得窄于可行域）。
+2. **反馈渲染在点击处之外**：错误块原先渲染在字段区**之上**，而保存按钮在 18 格表单的最底部
+   —— 管理员点保存时视口停在按钮上（真机实测 `scrollTop=1476`、视口 900，页头在内容坐标
+   142 ⇒ 旧位置的错误块必然在视口外），表单又被拉回服务端真值，于是"看不见任何反馈"。
+   现在反馈区渲染在**动作按钮上方**，且保存被拒时按 `details.field` 定位到那一格
+   （`aria-invalid` + 格内错误全文 + 滚动/聚焦过去）；服务端没点名字段（如四笔账水位）
+   时退回滚动到错误块。判据在 `AppPlatform.test.tsx`，另有真机探针
+   （headless Chromium + CDP，见 `temp/limits-ui-probe/`，不入库）实测两条反馈都在视口内。
+
+**没有放宽任何执行期闸门**：编译超时仍然 ≤ 60 s（传输层 `ReadTimeout` 是不可配置常量），
+变的只是"控制台把能填的范围写对、以及拒绝时说清楚为什么"。要让编译预算更大，出路是
+拆小应用产物，或由运维调整服务端 `ReadTimeout` 后重建镜像。
