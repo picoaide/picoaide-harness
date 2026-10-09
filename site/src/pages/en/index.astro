@@ -3,153 +3,562 @@ import { Image } from 'astro:assets'
 import Layout from '../../layouts/Layout.astro'
 import Header from '../../components/Header.astro'
 import Footer from '../../components/Footer.astro'
+import Icon from '../../components/Icon.astro'
+import ArchitectureDiagram from '../../components/ArchitectureDiagram.astro'
+import DeliveryDiagram from '../../components/DeliveryDiagram.astro'
 import logo from '../../../../brands/official/logo.svg'
+import logoDark from '../../../../brands/official/logo-dark.svg'
 import mainShot from '../../assets/screenshots/desktop-main.png'
+import capabilityShot from '../../assets/screenshots/desktop-capability-market.png'
+import connectorsShot from '../../assets/screenshots/desktop-connectors.png'
+import cronShot from '../../assets/screenshots/desktop-cron.png'
+import settingsShot from '../../assets/screenshots/desktop-settings.png'
+import adminUsersShot from '../../assets/screenshots/admin-users.png'
+import adminCapabilityShot from '../../assets/screenshots/admin-capabilities.png'
+import adminGatewayShot from '../../assets/screenshots/admin-gateway.png'
+import adminUsageShot from '../../assets/screenshots/admin-usage.png'
+import adminAuditShot from '../../assets/screenshots/admin-audit.png'
+import adminServerShot from '../../assets/screenshots/admin-server-info.png'
 
-// 英文站落地页（第三十二轮 FIX-47 ④e）。
+// English landing page. It is the **same page** as the Chinese one
+// (`src/pages/index.astro`) — same sections, same section ids, same data shape —
+// so the two locales cannot drift visually or structurally.
 //
-// 为什么必须有这个文件：`astro.config.mjs` 声明了 `en` locale，Starlight 给**每一页**
-// 渲染的页头站点标题 logo 都链到 `/<locale>/`；中文首页来自自定义 `src/pages/index.astro`，
-// 而 `src/pages/en/` 此前不存在、Starlight 也不会替它生成 ⇒ `/en/` 404，
-// 英文站 17 页**全部**带一条生成型死链（源码面看不出来，只有产物面扫得出来）。
-// 本页是**真实可用的英文落地页**（不是占位页）：Hero + 功能卡片 + 英文文档入口 + 页脚。
+// Three hard rules (they are enforced by site/scripts/check-en-landing-nav.mjs):
+//   1. every internal link is an absolute path with a trailing slash and starts
+//      with `/en/` — a bare `/deployment/` here would send English visitors to
+//      the Chinese site (regression audit E-04);
+//   2. the header and footer components must receive `locale="en"` (they read the
+//      nav table by locale);
+//   3. anchors must point at ids that exist **on this page**.
 //
-// 站内链接**一律绝对路径 + 结尾斜杠**（本仓硬约定；相对链接不会被 Astro 重写）。
-// 顶栏/页脚必须传 `locale="en"`：两个组件按 locale 取导航表（`src/components/site-nav.mjs`），
-// 不传就是中文站的表 ⇒ 英文落地页上的导航全部把访客送回中文站（判据见
-// `site/scripts/check-en-landing-nav.mjs`）。
-// 视觉语言沿用中文首页（同一套 global.css 变量与 .container/.section/.btn/.feature 类）。
-// 品牌素材只用 `brands/official/logo.svg`（几何真源），产品截图复用既有 assets。
+// Section ids on this page: #platform #capabilities #control #deployment
+// #channels #security #screenshots #updates #faq — identical to the Chinese page.
 
-const features = [
+const layers = [
   {
+    kicker: 'Desktop',
     title: 'Desktop client',
-    body: 'A native window with tray, terminal and automatic updates. Chat, Capability Hub, connectors, scheduled jobs and the built-in browser in one place — no Node.js required on employee machines.',
-    href: '/en/desktop/',
-    link: 'Desktop client guide',
+    body: 'A native window with tray, terminal and automatic updates. Chat, Capability Hub, connectors, scheduled jobs, the built-in browser and voice input all live in one place.',
+    ticks: [
+      'Ships with its own Node.js / pnpm / Python runtime — nothing to install on employee machines',
+      'Closing the window only hides it to the tray; diagnostics export in one click',
+      'Connector credentials, browser sessions and scheduled jobs are isolated per account',
+    ],
   },
   {
+    kicker: 'Local host',
     title: 'Local agent engine',
-    body: 'Starts, stops and recovers the local Harness service automatically, so sessions and files stay on the machine. The upstream DeepSeek Harness runs unmodified at a pinned version.',
-    href: '/en/architecture/',
-    link: 'System architecture',
+    body: 'Starts, stops and recovers the local Harness service automatically. Sessions, files and workspaces stay on the machine; model traffic goes through your gateway.',
+    ticks: [
+      'The upstream DeepSeek Harness runs unmodified at a pinned version',
+      'Desktop shell and business plugins compose through the official Cordis mechanism',
+      'Sandbox is chosen per session: read-only / workspace-write / full access',
+    ],
   },
   {
+    kicker: 'Server',
     title: 'Enterprise server and admin console',
-    body: 'Accounts, departments, authentication, model gateway, usage and audit in one console, with per-user and per-model metering, balance limits and peak-hour pricing.',
-    href: '/en/admin/',
-    link: 'Admin console',
-  },
-  {
-    title: 'Private deployment in one image',
-    body: 'Server, built-in PostgreSQL, reverse proxy and the installers for all supported platforms ship inside a single image. Choose self-signed, automatic or enterprise certificates with one variable.',
-    href: '/en/deployment/',
-    link: 'Deployment guide',
-  },
-  {
-    title: 'Client delivery and channel white-label',
-    body: 'Clients are published by the server they log in to, so a client can never drift from its server. Name, tagline, logo and accent colour come from the channel content shipped with the image.',
-    href: '/en/deployment/channels/',
-    link: 'Channels and white-label',
-  },
-  {
-    title: 'Extensible by design',
-    body: 'The core agent, web UI, desktop shell, connectors, scheduled jobs, browser and memory are all composed through the official Cordis plugin mechanism — replaceable and versioned.',
-    href: '/en/plugin-development/',
-    link: 'Plugin development',
+    body: 'One intranet server carries accounts, the model gateway, metering, approvals and audit. The admin console is embedded in the same image.',
+    ticks: [
+      'Upstream model keys are AES-GCM encrypted and never leave the server — employees hold no API key',
+      'Client installers and updates are served by this same server',
+      'Employees never see the console: it lives at /admin/, gated by RBAC permissions',
+    ],
   },
 ]
 
-const docs = [
-  { title: 'Welcome', body: 'What the platform is and how to read this Wiki.', href: '/en/welcome/' },
-  { title: 'Quick start', body: 'From an empty machine to a working client.', href: '/en/getting-started/' },
-  { title: 'Product philosophy', body: 'Why the product is built this way.', href: '/en/philosophy/' },
-  { title: 'Container deployment', body: 'Bring up server, database and proxy.', href: '/en/deployment/compose/' },
-  { title: 'Upgrade, backup and rollback', body: 'Move versions without losing data.', href: '/en/deployment/upgrade/' },
-  { title: 'Client delivery and updates', body: 'How employees install and update.', href: '/en/deployment/client-delivery/' },
-  { title: 'API reference', body: 'Management and client-side endpoints.', href: '/en/api-reference/' },
-  { title: 'FAQ', body: 'Common questions about deployment and data.', href: '/en/faq/' },
+const levels = [
+  {
+    title: 'Individual experimenting',
+    note: 'People reach for outside tools, data leaves the company, and spend is a black box.',
+    provides: [
+      'Clients are served by your own server; employees only reach your domain',
+      'Upstream model keys live on the server — no key ever reaches a laptop',
+    ],
+  },
+  {
+    title: 'Department pilots',
+    note: 'Every team wires up its own stack and nothing can be reused next door.',
+    provides: [
+      'One gateway and one model catalogue: a new model is a config change, not a code change',
+      'Capability Hub grants to users or departments — no more rebuilding the same thing',
+    ],
+  },
+  {
+    title: 'Platform-wide reuse',
+    note: 'Skills, agents and apps become searchable, approvable and reusable assets.',
+    provides: [
+      'Capability Hub: employee upload → admin approval → everyone reuses it, with clear ownership',
+      'Five-track memory: project know-how is kept per directory and git branch',
+      'App centre: small tools built by one team open directly for everyone else',
+    ],
+  },
+  {
+    title: 'Measurable AI-native',
+    note: 'Management can see the water line: who uses AI, where, at what cost, and what got reused.',
+    provides: [
+      'Usage is attributed by department, member and model, on a reconcilable ledger',
+      'A balance gate and a hash-chained audit log: spend is bounded, behaviour is traceable',
+    ],
+  },
 ]
 
-const steps = [
-  { title: 'Fetch the image', body: 'Download the image archive and checksums from your channel, verify them and load the image. No registry is involved.' },
-  { title: 'Export the stack files', body: 'One command writes the compose file, the certificate variants and the client installers to your deployment directory.' },
-  { title: 'Start and self-check', body: 'Bring up the proxy, server and built-in database, then confirm the health probe and the client manifest.' },
-  { title: 'Deliver to everyone', body: 'Employees download the client from the server portal and sign in. Upgrading the server upgrades every client.' },
+const capabilities = [
+  {
+    icon: 'chat',
+    title: 'Chat and workspaces',
+    body: 'Every session is bound to a project directory; file writes, shell commands and browser actions are confirmed per call through the permission gate.',
+  },
+  {
+    icon: 'grid',
+    title: 'Capability Hub',
+    body: 'Skills and agents, from your own library or the shared marketplace — install, update, uninstall and review upload status in one place.',
+  },
+  {
+    icon: 'link',
+    title: 'Connectors',
+    body: 'Reach internal systems with one standard MCP configuration. OAuth authorisation and token renewal happen automatically; credentials stay encrypted locally.',
+  },
+  {
+    icon: 'clock',
+    title: 'Scheduled jobs',
+    body: 'cron plus prompt, workspace and agent preset. Every run keeps its session, result and error so it can be reviewed afterwards.',
+  },
+  {
+    icon: 'browser',
+    title: 'Built-in browser',
+    body: 'The agent can drive a real browser: tabs, address bar, download control and an operation log. Control changes hands only through the “I will take over” button.',
+  },
+  {
+    icon: 'mic',
+    title: 'Voice input',
+    body: 'Dictate into the composer. Recognition runs in a local subprocess — audio never leaves the machine, works offline, and the model ships with the client.',
+  },
+  {
+    icon: 'layers',
+    title: 'Five-track memory',
+    body: 'User profile, global facts, project key memory, project log and daily log — scoped by directory and git branch, written only after you confirm.',
+  },
+  {
+    icon: 'cube',
+    title: 'App centre',
+    body: 'Employees build their own WASM apps with AI. They open in a dedicated client window; the server needs no public hostname or certificate for them.',
+  },
 ]
+
+const controlPoints = [
+  {
+    title: 'Accounts and authentication',
+    body: 'Local accounts, LDAP or OIDC, plus MFA for administrators. Changing a password, lowering a role or disabling an account revokes every token at once.',
+  },
+  {
+    title: 'Model gateway',
+    body: 'Upstream providers and the model catalogue are configured centrally, including input modalities. Keys stay encrypted; clients only see a model list.',
+  },
+  {
+    title: 'Usage and billing',
+    body: 'Per-user, per-model metering of input, output and cache hits, with peak-hour pricing, a balance gate and a ledger you can reconcile entry by entry.',
+  },
+  {
+    title: 'Approvals and grants',
+    body: 'Shared skills and agents go through one approval queue; official and featured content is badged. Grants are issued to users or departments.',
+  },
+  {
+    title: 'Audit log',
+    body: 'Account, department, gateway, capability and approval operations are recorded end to end, protected by a hash chain, with a configurable retention policy.',
+  },
+  {
+    title: 'Server information',
+    body: 'Version, update notices, database and migration state, model concurrency — one screen. Back up first, roll back by pointing at the previous image.',
+  },
+]
+
+const security = [
+  {
+    icon: 'key',
+    title: 'Encrypted credentials',
+    body: 'Upstream keys are stored with AES-GCM (enc:v1: prefix, master key in its own file); credentials are written atomically with 0600/0700 permissions, guarding against symlinks and path escape.',
+  },
+  {
+    icon: 'hash',
+    title: 'Tokens are stored hashed',
+    body: 'Employee API tokens expire after 90 days and only their hash is kept; password, role and status changes revoke them in the same transaction. Admin sessions are capped at 12 hours with idle expiry and CSRF protection.',
+  },
+  {
+    icon: 'shield',
+    title: 'Sandbox and permission tiers',
+    body: 'Sessions choose read-only, workspace-write or full access. Writes are confined to the workspace and a private temp directory (Landlock on Linux, ACLs on Windows); anything outside is refused.',
+  },
+  {
+    icon: 'outbound',
+    title: 'Egress boundary',
+    body: 'The client ignores system proxies by default and its only update source is the server it signed in to. With no server configured it performs no outbound check at all, so an isolated network works offline.',
+  },
+  {
+    icon: 'ban',
+    title: 'Deny by default',
+    body: 'Unauthorised marketplace and shared content returns 404 rather than revealing existence; grant changes are audited; admin actions pass both RBAC and the audit trail.',
+  },
+  {
+    icon: 'database',
+    title: 'Data sovereignty',
+    body: 'Data, keys and the ledger live on your own machines in bind-mounted directories, shipped with the image. No per-seat licence fee, and nothing handed to a third party.',
+  },
+]
+
+const faqs = [
+  {
+    q: 'How does this relate to DeepSeek Harness?',
+    a: 'The upstream project provides the core agent, plugin system and web UI. This project adds the desktop shell, the local service lifecycle and the enterprise server, built on a pinned upstream revision that is never patched. The desktop shell itself is a regular DSH plugin.',
+  },
+  {
+    q: 'Can it be deployed privately?',
+    a: 'Yes — that is the primary form. The deliverable is a single container image (server, embedded PostgreSQL, Caddy and the installers for all supported platforms). Three certificate modes are available and all data lives in bind-mounted directories. You can also join an existing reverse proxy, or run the single binary against an external PostgreSQL.',
+  },
+  {
+    q: 'Do employee machines need internet access?',
+    a: 'No. Clients download and update from your own server; employee machines only talk to your domain. A fully isolated network can import the image archive offline.',
+  },
+  {
+    q: 'How are clients updated?',
+    a: 'By upgrading the server. Client installers ship inside the server image, and each client periodically asks the server it signed in to for a new version, verifying the SHA-256 from the manifest before installing. A client can never drift ahead of its server.',
+  },
+  {
+    q: 'Where do models and keys live?',
+    a: 'The model catalogue and upstream API keys are configured in the admin console. Keys are encrypted on the server; clients receive a model list and a session token only, so no upstream key ever reaches an employee machine.',
+  },
+  {
+    q: 'How are connectors and skills distributed?',
+    a: 'Through the two standard forms: enterprise capabilities ship as SKILL.md and are distributed by the Capability Hub with approval and grants, while MCP capabilities use the connector framework with a single standard configuration. Both are auditable, approvable and revocable.',
+  },
+  {
+    q: 'Is it open source?',
+    a: 'Yes, under the MIT licence, free of charge. The upstream project runs unmodified at a pinned version, and upgrades only follow upstream releases.',
+  },
+  {
+    q: 'Which platforms are supported?',
+    a: 'Windows x64 (NSIS installer), macOS on Apple silicon (DMG, signed and notarised for stable releases) and Linux x64 (AppImage). Linux deb packages are not part of the enterprise delivery surface.',
+  },
+]
+
+const groups = {
+  desktop: 'Windows · macOS · Linux',
+  admin: 'Embedded in the server image',
+}
 ---
 
 <Layout
   lang="en"
   title="PicoAide Harness — enterprise AI platform, privately deployed"
-  description="PicoAide Harness combines a desktop client, a local agent engine and an enterprise server. Deploy one image on your own network; clients ship with the server and employees stay off the public internet."
+  description="PicoAide Harness combines a desktop client, a local agent engine and an enterprise server. Deploy one container image on your own network; clients ship with the server and employee machines stay off the public internet."
 >
   <Header locale="en" />
 
-  <!-- Hero -->
+  <!-- ── Hero ───────────────────────────────────────────────────────────── -->
   <section class="hero">
     <div class="container hero__inner">
       <div class="hero__brand">
-        <Image src={logo} alt="PicoAide Harness" width={56} height={56} class="hero__logo" />
+        <picture>
+          <source srcset={logoDark.src} media="(prefers-color-scheme: dark)" />
+          <img src={logo.src} alt="PicoAide Harness" width="52" height="52" class="hero__logo" />
+        </picture>
         <span class="hero__brandname">PicoAide Harness</span>
       </div>
-      <h1 class="hero__title">An AI operations assistant<br />for every employee</h1>
+
+      <h1 class="hero__title">Turn individual AI habits<br />into <em>organisational capability</em></h1>
+
       <p class="hero__sub">
-        PicoAide Harness brings a desktop client, a local agent engine and an enterprise server
-        together into one platform. The deliverable is a single container image — server, built-in
-        PostgreSQL, reverse proxy and the client installers are all inside it, so employee machines
-        never need access to the public internet.
+        Employees work in the client, and the skills and agents they build can be shared with
+        everyone. Usage, budget and audit stay on your own server. The deliverable is a single
+        container image: server, embedded PostgreSQL, reverse proxy and the installers for all
+        supported platforms are inside it, so employee machines never need the public internet.
       </p>
-      <div class="hero__actions">
-        <a class="btn btn--primary" href="/en/deployment/">Private deployment guide</a>
+
+      <div class="actions actions--center">
+        <a class="btn btn--accent" href="/en/deployment/">Private deployment guide<span class="btn__arrow">→</span></a>
         <a class="btn btn--ghost" href="/en/getting-started/">Quick start</a>
-        <a class="btn btn--ghost" href="/en/welcome/">Browse the Wiki</a>
+        <a class="btn btn--ghost" href="#adoption">Where is your water line?</a>
       </div>
-      <Image class="hero__shot" src={mainShot} alt="PicoAide Harness desktop client" width={1120} height={711} format="webp" quality={80} />
+
+      <div class="fact-strip hero__facts">
+        <div class="fact">
+          <div class="fact__k">Deliverable</div>
+          <div class="fact__v">One container image</div>
+          <div class="fact__n">Server + database + clients</div>
+        </div>
+        <div class="fact">
+          <div class="fact__k">For employees</div>
+          <div class="fact__v">No public internet</div>
+          <div class="fact__n">One domain for install, sign-in and updates</div>
+        </div>
+        <div class="fact">
+          <div class="fact__k">For the organisation</div>
+          <div class="fact__v">Reusable know-how</div>
+          <div class="fact__n">Shared skills, agents and apps</div>
+        </div>
+        <div class="fact">
+          <div class="fact__k">For management</div>
+          <div class="fact__v">A measurable water line</div>
+          <div class="fact__n">Usage, balance and audit on one screen</div>
+        </div>
+      </div>
+
+      <Image class="hero__shot" src={mainShot} alt="PicoAide Harness desktop client" width={1120} height={711} format="webp" quality={82} />
     </div>
   </section>
 
-  <!-- Feature cards -->
-  <section class="section section--soft" id="features">
+  <!-- ── Adoption ladder ────────────────────────────────────────────────── -->
+  <section class="section" id="adoption">
     <div class="container">
-      <h2 class="section__title">One platform, three layers</h2>
-      <p class="section__sub">
-        Desktop client, local service and enterprise control plane work together out of the box.
-        Every area below links to the English documentation for that surface.
-      </p>
-      <div class="features">
-        {features.map(item => (
-          <div class="feature">
-            <h3>{item.title}</h3>
-            <p>{item.body}</p>
-            <a class="feature__link" href={item.href}>{item.link} →</a>
-          </div>
+      <div class="section__head">
+        <span class="eyebrow">Adoption</span>
+        <h2 class="section__title">The enterprise AI water line: from individual habits to organisational capability</h2>
+        <p class="section__sub">
+          Most companies stall in the same place — individuals do well, the organisation captures
+          nothing. This platform exists to close the last three steps: capture know-how, reuse it,
+          and make the level visible.
+        </p>
+      </div>
+
+      <div class="grid grid--4">
+        {levels.map((level, index) => (
+          <article class={`card level-card${index >= 2 ? ' level-card--on' : ''}`}>
+            <div class="level-card__step">L{index + 1}</div>
+            <h3>{level.title}</h3>
+            <p class="level-card__note">{level.note}</p>
+            <div class="level-card__label">What the platform provides</div>
+            <ul class="ticks">
+              {level.provides.map(item => <li>{item}</li>)}
+            </ul>
+          </article>
         ))}
       </div>
+
+      <p class="section__more">
+        <a href="/en/desktop/">How the Capability Hub and memory work</a>
+        <span>·</span>
+        <a href="/en/admin/">What administrators can measure</a>
+        <span>·</span>
+        <a href="/en/apps/">Apps built by employees</a>
+      </p>
     </div>
   </section>
 
-  <!-- Deployment in four steps -->
-  <section class="section" id="deployment">
+  <!-- ── Three layers ───────────────────────────────────────────────────── -->
+  <section class="section" id="platform">
     <div class="container">
-      <h2 class="section__title">Private deployment: one image, one guide</h2>
-      <p class="section__sub">
-        No install scripts, no registry mirror and no Git checkout on the deployment machine.
-        The image carries everything needed for a first deployment, an upgrade and a rollback.
+      <div class="section__head">
+        <span class="eyebrow">Architecture</span>
+        <h2 class="section__title">One platform, three cooperating layers</h2>
+        <p class="section__sub">
+          The client handles interaction, the local service runs the agent, and the server owns
+          accounts, models and audit. Each layer upgrades on its own; there is exactly one interface between them.
+        </p>
+      </div>
+
+      <div class="grid grid--3">
+        {layers.map(layer => (
+          <article class="card layer">
+            <div class="layer__kicker">{layer.kicker}</div>
+            <h3>{layer.title}</h3>
+            <p>{layer.body}</p>
+            <ul class="ticks">
+              {layer.ticks.map(tick => <li>{tick}</li>)}
+            </ul>
+          </article>
+        ))}
+      </div>
+
+      <figure class="diagram-frame">
+        <div class="diagram-scroll">
+          <ArchitectureDiagram locale="en" />
+        </div>
+        <figcaption>
+          Data flow and trust boundary: employee machines only talk to your intranet server,
+          and upstream keys never leave it.
+          <span class="scroll-hint">(scroll sideways on a narrow screen for the full diagram)</span>
+        </figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <!-- ── Capabilities ───────────────────────────────────────────────────── -->
+  <section class="section section--soft" id="capabilities">
+    <div class="container">
+      <div class="section__head">
+        <span class="eyebrow">Capabilities</span>
+        <h2 class="section__title">What employees actually use every day</h2>
+        <p class="section__sub">
+          Available out of the box, with no third-party extensions to install — and every one of
+          them configured and audited centrally.
+        </p>
+      </div>
+
+      <div class="surface-grid">
+        {capabilities.map(item => (
+          <article class="surface">
+            <span class="surface__icon"><Icon name={item.icon} size={18} /></span>
+            <h3>{item.title}</h3>
+            <p>{item.body}</p>
+          </article>
+        ))}
+      </div>
+
+      <p class="section__more">
+        <a href="/en/desktop/">Desktop client guide</a>
+        <span>·</span>
+        <a href="/en/plugin-development/">Plugin development</a>
+        <span>·</span>
+        <a href="/en/plugin-ecosystem/">Plugin ecosystem</a>
       </p>
+
+      <div class="role-grid">
+        <a class="card card--link role" href="/en/desktop/">
+          <div class="role__who">I am an employee</div>
+          <h3>From sign-in to daily work</h3>
+          <p>Sessions and workspaces, Capability Hub, connectors, scheduled jobs, the built-in browser, voice input and five-track memory.</p>
+          <span class="card__link">Desktop client guide<span class="btn__arrow">→</span></span>
+        </a>
+        <a class="card card--link role" href="/en/admin/">
+          <div class="role__who">I am an administrator</div>
+          <h3>From accounts to the water line</h3>
+          <p>Accounts and authentication, model catalogue, budget and billing, capability approvals, usage and audit.</p>
+          <span class="card__link">Enterprise control plane<span class="btn__arrow">→</span></span>
+        </a>
+        <a class="card card--link role" href="/en/deployment/">
+          <div class="role__who">I run IT</div>
+          <h3>From deployment to upgrade</h3>
+          <p>One image for deploy, upgrade and rollback; air-gapped installs, channel delivery and troubleshooting.</p>
+          <span class="card__link">Deployment guide<span class="btn__arrow">→</span></span>
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Control plane ──────────────────────────────────────────────────── -->
+  <section class="section" id="control">
+    <div class="container grid grid--split">
+      <div>
+        <span class="eyebrow">Admin console</span>
+        <h2 class="section__title">Accounts, models, budget and audit on one intranet server</h2>
+        <p class="section__sub">
+          The console is embedded in the server image at <code>/admin/</code> and its sidebar
+          follows the RBAC permissions of the signed-in administrator: super admins see
+          everything, auditors get read-only views, employees never reach it.
+          The water line is measured, not surveyed — the usage centre reports real calls and cost
+          by department, member and model.
+        </p>
+        <ul class="ticks">
+          {controlPoints.map(point => (
+            <li><strong>{point.title}</strong>: {point.body}</li>
+          ))}
+        </ul>
+      </div>
+      <figure class="shot">
+        <Image src={adminUsageShot} alt="Usage centre in the admin console" width={1100} height={578} format="webp" quality={80} />
+        <figcaption>Usage centre: cost and token detail by department, member and model</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <!-- ── Deployment ─────────────────────────────────────────────────────── -->
+  <section class="section section--soft" id="deployment">
+    <div class="container">
+      <div class="section__head">
+        <span class="eyebrow">Deployment</span>
+        <h2 class="section__title">Private deployment: one image, one guide</h2>
+        <p class="section__sub">
+          No install scripts, no registry mirror and no Git checkout on the deployment machine.
+          The image carries everything needed for a first deployment, an upgrade and a rollback.
+        </p>
+      </div>
+
       <div class="steps">
-        {steps.map((item, index) => (
-          <div class="step">
-            <span class="step__num">{index + 1}</span>
-            <h3>{item.title}</h3>
-            <p>{item.body}</p>
-          </div>
-        ))}
+        <div class="step">
+          <span class="step__num">1</span>
+          <h3>Fetch the image</h3>
+          <p>
+            Download the image archive and <code>SHA256SUMS</code> from your channel, verify them
+            and <code>docker load</code>. No registry is involved, so an isolated network can import the archive by hand.
+          </p>
+        </div>
+        <div class="step">
+          <span class="step__num">2</span>
+          <h3>Export the stack files</h3>
+          <p>
+            One command writes the compose file, the three certificate variants and the client
+            installers into your deployment directory; then fill in <code>.env</code>.
+          </p>
+        </div>
+        <div class="step">
+          <span class="step__num">3</span>
+          <h3>Start and self-check</h3>
+          <p>
+            <code>docker compose up -d</code> brings up Caddy, the server and the embedded
+            PostgreSQL. The health probe and the client manifest are the acceptance criteria.
+          </p>
+        </div>
+        <div class="step">
+          <span class="step__num">4</span>
+          <h3>Deliver to everyone</h3>
+          <p>
+            Employees download the client from your portal and sign in. Clients follow the server,
+            so <strong>upgrading the server upgrades every client</strong>.
+          </p>
+        </div>
       </div>
+
+      <div class="codeblock deploy__code">
+        <div class="codeblock__bar">
+          <span class="codeblock__dots" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span>Run on the deployment host · see <a href="/en/deployment/compose/">container deployment</a></span>
+        </div>
+        <pre><code>{`# 1) Verify and import the image (<version> comes from latest.json -> server.version, without the leading v)
+curl -fL -O https://release.picoaide.com/official/releases/<version>/picoaide-server-<version>-amd64.zip
+unzip -p picoaide-server-<version>-amd64.zip image.tar | docker load
+
+# 2) Export the stack files (the image carries compose / Caddyfile / client installers)
+docker run --rm -v /opt/picoaide:/out -e PICOAI_UNPACK_STACK=/out \\
+  picoaide-harness-server:<version>
+
+# 3) Fill in .env, start, and confirm the health probe
+cd /opt/picoaide && docker compose up -d
+curl -k https://<your-domain>/healthz`}</code></pre>
+      </div>
+
+      <div class="grid grid--3 deploy__notes">
+        <div class="note note--accent">
+          <h3>Data stays in bind mounts</h3>
+          <p>
+            <code>picoaide-data/</code> (including <code>master.key</code>) and <code>pg-data/</code>
+            live in the deployment directory. Upgrades replace the image, never the data; a rollback
+            is a pointer change.
+          </p>
+        </div>
+        <div class="note note--accent">
+          <h3>Three certificate modes</h3>
+          <p>
+            Self-signed for a pure intranet, automatic issuance for a public domain, or your own
+            enterprise certificate — switch <code>TLS_MODE</code> in <code>.env</code>.
+          </p>
+        </div>
+        <div class="note note--accent">
+          <h3>Four data-safety rules</h3>
+          <p>
+            Never a <code>-v</code> teardown, never the <code>latest</code> tag, always back up and
+            verify the backup is non-empty before upgrading, and never overwrite an existing
+            deployment's <code>.env</code>.
+          </p>
+        </div>
+      </div>
+
       <p class="section__more">
         <a href="/en/deployment/">Deployment overview</a>
         <span>·</span>
-        <a href="/en/deployment/compose/">Container deployment</a>
+        <a href="/en/deployment/upgrade/">Upgrade, backup and rollback</a>
+        <span>·</span>
+        <a href="/en/deployment/client-delivery/">Client delivery and updates</a>
         <span>·</span>
         <a href="/en/deployment/offline/">Air-gapped deployment</a>
         <span>·</span>
@@ -158,18 +567,270 @@ const steps = [
     </div>
   </section>
 
-  <!-- Documentation entry points -->
-  <section class="section section--soft" id="docs">
+  <!-- ── Channels ───────────────────────────────────────────────────────── -->
+  <section class="section" id="channels">
     <div class="container">
-      <h2 class="section__title">Explore the documentation</h2>
-      <p class="section__sub">The Wiki is available in English and Simplified Chinese; each page has a language switcher.</p>
-      <div class="docs">
-        {docs.map(item => (
-          <a class="doc" href={item.href}>
+      <div class="section__head">
+        <span class="eyebrow">Delivery</span>
+        <h2 class="section__title">The client is part of the server — and so is the brand</h2>
+        <p class="section__sub">One build per channel, and the brand is never washed away by an upgrade.</p>
+      </div>
+
+      <div class="grid grid--3">
+        <article class="card">
+          <h3>Clients ship with the server</h3>
+          <p>
+            Windows, macOS and Linux installers are packed into the server image and served by your
+            own server (<code>/api/client/v2/updates/manifest</code> and <code>/updates/client/*</code>),
+            so a version mismatch is structurally impossible.
+          </p>
+        </article>
+        <article class="card">
+          <h3>No public internet for employees</h3>
+          <p>
+            Installing, signing in and updating all happen against your domain. Resumable downloads
+            and SHA-256 verification are built in, so a LAN can distribute a few hundred megabytes reliably.
+          </p>
+        </article>
+        <article class="card">
+          <h3>Channel white-labelling</h3>
+          <p>
+            Name, tagline, welcome copy, mark and accent colour come from the channel content shipped
+            with the image — one configuration drives the sign-in page, the client, the console and the
+            portal. Channels never upgrade into each other.
+          </p>
+        </article>
+      </div>
+
+      <figure class="diagram-frame">
+        <div class="diagram-scroll">
+          <DeliveryDiagram locale="en" />
+        </div>
+        <figcaption>
+          One server upgrade brings every client along in the same round; the channel identity is
+          decided by the server, structurally.
+          <span class="scroll-hint">(scroll sideways on a narrow screen for the full diagram)</span>
+        </figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <!-- ── Security ───────────────────────────────────────────────────────── -->
+  <section class="section section--soft" id="security">
+    <div class="container">
+      <div class="section__head">
+        <span class="eyebrow">Security</span>
+        <h2 class="section__title">Security and data sovereignty</h2>
+        <p class="section__sub">
+          Every statement below maps to a concrete implementation and an automated check — not an adjective.
+        </p>
+      </div>
+
+      <div class="grid grid--3">
+        {security.map(item => (
+          <article class="card">
+            <span class="card__icon"><Icon name={item.icon} size={18} /></span>
             <h3>{item.title}</h3>
             <p>{item.body}</p>
-          </a>
+          </article>
         ))}
+      </div>
+
+      <p class="section__more">
+        <a href="/en/architecture/">Architecture and security design</a>
+        <span>·</span>
+        <a href="/en/admin/">Admin console</a>
+        <span>·</span>
+        <a href="/en/faq/">FAQ</a>
+      </p>
+    </div>
+  </section>
+
+  <!-- ── Screenshots ────────────────────────────────────────────────────── -->
+  <section class="section" id="screenshots">
+    <div class="container">
+      <div class="section__head">
+        <span class="eyebrow">Screenshots</span>
+        <h2 class="section__title">Interface preview</h2>
+        <p class="section__sub">Real product screenshots, no visual retouching.</p>
+      </div>
+
+      <h3 class="gallery__group">Desktop client <span>{groups.desktop}</span></h3>
+      <div class="gallery gallery--3">
+        <figure>
+          <Image src={capabilityShot} alt="Capability Hub" width={720} height={450} loading="lazy" format="webp" quality={78} />
+          <figcaption><strong>Capability Hub</strong>Your library and the marketplace, filtered by skills or agents</figcaption>
+        </figure>
+        <figure>
+          <Image src={connectorsShot} alt="Connectors" width={720} height={450} loading="lazy" format="webp" quality={78} />
+          <figcaption><strong>Connectors</strong>Standard MCP configuration with OAuth and token renewal</figcaption>
+        </figure>
+        <figure>
+          <Image src={cronShot} alt="Scheduled jobs" width={720} height={450} loading="lazy" format="webp" quality={78} />
+          <figcaption><strong>Scheduled jobs</strong>cron, prompt, workspace and permissions, with run details</figcaption>
+        </figure>
+        <figure>
+          <Image src={settingsShot} alt="Settings" width={720} height={450} loading="lazy" format="webp" quality={78} />
+          <figcaption><strong>Settings</strong>Agent presets, permissions, language and appearance</figcaption>
+        </figure>
+        <figure>
+          <Image src={mainShot} alt="Main window" width={720} height={450} loading="lazy" format="webp" quality={78} />
+          <figcaption><strong>Main window</strong>Sessions, workspaces and tool approvals</figcaption>
+        </figure>
+        <figure>
+          <Image src={adminGatewayShot} alt="Gateway configuration" width={720} height={450} loading="lazy" format="webp" quality={78} />
+          <figcaption><strong>Gateway</strong>Models, rate limits, peak windows and pricing (admin console)</figcaption>
+        </figure>
+      </div>
+
+      <h3 class="gallery__group">Admin console <span>{groups.admin}</span></h3>
+      <div class="gallery gallery--3">
+        <figure>
+          <Image src={adminUsersShot} alt="Users" width={720} height={450} loading="lazy" format="webp" quality={78} />
+          <figcaption><strong>Users</strong>Accounts, departments, roles, balance and tokens</figcaption>
+        </figure>
+        <figure>
+          <Image src={adminCapabilityShot} alt="Capability approvals" width={720} height={450} loading="lazy" format="webp" quality={78} />
+          <figcaption><strong>Capabilities</strong>One approval queue for shared skills and agents</figcaption>
+        </figure>
+        <figure>
+          <Image src={adminUsageShot} alt="Usage" width={720} height={450} loading="lazy" format="webp" quality={78} />
+          <figcaption><strong>Usage</strong>Cost, request counts and token detail</figcaption>
+        </figure>
+        <figure>
+          <Image src={adminAuditShot} alt="Audit log" width={720} height={450} loading="lazy" format="webp" quality={78} />
+          <figcaption><strong>Audit log</strong>Every key operation recorded, protected by a hash chain</figcaption>
+        </figure>
+        <figure>
+          <Image src={adminServerShot} alt="Server information" width={720} height={450} loading="lazy" format="webp" quality={78} />
+          <figcaption><strong>Server information</strong>Running version, database migrations and update notices</figcaption>
+        </figure>
+        <figure>
+          <Image src={adminGatewayShot} alt="Model catalogue" width={720} height={450} loading="lazy" format="webp" quality={78} />
+          <figcaption><strong>Model catalogue</strong>Upstream providers and models configured centrally</figcaption>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Releases ───────────────────────────────────────────────────────── -->
+  <!-- 英文站没有中文博客，所以这一节讲"发布模型"而不是列文章：英文读者的真实问题是
+       「版本怎么发、怎么升级、去哪拿归档」，正好对应三张卡。中文站的同一位置是更新说明
+       （列最新 3 篇博客），两者版块 id 与位置一致。 -->
+  <section class="section section--soft" id="updates">
+    <div class="container">
+      <div class="section__head">
+        <span class="eyebrow">Releases</span>
+        <h2 class="section__title">How releases work</h2>
+        <p class="section__sub">
+          Every release is curated: who must upgrade, and what happens if they do not.
+        </p>
+      </div>
+
+      <div class="updates">
+        <a class="update" href="https://github.com/picoaide/picoaide-harness/releases" target="_blank" rel="noopener">
+          <div class="update__meta"><span class="update__badge">GitHub</span></div>
+          <h3 class="update__title">Release archive</h3>
+          <p class="update__desc">
+            Server image archives and checksums for the public channels. Channel-specific builds are
+            served from each deployment's own update directory.
+          </p>
+        </a>
+        <a class="update" href="/en/deployment/upgrade/">
+          <div class="update__meta"><span class="update__badge">Upgrade</span></div>
+          <h3 class="update__title">Upgrade, backup and rollback</h3>
+          <p class="update__desc">
+            Back up, verify the backup is non-empty, swap the image tag, and keep the previous image
+            as the rollback anchor.
+          </p>
+        </a>
+        <a class="update" href="/en/deployment/client-delivery/">
+          <div class="update__meta"><span class="update__badge">Clients</span></div>
+          <h3 class="update__title">Client delivery</h3>
+          <p class="update__desc">
+            Installers ship inside the server image and update against the manifest the server
+            publishes, so clients and server always move together.
+          </p>
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Documentation entry points ─────────────────────────────────────── -->
+  <section class="section" id="docs">
+    <div class="container">
+      <div class="section__head">
+        <span class="eyebrow">Wiki</span>
+        <h2 class="section__title">Explore the documentation</h2>
+        <p class="section__sub">
+          The Wiki ships in English and Simplified Chinese; every page has a language switcher.
+        </p>
+      </div>
+
+      <div class="grid grid--4">
+        <a class="card card--link" href="/en/welcome/">
+          <h3>Welcome</h3>
+          <p>What the platform is and how to read this Wiki.</p>
+        </a>
+        <a class="card card--link" href="/en/getting-started/">
+          <h3>Quick start</h3>
+          <p>From an empty machine to a signed-in client.</p>
+        </a>
+        <a class="card card--link" href="/en/desktop/">
+          <h3>Desktop client</h3>
+          <p>Every surface an employee touches, in detail.</p>
+        </a>
+        <a class="card card--link" href="/en/admin/">
+          <h3>Admin console</h3>
+          <p>Accounts, gateway, metering, approvals and audit.</p>
+        </a>
+        <a class="card card--link" href="/en/deployment/">
+          <h3>Deployment</h3>
+          <p>Bring up server, database and proxy on your network.</p>
+        </a>
+        <a class="card card--link" href="/en/deployment/upgrade/">
+          <h3>Upgrade and rollback</h3>
+          <p>Move versions without losing data.</p>
+        </a>
+        <a class="card card--link" href="/en/api-reference/">
+          <h3>API reference</h3>
+          <p>Management and client-side endpoints.</p>
+        </a>
+        <a class="card card--link" href="/en/faq/">
+          <h3>FAQ</h3>
+          <p>Common questions about deployment and data.</p>
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── FAQ ────────────────────────────────────────────────────────────── -->
+  <section class="section section--soft" id="faq">
+    <div class="container container--narrow">
+      <div class="section__head">
+        <span class="eyebrow">FAQ</span>
+        <h2 class="section__title">Frequently asked questions</h2>
+      </div>
+
+      <div class="faq-list">
+        {faqs.map(item => (
+          <details class="faq">
+            <summary>{item.q}</summary>
+            <div class="faq__body"><p>{item.a}</p></div>
+          </details>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Closing CTA ────────────────────────────────────────────────────── -->
+  <section class="cta-band">
+    <div class="container cta-band__inner">
+      <h2>Put AI in front of the whole team, from one intranet server</h2>
+      <p>Pull one image and follow one guide for deployment, upgrade and rollback. Employee machines stay off the public internet.</p>
+      <div class="actions actions--center">
+        <a class="btn btn--light" href="/en/deployment/">Read the deployment guide<span class="btn__arrow">→</span></a>
+        <a class="btn btn--ghost-light" href="https://github.com/picoaide/picoaide-harness" target="_blank" rel="noopener">View on GitHub</a>
       </div>
     </div>
   </section>
@@ -177,198 +838,46 @@ const steps = [
   <Footer locale="en" />
 
   <style>
-    .hero {
-      padding: 72px 0 0;
-      text-align: center;
-      background: linear-gradient(180deg, var(--bg-soft) 0%, var(--bg) 100%);
+    /* Only page-specific tweaks: all section styling lives in src/styles/global.css
+       and is shared with the Chinese homepage. */
+    .deploy__code {
+      margin-top: clamp(28px, 4vw, 40px);
     }
 
-    .hero__brand {
-      display: inline-flex;
-      align-items: center;
-      gap: 12px;
-      margin-bottom: 24px;
+    .deploy__notes {
+      margin-top: 20px;
     }
 
-    .hero__logo {
-      width: 56px;
-      height: 56px;
-      border-radius: 12px;
-      box-shadow: var(--shadow);
-    }
-
-    .hero__brandname {
-      font-size: 1.5rem;
-      font-weight: 800;
-      letter-spacing: -0.01em;
-      color: var(--ink);
-    }
-
-    .hero__title {
-      font-size: clamp(2.2rem, 6vw, 3.6rem);
-      margin: 0 0 18px;
-      font-weight: 800;
-    }
-
-    .hero__sub {
-      color: var(--ink-soft);
-      max-width: 680px;
-      margin: 0 auto 32px;
-      font-size: 1.12rem;
-    }
-
-    .hero__actions {
-      display: flex;
-      justify-content: center;
-      flex-wrap: wrap;
-      gap: 14px;
-      margin-bottom: 56px;
-    }
-
-    .hero__shot {
-      width: 100%;
-      max-width: 1040px;
-      border-radius: var(--radius);
+    .shot {
+      margin: 0;
+      border: 1px solid var(--line);
+      border-radius: var(--r-lg);
+      overflow: hidden;
+      background: var(--surface);
       box-shadow: var(--shadow-lg);
-      border: 1px solid var(--line);
-      margin-bottom: -1px;
     }
 
-    .features {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 24px;
-    }
-
-    .feature {
-      display: flex;
-      flex-direction: column;
-      background: #fff;
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      padding: 28px 24px;
-      box-shadow: var(--shadow);
-    }
-
-    .feature h3 {
-      margin: 0 0 10px;
-      font-size: 1.12rem;
-    }
-
-    .feature p {
-      margin: 0 0 14px;
-      color: var(--ink-soft);
-      font-size: 0.96rem;
-      flex: 1;
-    }
-
-    .feature__link {
-      font-weight: 600;
-      font-size: 0.94rem;
-    }
-
-    .steps {
-      display: grid;
-      grid-template-columns: repeat(4, 1fr);
-      gap: 20px;
-    }
-
-    .step {
-      background: #fff;
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      padding: 26px 22px;
-      text-align: center;
-    }
-
-    .step__num {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: 40px;
-      height: 40px;
-      border-radius: 50%;
-      background: var(--brand);
-      color: #fff;
-      font-weight: 700;
-      margin-bottom: 14px;
-    }
-
-    .step h3 {
-      margin: 0 0 8px;
-      font-size: 1.05rem;
-    }
-
-    .step p {
-      margin: 0;
-      color: var(--ink-soft);
-      font-size: 0.94rem;
-    }
-
-    .section__more {
-      text-align: center;
-      color: var(--ink-soft);
-      margin: 36px 0 0;
-      font-size: 0.98rem;
-      display: flex;
-      gap: 10px;
-      justify-content: center;
-      flex-wrap: wrap;
-    }
-
-    .section__more span {
-      color: var(--ink-faint);
-    }
-
-    .docs {
-      display: grid;
-      grid-template-columns: repeat(4, 1fr);
-      gap: 18px;
-    }
-
-    .doc {
+    .shot img {
       display: block;
-      background: #fff;
-      border: 1px solid var(--line);
-      border-radius: var(--radius-sm);
-      padding: 20px 22px;
-      color: var(--ink);
-      text-decoration: none;
-      transition: border-color 0.15s ease, box-shadow 0.15s ease;
+      width: 100%;
+      height: auto;
+      border-radius: 0;
+      border-bottom: 1px solid var(--line);
     }
 
-    .doc:hover {
-      border-color: var(--brand);
-      box-shadow: var(--shadow);
+    .shot figcaption {
+      padding: 14px 18px;
+      font-size: 0.9rem;
+      color: var(--ink-3);
     }
 
-    .doc h3 {
-      margin: 0 0 6px;
-      font-size: 1.02rem;
+    #control .ticks {
+      margin-top: 22px;
+      gap: 10px;
     }
 
-    .doc p {
-      margin: 0;
-      color: var(--ink-soft);
-      font-size: 0.92rem;
-    }
-
-    @media (max-width: 960px) {
-      .features,
-      .docs {
-        grid-template-columns: repeat(2, 1fr);
-      }
-      .steps {
-        grid-template-columns: repeat(2, 1fr);
-      }
-    }
-
-    @media (max-width: 640px) {
-      .features,
-      .docs,
-      .steps {
-        grid-template-columns: 1fr;
-      }
+    #control .ticks li {
+      font-size: 0.94rem;
     }
   </style>
 </Layout>

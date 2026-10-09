@@ -1,0 +1,81 @@
+/*
+ * Wiki（Starlight）主题对齐
+ *
+ * 目标只有一个：文档站与营销页**看起来是同一个产品**。Starlight 默认是紫色强调色、
+ * 另一套字体栈与圆角，直接把访客从首页带到 Wiki 会有明显的"换了个站"的观感。
+ *
+ * 这里只做三件事，不改布局、不改组件结构：
+ *   1. 强调色换成产品界面同一族蓝紫；
+ *   2. 字体栈与营销页（styles/global.css 的 --font-sans/--font-mono）保持一致；
+ *   3. 圆角与代码块色调与营销页的 .codeblock 对齐。
+ *
+ * 维护约束：Starlight 的变量名是它的公开契约（--sl-color-*），升级 Starlight 时
+ * 若变量改名，本文件会**静默失效**（页面照常渲染，只是回到默认配色）—— 升级后请
+ * 目视核对一次 Wiki 首页与任意文档页的强调色。
+ */
+
+:root {
+  --sl-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', 'Helvetica Neue', Arial, sans-serif;
+  --sl-font-mono: ui-monospace, SFMono-Regular, 'SF Mono', 'JetBrains Mono', Menlo,
+    Consolas, 'Liberation Mono', monospace;
+
+  /* 亮色：强调色取产品蓝紫 */
+  --sl-color-accent-low: #e6ebff;
+  --sl-color-accent: #4d6bfe;
+  --sl-color-accent-high: #21309e;
+
+  --sl-color-text-accent: #2f4be0;
+  --sl-color-bg-nav: #ffffff;
+  --sl-color-bg-sidebar: #fbfcfe;
+  --sl-color-hairline-light: #e6e9f0;
+  --sl-color-hairline: #e6e9f0;
+  --sl-color-hairline-shade: #eef1f7;
+}
+
+:root[data-theme='dark'] {
+  --sl-color-accent-low: #141b33;
+  --sl-color-accent: #7f93ff;
+  --sl-color-accent-high: #c3ccff;
+
+  --sl-color-text-accent: #9fb0ff;
+  --sl-color-bg-nav: #0a0e18;
+  --sl-color-bg-sidebar: #0a0e18;
+  --sl-color-hairline-light: #1b2231;
+  --sl-color-hairline: #1b2231;
+  --sl-color-hairline-shade: #101725;
+}
+
+/* 代码块与营销页的 .codeblock 同色调（Starlight 默认偏灰紫） */
+:root {
+  --sl-color-bg-inline-code: #eef1f7;
+}
+
+:root[data-theme='dark'] {
+  --sl-color-bg-inline-code: #141b2a;
+}
+
+/* 文档正文的标题层次与营销页一致：更紧的字距、更清楚的段间距 */
+.sl-markdown-content :is(h1, h2, h3, h4) {
+  letter-spacing: -0.018em;
+}
+
+.sl-markdown-content h2 {
+  border-top: 1px solid var(--sl-color-hairline);
+  padding-top: 1.2em;
+}
+
+.sl-markdown-content h2:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.sl-markdown-content code:not(:where(.not-content *)) {
+  border-radius: 6px;
+  padding: 0.1em 0.38em;
+}
+
+.sl-markdown-content pre:not(:where(.not-content *)) {
+  border-radius: 14px;
+  border-color: var(--sl-color-hairline);
+}

@@ -18,6 +18,9 @@ export default defineConfig({
         dark: '../brands/official/logo-dark.svg',
         replacesTitle: true,
       },
+      // 与营销页（src/styles/global.css）同一套强调色 / 字体栈 / 圆角。
+      // 只覆盖 Starlight 的公开变量（--sl-color-*），不改它的布局与组件结构。
+      customCss: ['./src/styles/starlight.css'],
       defaultLocale: 'root',
       locales: {
         root: { label: '简体中文', lang: 'zh-CN' },
@@ -34,11 +37,13 @@ export default defineConfig({
           ],
         },
         {
-          label: '使用',
-          translations: { en: 'Usage' },
+          label: '产品',
+          translations: { en: 'Product' },
           items: [
             { label: '桌面客户端', translations: { en: 'Desktop client' }, slug: 'desktop' },
-            { label: '管理后台', translations: { en: 'Admin console' }, slug: 'admin' },
+            { label: '企业管控面', translations: { en: 'Enterprise control plane' }, slug: 'admin' },
+            { label: '应用中心', translations: { en: 'App centre' }, slug: 'apps' },
+            { label: '安全与合规', translations: { en: 'Security & compliance' }, slug: 'security' },
           ],
         },
         {
@@ -67,18 +72,14 @@ export default defineConfig({
           ],
         },
         {
-          label: '开发',
-          translations: { en: 'Development' },
+          label: '架构与扩展',
+          translations: { en: 'Architecture & extension' },
           items: [
+            { label: '系统架构', translations: { en: 'System architecture' }, slug: 'architecture' },
             { label: '插件开发', translations: { en: 'Plugin development' }, slug: 'plugin-development' },
             { label: '插件生态', translations: { en: 'Plugin ecosystem' }, slug: 'plugin-ecosystem' },
             { label: 'API 参考', translations: { en: 'API reference' }, slug: 'api-reference' },
           ],
-        },
-        {
-          label: '架构',
-          translations: { en: 'Architecture' },
-          items: [{ label: '系统架构', translations: { en: 'System architecture' }, slug: 'architecture' }],
         },
         {
           label: '支持',

@@ -4,7 +4,11 @@ import { getCollection } from 'astro:content'
 import Layout from '../layouts/Layout.astro'
 import Header from '../components/Header.astro'
 import Footer from '../components/Footer.astro'
+import Icon from '../components/Icon.astro'
+import ArchitectureDiagram from '../components/ArchitectureDiagram.astro'
+import DeliveryDiagram from '../components/DeliveryDiagram.astro'
 import logo from '../../../brands/official/logo.svg'
+import logoDark from '../../../brands/official/logo-dark.svg'
 import mainShot from '../assets/screenshots/desktop-main.png'
 import capabilityShot from '../assets/screenshots/desktop-capability-market.png'
 import connectorsShot from '../assets/screenshots/desktop-connectors.png'
@@ -17,45 +21,435 @@ import adminUsageShot from '../assets/screenshots/admin-usage.png'
 import adminAuditShot from '../assets/screenshots/admin-audit.png'
 import adminServerShot from '../assets/screenshots/admin-server-info.png'
 
-// 更新说明：取最新 3 篇博客
+// 更新说明：取最新 3 篇博客。
 const updates = (await getCollection('blog', ({ data }) => !data.draft))
   .sort((a, b) => b.data.pubDate.valueOf() - a.data.pubDate.valueOf())
   .slice(0, 3)
+
+// 三层架构：桌面客户端 / 本地智能体引擎 / 企业服务端。
+// 这三张卡是首页的"骨架"——每一层都列出该层真正负责的事，不写形容词。
+const layers = [
+  {
+    kicker: 'Desktop',
+    title: '桌面客户端',
+    body: '原生窗口、系统托盘、自动更新。对话、能力中心、连接器、定时任务、内置浏览器与语音输入都在一个界面里完成。',
+    ticks: [
+      '安装包自带 Node.js / pnpm / Python 运行时，员工机器不需要任何开发环境',
+      '关闭窗口只是收进托盘；诊断包一键导出',
+      '连接器凭据、浏览器会话、定时任务按账号隔离',
+    ],
+  },
+  {
+    kicker: 'Local host',
+    title: '本地智能体引擎',
+    body: '自动启动、停止与恢复本地 Harness 服务，会话、文件与工作区留在本机；模型请求经企业网关转发。',
+    ticks: [
+      '上游 DeepSeek Harness 以固定版本原样运行，不魔改源码',
+      '桌面壳与业务插件按官方 Cordis 机制组合，可替换、可演进',
+      '沙箱按会话分档：只读 / 工作区内修改 / 完全权限',
+    ],
+  },
+  {
+    kicker: 'Server',
+    title: '企业服务端与管理后台',
+    body: '一台内网服务器承载账号、模型网关、额度计费、能力中心审批与审计，管理后台随镜像内嵌。',
+    ticks: [
+      '上游模型密钥 AES-GCM 加密后只存服务端，员工拿不到任何 API Key',
+      '客户端安装包与升级包由这台服务器下发',
+      '员工接触不到管理后台：它在 /admin/，按 RBAC 权限点显示',
+    ],
+  },
+]
+
+// AI 水位阶梯：多数企业的 AI 落地卡在「个人用得不错、组织拿不到」这一步。
+// 这一版块的写法是刻意的 —— 先写每一级的典型特征（企业能自评），再写平台在该级提供什么。
+const levels = [
+  {
+    title: '个人尝鲜',
+    note: '员工各自用外部工具，数据出企业，成本是一笔糊涂账。',
+    provides: ['客户端随服务端分发，员工只访问企业域名', '上游模型密钥只在服务端，员工机器上没有任何 Key'],
+  },
+  {
+    title: '部门试点',
+    note: '每个部门各接一套，成果无法横向复制。',
+    provides: ['统一模型网关与模型目录：接新模型是改配置，不是改代码', '能力中心按用户或部门授权，不再各自造轮子'],
+  },
+  {
+    title: '平台化复用',
+    note: '技能、智能体与应用变成可检索、可审批、可复用的资产。',
+    provides: [
+      '能力中心：员工上传 → 管理员审批 → 全员复用，归属清晰',
+      '五轨记忆：项目经验按目录与分支沉淀，跟着项目走',
+      '应用中心：业务自己造的小工具，全员可直接打开',
+    ],
+  },
+  {
+    title: '可度量的 AI 原生',
+    note: '管理层看得到水位：谁在用、用在哪、花了多少、哪些能力被复用了。',
+    provides: ['用量中心按部门 / 成员 / 模型拆账，账本可逐笔对账', '余额闸门与审计日志：成本可控、行为可回溯'],
+  },
+]
+
+// 能力矩阵：员工每天真的会打开的东西。
+const capabilities = [
+  {
+    icon: 'chat',
+    title: '智能对话与工作区',
+    body: '每条会话绑定一个项目目录；模型读写文件、执行命令、操作浏览器时按权限门控逐次确认。',
+  },
+  {
+    icon: 'grid',
+    title: '能力中心',
+    body: '技能与智能体两类内容，我的 / 市场两个来源；安装、更新、卸载与上传审核状态一站可见。',
+  },
+  {
+    icon: 'link',
+    title: '连接器中心',
+    body: '用一条标准 MCP 配置接入企业内部系统，OAuth 授权与令牌续期自动完成，凭据加密留在本机。',
+  },
+  {
+    icon: 'clock',
+    title: '定时任务',
+    body: 'cron + 提示词 + 工作区 + 智能体预设，到点自动执行；每次执行的会话、结果与错误随时可查。',
+  },
+  {
+    icon: 'browser',
+    title: '内置浏览器',
+    body: 'Agent 可接管浏览器完成操作：多标签、地址栏、下载管控与操作日志；控制权只在「我来操作」按钮上交接。',
+  },
+  {
+    icon: 'mic',
+    title: '语音输入',
+    body: '说话转成输入框草稿；识别在本机子进程里跑，音频不出机器、离线可用，模型随客户端分发。',
+  },
+  {
+    icon: 'layers',
+    title: '五轨记忆',
+    body: '用户档案 / 全局事实 / 项目关键记忆 / 项目日志 / 每日日志，按目录与 git 分支隔离，确认制写入。',
+  },
+  {
+    icon: 'cube',
+    title: '应用中心',
+    body: '员工用 AI 自建 WASM 应用，只在客户端独立窗口打开；服务端不需要为应用准备任何公网入口与证书。',
+  },
+]
+
+// 企业管控面：管理员真正会配置的东西。
+const controlPoints = [
+  {
+    title: '账号与认证',
+    body: '本地账号、LDAP、OIDC 三种登录方式；管理员 MFA。改密、降权、禁用即时吊销该账号全部令牌。',
+  },
+  {
+    title: '模型网关',
+    body: '上游供应商与模型目录由管理员统一配置，可标注输入模态；密钥加密存储，客户端只看到一个模型清单。',
+  },
+  {
+    title: '用量与计费',
+    body: '按用户按模型计量输入/输出与缓存命中，支持高峰时段分级定价；余额闸门与可逐笔对账的账本。',
+  },
+  {
+    title: '审批与授权',
+    body: '共享技能与智能体走统一审批队列，官方与精选内容带徽章；授权对象可以是用户或部门。',
+  },
+  {
+    title: '审计日志',
+    body: '用户、部门、网关、能力中心与共享审批的关键操作全程留痕，哈希链防篡改，保留策略可配。',
+  },
+  {
+    title: '服务器信息',
+    body: '版本、更新提示、数据库与迁移状态、模型并发一屏可查；升级前先备份，回滚只需切回旧镜像。',
+  },
+]
+
+// 安全与数据主权：每条都对应一个可验证的实现，而不是形容词。
+const security = [
+  {
+    icon: 'key',
+    title: '凭据加密存储',
+    body: '上游密钥以 AES-GCM 加密（密文前缀 enc:v1:，主密钥独立成文件）；凭据按 0600/0700 权限原子写入，防符号链接与路径逃逸。',
+  },
+  {
+    icon: 'hash',
+    title: '令牌只存哈希',
+    body: '员工 API 令牌 90 天过期且只存哈希；改密、降权、禁用与用户更新同事务吊销。管理端会话 12 小时硬上限 + 空闲滑动过期 + CSRF。',
+  },
+  {
+    icon: 'shield',
+    title: '沙箱与权限分档',
+    body: '会话可选只读 / 工作区内修改 / 完全权限；写操作受工作区与临时目录约束（Linux Landlock、Windows ACL），越界即拒绝。',
+  },
+  {
+    icon: 'outbound',
+    title: '出站边界',
+    body: '客户端默认不读取系统代理，升级源只有它登录的那台服务器；未连接服务端时不做任何外发检查，内网可完全离线。',
+  },
+  {
+    icon: 'ban',
+    title: '严格默认拒绝',
+    body: '未授权的市场与共享内容一律 404（不泄露存在性）；授权变更留痕；管理员操作经 RBAC 与审计双重约束。',
+  },
+  {
+    icon: 'database',
+    title: '数据主权',
+    body: '数据、密钥与账本都在企业自己的机器上（bind mount 目录），随镜像交付，没有按人头授权费，也不需要把数据交给第三方。',
+  },
+]
+
+const faqs = [
+  {
+    q: 'PicoAide Harness 与 DeepSeek Harness 的关系？',
+    a: '上游 DeepSeek Harness 提供核心智能体、插件系统与 Web UI；本项目提供桌面封装、本地服务启动与企业服务端，基于固定版本构建，不魔改上游源码。桌面壳自身就是一个合法的 DSH 插件。',
+  },
+  {
+    q: '支持私有化部署吗？',
+    a: '支持，且是主要形态。交付物是一个容器镜像（含服务端、内置 PostgreSQL、Caddy 与三平台客户端安装包），可选三种证书模式，数据全部落在部署目录的 bind mount 里；也支持并入已有反代或单二进制 + 外部 PostgreSQL。',
+  },
+  {
+    q: '员工电脑需要访问外网吗？',
+    a: '不需要。客户端从企业自己的服务器下载与升级，员工机器只与企业域名通信；完全隔离的环境可以离线旁路取包部署。',
+  },
+  {
+    q: '客户端怎么升级？',
+    a: '升级服务端即可。客户端安装包随服务端镜像发布，客户端定期向它登录的服务器检查新版本，并按清单里的 SHA-256 校验后安装——不存在「客户端升了、服务端没升」的错配。',
+  },
+  {
+    q: '模型和密钥放在哪？',
+    a: '模型目录与上游 API Key 由管理员在管理后台配置，密钥在服务端加密存储，客户端只拿到一个模型清单与会话令牌，员工机器上没有任何上游 Key。',
+  },
+  {
+    q: '连接器与技能如何分发？',
+    a: '遵循「技能 + MCP」两种标准形态：企业能力以 SKILL.md 经能力中心分发（审批 + 授权），MCP 能力走连接器框架，一条标准配置即可接入；两者都可审计、可审批、可收回。',
+  },
+  {
+    q: '是否开源？',
+    a: '本项目遵循 MIT License，完全开源免费。上游以固定版本原样运行，升级只跟随上游版本号。',
+  },
+  {
+    q: '支持哪些平台？',
+    a: 'Windows x64（NSIS 安装程序）、macOS（Apple 芯片，DMG，正式版已签名与公证）与 Linux x64（AppImage）；企业交付面不含 Linux deb。',
+  },
+]
 ---
 
-<Layout title="PicoAide Harness - 企业级 AI 一体化平台" description="PicoAide Harness：桌面客户端、本地智能体引擎与企业服务端一体化。一个镜像完成私有化部署，客户端随服务端发布，员工零外网。">
+<Layout
+  title="PicoAide Harness — 企业级 AI 一体化平台"
+  description="PicoAide Harness：桌面客户端、本地智能体引擎与企业服务端三层一体。一个容器镜像完成私有化部署，客户端随服务端发布，员工机器不访问任何外网。"
+>
   <Header />
 
-  <!-- Hero -->
+  <!-- ── Hero ───────────────────────────────────────────────────────────── -->
   <section class="hero">
     <div class="container hero__inner">
       <div class="hero__brand">
-        <Image src={logo} alt="PicoAide Harness" width={56} height={56} class="hero__logo" />
+        <picture>
+          <source srcset={logoDark.src} media="(prefers-color-scheme: dark)" />
+          <img src={logo.src} alt="PicoAide Harness" width="52" height="52" class="hero__logo" />
+        </picture>
         <span class="hero__brandname">PicoAide Harness</span>
       </div>
-      <h1 class="hero__title">让每位员工拥有<br />自己的 AI 操作助手</h1>
+
+      <h1 class="hero__title">把 AI 从个人技巧<br />变成<em>组织能力</em></h1>
+
       <p class="hero__sub">
-        PicoAide Harness 把桌面客户端、本地智能体引擎与企业服务端整合为一个平台。
+        员工在客户端里干活，做出来的技能与智能体可以共享给全员；用量、额度与审计留在企业自己的服务器上。
         交付物是一个容器镜像：服务端、内置 PostgreSQL、反向代理与三平台客户端安装包都在里面，
         员工机器不需要访问任何外网。
       </p>
-      <div class="hero__actions">
-        <a class="btn btn--primary" href="/deployment/">私有化部署指南</a>
+
+      <div class="actions actions--center">
+        <a class="btn btn--accent" href="/deployment/">私有化部署指南<span class="btn__arrow">→</span></a>
         <a class="btn btn--ghost" href="/getting-started/">快速开始</a>
-        <a class="btn btn--ghost" href="#screenshots">查看截图</a>
+        <a class="btn btn--ghost" href="#adoption">AI 水位自评</a>
       </div>
-      <Image class="hero__shot" src={mainShot} alt="PicoAide Harness 桌面主界面" width={1120} height={711} format="webp" quality={80} />
+
+      <div class="fact-strip hero__facts">
+        <div class="fact">
+          <div class="fact__k">交付物</div>
+          <div class="fact__v">一个容器镜像</div>
+          <div class="fact__n">服务端 + 数据库 + 客户端</div>
+        </div>
+        <div class="fact">
+          <div class="fact__k">员工侧</div>
+          <div class="fact__v">零外网</div>
+          <div class="fact__n">只访问企业域名，安装与升级同源</div>
+        </div>
+        <div class="fact">
+          <div class="fact__k">组织侧</div>
+          <div class="fact__v">经验可复用</div>
+          <div class="fact__n">共享技能、智能体与应用</div>
+        </div>
+        <div class="fact">
+          <div class="fact__k">管理侧</div>
+          <div class="fact__v">水位可度量</div>
+          <div class="fact__n">用量、余额与审计一屏可查</div>
+        </div>
+      </div>
+
+      <Image class="hero__shot" src={mainShot} alt="PicoAide Harness 桌面客户端主界面" width={1120} height={711} format="webp" quality={82} />
     </div>
   </section>
 
-  <!-- 部署与交付 -->
+  <!-- ── AI 水位阶梯 ────────────────────────────────────────────────────── -->
+  <section class="section" id="adoption">
+    <div class="container">
+      <div class="section__head">
+        <span class="eyebrow">Adoption</span>
+        <h2 class="section__title">企业 AI 水位：从个人技巧到组织能力</h2>
+        <p class="section__sub">
+          大多数企业卡在同一处 —— 个人用得不错，组织拿不到。这套平台要解决的正是后面三步：
+          让经验沉淀、让能力复用、让水位看得见。
+        </p>
+      </div>
+
+      <div class="grid grid--4">
+        {levels.map((level, index) => (
+          <article class={`card level-card${index >= 2 ? ' level-card--on' : ''}`}>
+            <div class="level-card__step">L{index + 1}</div>
+            <h3>{level.title}</h3>
+            <p class="level-card__note">{level.note}</p>
+            <div class="level-card__label">平台提供</div>
+            <ul class="ticks">
+              {level.provides.map(item => <li>{item}</li>)}
+            </ul>
+          </article>
+        ))}
+      </div>
+
+      <p class="section__more">
+        <a href="/desktop/">能力中心与记忆如何工作</a>
+        <span>·</span>
+        <a href="/admin/">管理员看到的用量与审计</a>
+        <span>·</span>
+        <a href="/apps/">员工自建应用</a>
+      </p>
+    </div>
+  </section>
+
+  <!-- ── 三层协同 ───────────────────────────────────────────────────────── -->
+  <section class="section" id="platform">
+    <div class="container">
+      <div class="section__head">
+        <span class="eyebrow">Architecture</span>
+        <h2 class="section__title">一个平台，三层协同</h2>
+        <p class="section__sub">
+          客户端负责交互，本地服务负责智能体运行，服务端负责账号、模型与审计。
+          三层各自独立升级，接口只有一套。
+        </p>
+      </div>
+
+      <div class="grid grid--3">
+        {layers.map(layer => (
+          <article class="card layer">
+            <div class="layer__kicker">{layer.kicker}</div>
+            <h3>{layer.title}</h3>
+            <p>{layer.body}</p>
+            <ul class="ticks">
+              {layer.ticks.map(tick => <li>{tick}</li>)}
+            </ul>
+          </article>
+        ))}
+      </div>
+
+      <figure class="diagram-frame">
+        <div class="diagram-scroll">
+          <ArchitectureDiagram locale="root" />
+        </div>
+        <figcaption>
+          数据流与信任边界：员工机器只需要与企业内网服务器通信，上游密钥不出服务端。
+          <span class="scroll-hint">（窄屏可左右滑动查看完整示意图）</span>
+        </figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <!-- ── 能力矩阵 ───────────────────────────────────────────────────────── -->
+  <section class="section section--soft" id="capabilities">
+    <div class="container">
+      <div class="section__head">
+        <span class="eyebrow">Capabilities</span>
+        <h2 class="section__title">员工每天会用到的能力</h2>
+        <p class="section__sub">
+          开箱即用，不需要装插件市场里的第三方扩展；每一项都由服务端统一配置与审计。
+        </p>
+      </div>
+
+      <div class="surface-grid">
+        {capabilities.map(item => (
+          <article class="surface">
+            <span class="surface__icon"><Icon name={item.icon} size={18} /></span>
+            <h3>{item.title}</h3>
+            <p>{item.body}</p>
+          </article>
+        ))}
+      </div>
+
+      <p class="section__more">
+        <a href="/desktop/">桌面客户端文档</a>
+        <span>·</span>
+        <a href="/plugin-development/">插件开发</a>
+        <span>·</span>
+        <a href="/plugin-ecosystem/">插件生态</a>
+      </p>
+
+      <div class="role-grid">
+        <a class="card card--link role" href="/desktop/">
+          <div class="role__who">我是员工</div>
+          <h3>从登录到日常</h3>
+          <p>会话与工作区、能力中心、连接器、定时任务、内置浏览器、语音输入与五轨记忆。</p>
+          <span class="card__link">桌面客户端说明<span class="btn__arrow">→</span></span>
+        </a>
+        <a class="card card--link role" href="/admin/">
+          <div class="role__who">我是管理员</div>
+          <h3>从账号到水位</h3>
+          <p>账号与认证、模型目录、额度与计费、能力中心审批、用量与审计。</p>
+          <span class="card__link">企业管控面说明<span class="btn__arrow">→</span></span>
+        </a>
+        <a class="card card--link role" href="/deployment/">
+          <div class="role__who">我是 IT / 运维</div>
+          <h3>从部署到升级</h3>
+          <p>一个镜像完成部署、升级与回滚；离线部署、渠道交付与排障。</p>
+          <span class="card__link">部署与运维指南<span class="btn__arrow">→</span></span>
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── 企业管控面 ─────────────────────────────────────────────────────── -->
+  <section class="section" id="control">
+    <div class="container grid grid--split">
+      <div>
+        <span class="eyebrow">Admin console</span>
+        <h2 class="section__title">账号、模型、额度与审计，都在一台内网服务器上</h2>
+        <p class="section__sub">
+          管理后台随服务端镜像内嵌（<code>/admin/</code>），侧栏按当前账号的 RBAC 权限点显示：
+          超级管理员看到全部，审计员只有只读视图，员工接触不到它。
+          水位不靠问卷估 —— 用量中心按部门、成员与模型给出真实的调用与费用。
+        </p>
+        <ul class="ticks">
+          {controlPoints.map(point => (
+            <li><strong>{point.title}</strong>：{point.body}</li>
+          ))}
+        </ul>
+      </div>
+      <figure class="shot">
+        <Image src={adminUsageShot} alt="管理后台用量统计" width={1100} height={578} format="webp" quality={80} />
+        <figcaption>用量中心：按部门、成员、模型拆开的费用与 Token 明细</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <!-- ── 部署与交付 ─────────────────────────────────────────────────────── -->
   <section class="section section--soft" id="deployment">
     <div class="container">
-      <h2 class="section__title">私有化部署：一个镜像，一份说明</h2>
-      <p class="section__sub">
-        没有安装脚本，不依赖镜像仓库，也不需要在部署机上访问 Git 仓库。
-        镜像自带部署所需的一切，按同一份说明即可完成首次部署、升级与回滚。
-      </p>
+      <div class="section__head">
+        <span class="eyebrow">Deployment</span>
+        <h2 class="section__title">私有化部署：一个镜像，一份说明</h2>
+        <p class="section__sub">
+          没有安装脚本，不依赖镜像仓库，也不需要部署机能访问 Git 仓库。
+          镜像自带首次部署、升级与回滚所需的一切。
+        </p>
+      </div>
 
       <div class="steps">
         <div class="step">
@@ -92,9 +486,10 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
         </div>
       </div>
 
-      <div class="codeblock">
+      <div class="codeblock deploy__code">
         <div class="codeblock__bar">
-          <span>部署机上执行（详细步骤见 <a href="/deployment/compose/">容器化部署</a>）</span>
+          <span class="codeblock__dots" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span>部署机上执行 · 详细步骤见 <a href="/deployment/compose/">容器化部署</a></span>
         </div>
         <pre><code>{`# 1) 校验并导入镜像（<版本> 从本渠道 latest.json 的 server.version 取，不带 v）
 curl -fL -O https://release.picoaide.com/official/releases/<版本>/picoaide-server-<版本>-amd64.zip
@@ -109,23 +504,23 @@ cd /opt/picoaide && docker compose up -d
 curl -k https://<你的域名>/healthz`}</code></pre>
       </div>
 
-      <div class="notegrid">
-        <div class="note">
+      <div class="grid grid--3 deploy__notes">
+        <div class="note note--accent">
           <h3>数据只在 bind mount 目录里</h3>
           <p>
             <code>picoaide-data/</code>（含 <code>master.key</code>）与 <code>pg-data/</code>
             挂在部署目录下，升级只换镜像、不动数据，回滚只需切回旧镜像。
           </p>
         </div>
-        <div class="note">
+        <div class="note note--accent">
           <h3>三种证书模式</h3>
           <p>
-            纯内网自签（Caddy 本地 CA）、公网域名自动签发（Let's Encrypt）、
-            企业正式证书三选一，只切换 <code>.env</code> 的 <code>TLS_MODE</code>。
+            纯内网自签（Caddy 本地 CA）、公网域名自动签发、企业正式证书三选一，
+            只切换 <code>.env</code> 的 <code>TLS_MODE</code>。
           </p>
         </div>
-        <div class="note">
-          <h3>四道数据安全约定</h3>
+        <div class="note note--accent">
+          <h3>四条数据安全铁律</h3>
           <p>
             不执行带 <code>-v</code> 的清理、不用 <code>latest</code> 标签、升级前必须备份且校验非空、
             不覆盖已有部署目录的 <code>.env</code>。
@@ -138,6 +533,8 @@ curl -k https://<你的域名>/healthz`}</code></pre>
         <span>·</span>
         <a href="/deployment/upgrade/">升级、备份与回滚</a>
         <span>·</span>
+        <a href="/deployment/client-delivery/">客户端分发与升级</a>
+        <span>·</span>
         <a href="/deployment/offline/">离线部署</a>
         <span>·</span>
         <a href="/deployment/operations/">运维与排障</a>
@@ -145,153 +542,161 @@ curl -k https://<你的域名>/healthz`}</code></pre>
     </div>
   </section>
 
-  <!-- 客户端与渠道 -->
-  <section class="section" id="delivery">
+  <!-- ── 渠道与白标 ─────────────────────────────────────────────────────── -->
+  <section class="section" id="channels">
     <div class="container">
-      <h2 class="section__title">客户端交付与渠道白标</h2>
-      <p class="section__sub">客户端不是另一个下载站，而是服务端的一部分。</p>
+      <div class="section__head">
+        <span class="eyebrow">Delivery</span>
+        <h2 class="section__title">客户端是服务端的一部分，品牌也是</h2>
+        <p class="section__sub">一次构建，一个渠道；品牌不会被版本升级「洗掉」。</p>
+      </div>
 
-      <div class="features">
-        <div class="feature">
+      <div class="grid grid--3">
+        <article class="card">
           <h3>客户端随服务端发布</h3>
           <p>
             Windows / macOS / Linux 安装包打进服务端镜像，由企业服务器自己下发
             （<code>/api/client/v2/updates/manifest</code> 与 <code>/updates/client/*</code>）。
             版本错配在结构上不可能发生。
           </p>
-        </div>
-        <div class="feature">
+        </article>
+        <article class="card">
           <h3>员工零外网</h3>
           <p>
             员工只访问企业域名：安装、登录、升级都由这台服务器完成。
             断点续传与 SHA-256 校验内建，内网也能稳定分发上百 MB 的安装包。
           </p>
-        </div>
-        <div class="feature">
+        </article>
+        <article class="card">
           <h3>渠道白标交付</h3>
           <p>
             名称、标语、欢迎语、标识与主题色来自随镜像交付的渠道内容，
-            客户端登录页、客户端界面、管理后台与门户页一处配置、全产品一致；
-            渠道之间互不升级，品牌不会被版本升级"洗掉"。
+            登录页、客户端界面、管理后台与门户页一处配置、全产品一致；渠道之间互不升级。
           </p>
-        </div>
+        </article>
       </div>
+
+      <figure class="diagram-frame">
+        <div class="diagram-scroll">
+          <DeliveryDiagram locale="root" />
+        </div>
+        <figcaption>
+          一次升级服务端，全员客户端在同一轮里跟上；渠道身份由服务端在结构上决定。
+          <span class="scroll-hint">（窄屏可左右滑动查看完整示意图）</span>
+        </figcaption>
+      </figure>
     </div>
   </section>
 
-  <!-- 特性 -->
-  <section class="section section--soft" id="features">
+  <!-- ── 安全与数据主权 ─────────────────────────────────────────────────── -->
+  <section class="section section--soft" id="security">
     <div class="container">
-      <h2 class="section__title">企业级 AI 一体化平台</h2>
-      <p class="section__sub">桌面客户端、本地服务与企业管控面三层协同，开箱即用。</p>
-
-      <div class="features">
-        <div class="feature">
-          <h3>桌面客户端</h3>
-          <p>原生窗口、系统托盘、终端与自动更新。对话、能力中心、连接器、定时任务、AI 浏览器一站式完成，无需安装 Node.js。</p>
-        </div>
-        <div class="feature">
-          <h3>本地智能体引擎</h3>
-          <p>自动启动、停止与恢复本地 Harness 服务，数据留在本机。上游 DeepSeek Harness 以固定版本原样运行，不魔改源码。</p>
-        </div>
-        <div class="feature">
-          <h3>企业服务端与管理后台</h3>
-          <p>内嵌管理后台覆盖用户、部门、认证、网关、用量、能力中心审批与审计。按用户按模型计费、限额与豁免，高峰时段自动分级计价。</p>
-        </div>
+      <div class="section__head">
+        <span class="eyebrow">Security</span>
+        <h2 class="section__title">安全与数据主权</h2>
+        <p class="section__sub">
+          每一条都对应一个具体实现与一条自动化判据，而不是一句形容词。
+        </p>
       </div>
+
+      <div class="grid grid--3">
+        {security.map(item => (
+          <article class="card">
+            <span class="card__icon"><Icon name={item.icon} size={18} /></span>
+            <h3>{item.title}</h3>
+            <p>{item.body}</p>
+          </article>
+        ))}
+      </div>
+
+      <p class="section__more">
+        <a href="/architecture/">系统架构与安全设计</a>
+        <span>·</span>
+        <a href="/admin/">管理后台说明</a>
+        <span>·</span>
+        <a href="/faq/">常见问题</a>
+      </p>
     </div>
   </section>
 
-  <!-- 截图墙 -->
+  <!-- ── 界面预览 ───────────────────────────────────────────────────────── -->
   <section class="section" id="screenshots">
     <div class="container">
-      <h2 class="section__title">界面预览</h2>
-      <p class="section__sub">以下为产品真实界面截图。</p>
+      <div class="section__head">
+        <span class="eyebrow">Screenshots</span>
+        <h2 class="section__title">界面预览</h2>
+        <p class="section__sub">以下为产品真实界面截图，未做视觉修饰。</p>
+      </div>
 
-      <h3 class="gallery__group">桌面客户端</h3>
-      <div class="gallery">
+      <h3 class="gallery__group">桌面客户端 <span>Windows · macOS · Linux</span></h3>
+      <div class="gallery gallery--3">
         <figure>
-          <Image src={capabilityShot} alt="能力中心" width={640} height={400} loading="lazy" format="webp" quality={75} />
-          <figcaption>能力中心：我的 / 市场两分区，技能与智能体类型筛选，来源与质量徽章</figcaption>
+          <Image src={capabilityShot} alt="能力中心" width={720} height={450} loading="lazy" format="webp" quality={78} />
+          <figcaption><strong>能力中心</strong>我的 / 市场两分区，技能与智能体类型筛选</figcaption>
         </figure>
         <figure>
-          <Image src={connectorsShot} alt="连接器中心" width={640} height={400} loading="lazy" format="webp" quality={75} />
-          <figcaption>连接器中心：销售易等 MCP 连接器，OAuth 授权</figcaption>
+          <Image src={connectorsShot} alt="连接器中心" width={720} height={450} loading="lazy" format="webp" quality={78} />
+          <figcaption><strong>连接器中心</strong>标准 MCP 配置接入，OAuth 授权与续期</figcaption>
         </figure>
         <figure>
-          <Image src={cronShot} alt="定时任务" width={640} height={400} loading="lazy" format="webp" quality={75} />
-          <figcaption>定时任务：cron + 提示词 + 工作区 + 智能体预设，执行详情随时可查</figcaption>
+          <Image src={cronShot} alt="定时任务" width={720} height={450} loading="lazy" format="webp" quality={78} />
+          <figcaption><strong>定时任务</strong>cron + 提示词 + 工作区 + 权限，执行详情可查</figcaption>
         </figure>
         <figure>
-          <Image src={settingsShot} alt="设置" width={640} height={400} loading="lazy" format="webp" quality={75} />
-          <figcaption>设置：Agent 预设、权限、语言与外观</figcaption>
+          <Image src={settingsShot} alt="设置" width={720} height={450} loading="lazy" format="webp" quality={78} />
+          <figcaption><strong>设置</strong>智能体预设、权限、语言与外观</figcaption>
+        </figure>
+        <figure>
+          <Image src={mainShot} alt="主界面" width={720} height={450} loading="lazy" format="webp" quality={78} />
+          <figcaption><strong>主界面</strong>会话、工作区与工具审批</figcaption>
+        </figure>
+        <figure>
+          <Image src={adminGatewayShot} alt="网关配置" width={720} height={450} loading="lazy" format="webp" quality={78} />
+          <figcaption><strong>网关配置</strong>模型、限流、峰谷窗口与定价（管理后台）</figcaption>
         </figure>
       </div>
 
-      <h3 class="gallery__group">管理后台</h3>
-      <div class="gallery">
+      <h3 class="gallery__group">管理后台 <span>随服务端镜像内嵌</span></h3>
+      <div class="gallery gallery--3">
         <figure>
-          <Image src={adminUsersShot} alt="用户管理" width={640} height={400} loading="lazy" format="webp" quality={75} />
-          <figcaption>用户管理：账号、部门、角色、配额、余额与令牌</figcaption>
+          <Image src={adminUsersShot} alt="用户管理" width={720} height={450} loading="lazy" format="webp" quality={78} />
+          <figcaption><strong>用户管理</strong>账号、部门、角色、余额与令牌</figcaption>
         </figure>
         <figure>
-          <Image src={adminCapabilityShot} alt="能力中心审批" width={640} height={400} loading="lazy" format="webp" quality={75} />
-          <figcaption>能力中心：共享技能与智能体统一审批队列</figcaption>
+          <Image src={adminCapabilityShot} alt="能力中心审批" width={720} height={450} loading="lazy" format="webp" quality={78} />
+          <figcaption><strong>能力中心</strong>共享技能与智能体的统一审批队列</figcaption>
         </figure>
         <figure>
-          <Image src={adminGatewayShot} alt="网关配置" width={640} height={400} loading="lazy" format="webp" quality={75} />
-          <figcaption>网关配置：模型、限流、配额、高峰时段与定价</figcaption>
+          <Image src={adminUsageShot} alt="用量统计" width={720} height={450} loading="lazy" format="webp" quality={78} />
+          <figcaption><strong>用量统计</strong>费用、请求数与 Token 明细</figcaption>
         </figure>
         <figure>
-          <Image src={adminUsageShot} alt="用量统计" width={640} height={400} loading="lazy" format="webp" quality={75} />
-          <figcaption>用量统计：费用、请求数与 Token 明细</figcaption>
+          <Image src={adminAuditShot} alt="审计日志" width={720} height={450} loading="lazy" format="webp" quality={78} />
+          <figcaption><strong>审计日志</strong>关键操作全程留痕，哈希链防篡改</figcaption>
         </figure>
         <figure>
-          <Image src={adminAuditShot} alt="审计日志" width={640} height={400} loading="lazy" format="webp" quality={75} />
-          <figcaption>审计日志：关键操作全程留痕</figcaption>
+          <Image src={adminServerShot} alt="服务器信息" width={720} height={450} loading="lazy" format="webp" quality={78} />
+          <figcaption><strong>服务器信息</strong>运行版本、数据库迁移与更新提示</figcaption>
         </figure>
         <figure>
-          <Image src={adminServerShot} alt="服务器信息" width={640} height={400} loading="lazy" format="webp" quality={75} />
-          <figcaption>服务器信息：运行版本、数据库与迁移、更新提示</figcaption>
+          <Image src={adminGatewayShot} alt="网关与模型目录" width={720} height={450} loading="lazy" format="webp" quality={78} />
+          <figcaption><strong>模型目录</strong>上游供应商与模型由管理员统一配置</figcaption>
         </figure>
       </div>
     </div>
   </section>
 
-  <!-- 为什么选择 -->
-  <section class="section section--soft" id="why">
+  <!-- ── 更新说明 ───────────────────────────────────────────────────────── -->
+  <section class="section section--soft" id="updates">
     <div class="container">
-      <h2 class="section__title">为什么选择 PicoAide Harness</h2>
-      <p class="section__sub">安全、可扩展、完全可控。</p>
-      <div class="features features--4">
-        <div class="feature">
-          <h3>安全合规</h3>
-          <p>上游密钥 AES-GCM 加密存储，凭据以 0600/0700 权限原子写入，防符号链接与路径逃逸；管理操作全程审计、哈希链防篡改。</p>
-        </div>
-        <div class="feature">
-          <h3>多用户隔离</h3>
-          <p>连接器凭据、浏览器会话、定时任务按账号隔离，退出登录即解除所有会话；服务端令牌只存哈希、90 天过期、改密自动吊销。</p>
-        </div>
-        <div class="feature">
-          <h3>一切皆插件</h3>
-          <p>核心智能体、Web UI、桌面外壳、连接器、定时任务、浏览器与记忆全部通过官方 Cordis 插件机制组合，可替换、可演进。</p>
-        </div>
-        <div class="feature">
-          <h3>可控的私有化</h3>
-          <p>一个镜像完成内网部署，数据与密钥都在企业自己的机器上；PostgreSQL 内置，升级只换镜像，员工机器不依赖任何外网服务。</p>
-        </div>
+      <div class="section__head">
+        <span class="eyebrow">Changelog</span>
+        <h2 class="section__title">更新说明</h2>
+        <p class="section__sub">每个版本都带策展的发布说明：谁必须升级、不升级会怎样。</p>
       </div>
-    </div>
-  </section>
-
-  <!-- 更新说明 -->
-  <section class="section" id="updates">
-    <div class="container container--narrow">
-      <h2 class="section__title">更新说明</h2>
-      <p class="section__sub">了解最新版本的功能与改进。</p>
 
       <div class="updates">
-        {updates.map((update, index) => (
+        {updates.map(update => (
           <a href={`/blog/${update.id}/`} class="update">
             <div class="update__meta">
               {update.data.version && <span class="update__badge">v{update.data.version}</span>}
@@ -306,384 +711,133 @@ curl -k https://<你的域名>/healthz`}</code></pre>
       </div>
 
       <p class="updates__more">
-        查看全部更新 <a href="/blog/">前往博客</a>
+        <a href="/blog/">查看全部更新</a>
         <span class="updates__sep">·</span>
-        历史版本与镜像归档 <a href="https://github.com/picoaide/picoaide-harness/releases" target="_blank" rel="noopener">GitHub Releases</a>
+        历史版本与镜像归档
+        <a href="https://github.com/picoaide/picoaide-harness/releases" target="_blank" rel="noopener">GitHub Releases</a>
       </p>
     </div>
   </section>
 
-  <!-- FAQ -->
+  <!-- ── 文档入口 ───────────────────────────────────────────────────────── -->
+  <section class="section" id="docs">
+    <div class="container">
+      <div class="section__head">
+        <span class="eyebrow">Wiki</span>
+        <h2 class="section__title">按角色进入文档</h2>
+        <p class="section__sub">Wiki 有中文与英文两套，每页右上角可切换语言。</p>
+      </div>
+
+      <div class="grid grid--4">
+        <a class="card card--link" href="/welcome/">
+          <h3>欢迎与阅读路径</h3>
+          <p>平台是什么、三层怎么分工、按角色该读哪几页。</p>
+        </a>
+        <a class="card card--link" href="/getting-started/">
+          <h3>快速开始</h3>
+          <p>从拿到安装包到登录后完成第一件事。</p>
+        </a>
+        <a class="card card--link" href="/desktop/">
+          <h3>桌面客户端</h3>
+          <p>员工每天用到的每个界面、边界与失败行为。</p>
+        </a>
+        <a class="card card--link" href="/admin/">
+          <h3>企业管控面</h3>
+          <p>账号、认证、模型目录、额度计费、审批与审计。</p>
+        </a>
+        <a class="card card--link" href="/apps/">
+          <h3>应用中心</h3>
+          <p>员工自建应用的开发、发布与权限模式。</p>
+        </a>
+        <a class="card card--link" href="/security/">
+          <h3>安全与合规</h3>
+          <p>密钥、令牌、沙箱、出站边界与审计的实现细节。</p>
+        </a>
+        <a class="card card--link" href="/architecture/">
+          <h3>系统架构</h3>
+          <p>数据流、扩展点与设计取舍。</p>
+        </a>
+        <a class="card card--link" href="/api-reference/">
+          <h3>API 参考</h3>
+          <p>管理面与员工面的端点、鉴权与错误信封。</p>
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── 常见问题 ───────────────────────────────────────────────────────── -->
   <section class="section section--soft" id="faq">
     <div class="container container--narrow">
-      <h2 class="section__title">常见问题</h2>
+      <div class="section__head">
+        <span class="eyebrow">FAQ</span>
+        <h2 class="section__title">常见问题</h2>
+      </div>
 
-      <details class="faq">
-        <summary>PicoAide Harness 与 DeepSeek Harness 的关系？</summary>
-        <p>上游 DeepSeek Harness 提供核心智能体、插件系统与 Web UI；本项目提供桌面封装、本地服务与企业服务端，基于固定版本构建，不魔改上游源码。</p>
-      </details>
-      <details class="faq">
-        <summary>是否支持私有化部署？</summary>
-        <p>支持，且是主要形态。交付物是一个容器镜像（含服务端、内置 PostgreSQL、Caddy 与三平台客户端安装包），可选三种证书模式，数据全部落在部署目录的 bind mount 里。</p>
-      </details>
-      <details class="faq">
-        <summary>员工电脑需要访问外网吗？</summary>
-        <p>不需要。客户端从企业自己的服务器下载与升级，服务器只需要能访问更新服务器来检查与获取新版本镜像；完全隔离的环境可以离线旁路取包。</p>
-      </details>
-      <details class="faq">
-        <summary>客户端怎么升级？</summary>
-        <p>升级服务端即可。客户端安装包随服务端镜像发布，客户端定期向它登录的服务器检查新版本并按清单里的 SHA-256 校验后安装——不存在"客户端升了、服务端没升"的错配。</p>
-      </details>
-      <details class="faq">
-        <summary>连接器与技能如何分发？</summary>
-        <p>遵循「技能 + MCP」两种标准形态：厂商能力以 SKILL.md 经技能商店分发（审批 + 授权），MCP 能力走连接器框架（销售易等），可审计、可审批、可卸载。</p>
-      </details>
-      <details class="faq">
-        <summary>是否开源？</summary>
-        <p>本项目遵循 MIT License，完全开源免费。</p>
-      </details>
-      <details class="faq">
-        <summary>支持哪些平台？</summary>
-        <p>Windows x64（NSIS 安装程序）、macOS（Apple 芯片，DMG）与 Linux x64（AppImage）；企业交付面不含 Linux deb。</p>
-      </details>
+      <div class="faq-list">
+        {faqs.map(item => (
+          <details class="faq">
+            <summary>{item.q}</summary>
+            <div class="faq__body"><p>{item.a}</p></div>
+          </details>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <!-- ── 收尾 CTA ───────────────────────────────────────────────────────── -->
+  <section class="cta-band">
+    <div class="container cta-band__inner">
+      <h2>用一台内网服务器，把 AI 交给整个团队</h2>
+      <p>取一个镜像，按同一份说明完成部署、升级与回滚；员工机器不需要访问任何外网。</p>
+      <div class="actions actions--center">
+        <a class="btn btn--light" href="/deployment/">阅读部署指南<span class="btn__arrow">→</span></a>
+        <a class="btn btn--ghost-light" href="https://github.com/picoaide/picoaide-harness" target="_blank" rel="noopener">在 GitHub 上查看</a>
+      </div>
     </div>
   </section>
 
   <Footer />
 
   <style>
-    .hero {
-      padding: 72px 0 0;
-      text-align: center;
-      background: linear-gradient(180deg, var(--bg-soft) 0%, var(--bg) 100%);
+    /* 只放本页专有的微调；版块样式在 src/styles/global.css（与 /en/ 共用一份）。 */
+    .deploy__code {
+      margin-top: clamp(28px, 4vw, 40px);
     }
 
-    .hero__brand {
-      display: inline-flex;
-      align-items: center;
-      gap: 12px;
-      margin-bottom: 24px;
+    .deploy__notes {
+      margin-top: 20px;
     }
 
-    .hero__logo {
-      width: 56px;
-      height: 56px;
-      border-radius: 12px;
-      box-shadow: var(--shadow);
-    }
-
-    .hero__brandname {
-      font-size: 1.5rem;
-      font-weight: 800;
-      letter-spacing: -0.01em;
-      color: var(--ink);
-    }
-
-    .hero__title {
-      font-size: clamp(2.2rem, 6vw, 3.6rem);
-      margin: 0 0 18px;
-      font-weight: 800;
-    }
-
-    .hero__sub {
-      color: var(--ink-soft);
-      max-width: 660px;
-      margin: 0 auto 32px;
-      font-size: 1.12rem;
-    }
-
-    .hero__actions {
-      display: flex;
-      justify-content: center;
-      flex-wrap: wrap;
-      gap: 14px;
-      margin-bottom: 56px;
-    }
-
-    .hero__shot {
-      width: 100%;
-      max-width: 1040px;
-      border-radius: var(--radius);
-      box-shadow: var(--shadow-lg);
-      border: 1px solid var(--line);
-      margin-bottom: -1px;
-    }
-
-    .features {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 24px;
-    }
-
-    .features--4 {
-      grid-template-columns: repeat(4, 1fr);
-    }
-
-    .feature {
-      background: #fff;
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      padding: 28px 24px;
-      box-shadow: var(--shadow);
-    }
-
-    .feature h3 {
-      margin: 0 0 10px;
-      font-size: 1.12rem;
-    }
-
-    .feature p {
+    .shot {
       margin: 0;
-      color: var(--ink-soft);
-      font-size: 0.96rem;
-    }
-
-    .feature code,
-    .step code {
-      background: var(--bg-soft);
       border: 1px solid var(--line);
-      border-radius: 5px;
-      padding: 1px 5px;
-      font-size: 0.88em;
-    }
-
-    .gallery__group {
-      margin: 40px 0 16px;
-      font-size: 1.2rem;
-    }
-
-    .steps {
-      display: grid;
-      grid-template-columns: repeat(4, 1fr);
-      gap: 20px;
-    }
-
-    .step {
-      background: #fff;
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      padding: 26px 22px;
-      text-align: center;
-    }
-
-    .step__num {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: 40px;
-      height: 40px;
-      border-radius: 50%;
-      background: var(--brand);
-      color: #fff;
-      font-weight: 700;
-      margin-bottom: 14px;
-    }
-
-    .step h3 {
-      margin: 0 0 8px;
-      font-size: 1.05rem;
-    }
-
-    .step p {
-      margin: 0;
-      color: var(--ink-soft);
-      font-size: 0.94rem;
-    }
-
-    .codeblock {
-      margin: 32px 0 0;
-      border: 1px solid #1e293b;
-      border-radius: var(--radius);
+      border-radius: var(--r-lg);
       overflow: hidden;
-      background: #0b1220;
+      background: var(--surface);
       box-shadow: var(--shadow-lg);
     }
 
-    .codeblock__bar {
-      padding: 10px 18px;
-      background: #111c30;
-      border-bottom: 1px solid #1e293b;
-      color: #94a3b8;
-      font-size: 0.86rem;
-    }
-
-    .codeblock__bar a {
-      color: #cbd5e1;
-      text-decoration: underline;
-    }
-
-    .codeblock pre {
-      margin: 0;
-      padding: 20px 18px;
-      overflow-x: auto;
-    }
-
-    .codeblock code {
-      color: #e2e8f0;
-      font-size: 0.86rem;
-      line-height: 1.7;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      white-space: pre;
-    }
-
-    .notegrid {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 20px;
-      margin-top: 24px;
-    }
-
-    .note {
-      background: #fff;
-      border: 1px solid var(--line);
-      border-left: 3px solid var(--brand);
-      border-radius: var(--radius-sm);
-      padding: 20px 22px;
-      box-shadow: var(--shadow);
-    }
-
-    .note h3 {
-      margin: 0 0 8px;
-      font-size: 1rem;
-    }
-
-    .note p {
-      margin: 0;
-      color: var(--ink-soft);
-      font-size: 0.93rem;
-    }
-
-    .note code {
-      background: var(--bg-soft);
-      border-radius: 5px;
-      padding: 1px 5px;
-      font-size: 0.88em;
-    }
-
-    .section__more {
-      text-align: center;
-      color: var(--ink-soft);
-      margin: 36px 0 0;
-      font-size: 0.98rem;
-      display: flex;
-      gap: 10px;
-      justify-content: center;
-      flex-wrap: wrap;
-    }
-
-    .section__more span {
-      color: var(--ink-faint);
-    }
-
-    .container--narrow {
-      max-width: 760px;
-    }
-
-    .updates {
-      display: flex;
-      flex-direction: column;
-      gap: 16px;
-    }
-
-    .update {
+    .shot img {
       display: block;
-      border: 1px solid var(--line);
-      border-radius: var(--radius-sm);
-      background: #fff;
-      padding: 20px 24px;
-      color: var(--ink);
-      text-decoration: none;
-      transition: border-color 0.15s ease, box-shadow 0.15s ease;
+      width: 100%;
+      height: auto;
+      border-radius: 0;
+      border-bottom: 1px solid var(--line);
     }
 
-    .update:hover {
-      border-color: var(--brand);
-      box-shadow: var(--shadow);
+    .shot figcaption {
+      padding: 14px 18px;
+      font-size: 0.9rem;
+      color: var(--ink-3);
     }
 
-    .update__meta {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      margin-bottom: 8px;
+    #control .ticks {
+      margin-top: 22px;
+      gap: 10px;
     }
 
-    .update__badge {
-      display: inline-block;
-      padding: 3px 10px;
-      border-radius: 999px;
-      background: var(--brand);
-      color: #fff;
-      font-size: 0.82rem;
-      font-weight: 700;
-    }
-
-    .update__time {
-      color: var(--ink-faint);
-      font-size: 0.88rem;
-    }
-
-    .update__title {
-      margin: 0 0 6px;
-      font-size: 1.1rem;
-    }
-
-    .update__desc {
-      margin: 0;
-      color: var(--ink-soft);
-      font-size: 0.95rem;
-    }
-
-    .updates__more {
-      text-align: center;
-      color: var(--ink-soft);
-      margin-top: 28px;
-      font-size: 0.95rem;
-    }
-
-    .updates__sep {
-      margin: 0 6px;
-      color: var(--ink-faint);
-    }
-
-    .faq {
-      border: 1px solid var(--line);
-      border-radius: var(--radius-sm);
-      background: #fff;
-      padding: 16px 20px;
-      margin-bottom: 12px;
-    }
-
-    .faq summary {
-      cursor: pointer;
-      font-weight: 600;
-      font-size: 1.02rem;
-    }
-
-    .faq p {
-      margin: 12px 0 0;
-      color: var(--ink-soft);
-    }
-
-    @media (max-width: 960px) {
-      .features,
-      .features--4 {
-        grid-template-columns: repeat(2, 1fr);
-      }
-      .steps {
-        grid-template-columns: repeat(2, 1fr);
-      }
-      .notegrid {
-        grid-template-columns: 1fr;
-      }
-    }
-
-    @media (max-width: 640px) {
-      .features,
-      .features--4,
-      .steps {
-        grid-template-columns: 1fr;
-      }
+    #control .ticks li {
+      font-size: 0.94rem;
     }
   </style>
 </Layout>

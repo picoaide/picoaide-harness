@@ -1,0 +1,234 @@
+---
+/**
+ * 架构示意图（手写 SVG，无外部资源、无位图）。
+ *
+ * 为什么要它：三层架构是这个产品最难用一句话说清、又最值得说清的部分 ——
+ * 「客户端 ↔ 本机服务 ↔ 企业服务器 ↔ 上游模型」四者的边界与数据流。
+ * 纯文字版读者要读三段才能拼出来，图一眼就够。
+ *
+ * 实现约定（改图之前先读）：
+ *   · 坐标系固定 `viewBox="0 0 960 580"`，所有几何都用绝对坐标写死 —— 缩放交给 CSS
+ *     （`width:100%; height:auto`），这样中英两版共用同一套几何；
+ *   · 颜色**全部**走 `var(--…)` 令牌（global.css 的 :root / 深色覆盖），
+ *     所以深色模式自动成立，不需要第二份资源；
+ *   · 文案走 `locale` 参数（中英各一张表），不在模板里写死语言；
+ *   · 图形只画几何与文字，**不含任何品牌符号**（品牌 mark 只从 brands/official/ 取）。
+ */
+interface Props {
+  locale?: 'root' | 'en'
+}
+
+const { locale = 'root' } = Astro.props
+const isEn = locale === 'en'
+
+const t = isEn
+  ? {
+      machine: 'Employee machine',
+      machineNote: 'No public-internet access required',
+      client: 'Desktop client',
+      host: 'Local Harness service',
+      hostNote: 'Pinned upstream + plugin composition · sessions and files stay on this machine',
+      loopback: 'loopback · 127.0.0.1',
+      down: 'HTTPS + Bearer token',
+      up: 'Installers and update manifest',
+      up2: '(SHA-256 verified)',
+      server: 'Enterprise server · one container image',
+      infra: ['Caddy', 'Go server', 'PostgreSQL'],
+      caps: ['Auth', 'Model gateway', 'Usage & billing', 'Approvals', 'Audit log', 'Client delivery'],
+      upstream: 'Upstream model service',
+      upstreamNote: ['OpenAI compatible', 'Anthropic compatible'],
+      key: 'API keys never leave the server',
+      clientCaps: ['Chat', 'Capability Hub', 'Connectors', 'Scheduled jobs', 'Built-in browser', 'Voice input'],
+    }
+  : {
+      machine: '员工机器',
+      machineNote: '不需要访问任何外网',
+      client: '桌面客户端',
+      host: '本地 Harness 服务',
+      hostNote: '上游固定版本 + 插件组合 · 会话、文件与工作区留在本机',
+      loopback: 'loopback · 127.0.0.1',
+      down: 'HTTPS + Bearer token',
+      up: '客户端安装包与升级清单',
+      up2: '（SHA-256 校验）',
+      server: '企业内网服务器 · 一个容器镜像',
+      infra: ['Caddy 反代 / TLS', 'Go 服务端', 'PostgreSQL'],
+      caps: ['认证', '模型网关', '用量计费', '能力中心审批', '审计日志', '客户端分发'],
+      upstream: '上游模型服务',
+      upstreamNote: ['OpenAI 兼容', 'Anthropic 兼容'],
+      key: '上游密钥只存服务端',
+      clientCaps: ['智能对话', '能力中心', '连接器', '定时任务', '内置浏览器', '语音输入'],
+    }
+
+const chipX = [88, 260, 432]
+const chipW = 160
+---
+
+<svg
+  class="diagram"
+  viewBox="0 0 960 580"
+  role="img"
+  aria-label={isEn
+    ? 'Architecture: desktop client and local Harness service on the employee machine, enterprise server inside the intranet, upstream model service reached only by the server.'
+    : '架构示意：员工机器上的桌面客户端与本地 Harness 服务，企业内网服务器，以及只由服务端访问的上游模型服务。'}
+>
+  <!-- 员工机器 -->
+  <rect x="40" y="16" width="600" height="304" rx="16" class="boundary" />
+  <text x="64" y="46" class="label">{t.machine}</text>
+  <text x="616" y="46" class="tiny" text-anchor="end">{t.machineNote}</text>
+
+  <rect x="64" y="62" width="552" height="108" rx="12" class="box" />
+  <text x="88" y="90" class="title">{t.client}</text>
+  {t.clientCaps.map((cap, index) => (
+    <g>
+      <rect
+        x={chipX[index % 3]}
+        y={index < 3 ? 102 : 138}
+        width={chipW}
+        height="28"
+        rx="8"
+        class="chip"
+      />
+      <text x={chipX[index % 3] + chipW / 2} y={index < 3 ? 121 : 157} class="chipText" text-anchor="middle">{cap}</text>
+    </g>
+  ))}
+
+  <path d="M340 170 V 212" class="flow" />
+  <path d="M336 174 H 344" class="flow" />
+  <text x="352" y="196" class="tiny">{t.loopback}</text>
+
+  <rect x="64" y="212" width="552" height="88" rx="12" class="box" />
+  <text x="88" y="242" class="title">{t.host}</text>
+  <text x="88" y="268" class="sub">{t.hostNote}</text>
+
+  <!-- 数据流：上行请求 / 下行交付 -->
+  <path d="M240 322 V 374" class="flow accent" />
+  <path d="M234 360 L240 374 L246 360" class="flow accent" />
+  <text x="256" y="352" class="flowText">{t.down}</text>
+
+  <path d="M520 374 V 322" class="flow" />
+  <path d="M514 336 L520 322 L526 336" class="flow" />
+  <text x="536" y="344" class="flowText">{t.up}</text>
+  <text x="536" y="362" class="tiny">{t.up2}</text>
+
+  <!-- 企业内网服务器 -->
+  <rect x="40" y="380" width="600" height="176" rx="16" class="box accentBox" />
+  <text x="64" y="410" class="title">{t.server}</text>
+  {t.infra.map((item, index) => (
+    <g>
+      <rect x={[64, 264, 464][index]} y="424" width="176" height="32" rx="8" class="chip strong" />
+      <text x={[64, 264, 464][index] + 88} y="445" class="chipText" text-anchor="middle">{item}</text>
+    </g>
+  ))}
+  {t.caps.map((item, index) => (
+    <g>
+      <rect x={chipX[index % 3]} y={index < 3 ? 470 : 508} width={chipW} height="28" rx="8" class="chip" />
+      <text x={chipX[index % 3] + chipW / 2} y={index < 3 ? 489 : 527} class="chipText" text-anchor="middle">{item}</text>
+    </g>
+  ))}
+
+  <!-- 上游模型服务（服务端唯一的出站方向） -->
+  <rect x="700" y="380" width="220" height="176" rx="16" class="boundary" />
+  <text x="724" y="410" class="title">{t.upstream}</text>
+  {t.upstreamNote.map((item, index) => (
+    <g>
+      <rect x="724" y={426 + index * 40} width="172" height="30" rx="8" class="chip" />
+      <text x="810" y={446 + index * 40} class="chipText" text-anchor="middle">{item}</text>
+    </g>
+  ))}
+  <text x="810" y="530" class="tiny" text-anchor="middle">{t.key}</text>
+
+  <path d="M640 468 H 698" class="flow accent" />
+  <path d="M686 462 L700 468 L686 474" class="flow accent" />
+  <text x="669" y="456" class="tiny" text-anchor="middle">/v1/*</text>
+</svg>
+
+<style>
+  .diagram {
+    display: block;
+    width: 100%;
+    height: auto;
+    overflow: visible;
+  }
+
+  .diagram text {
+    font-family: var(--font-sans);
+  }
+
+  /* 边界（虚线容器）：员工机器 / 上游服务 */
+  .boundary {
+    fill: none;
+    stroke: var(--line-2);
+    stroke-width: 1.2;
+    stroke-dasharray: 6 5;
+  }
+
+  /* 实心容器 */
+  .box {
+    fill: var(--surface);
+    stroke: var(--line);
+    stroke-width: 1.2;
+  }
+
+  .accentBox {
+    fill: var(--accent-soft);
+    stroke: var(--accent-line);
+  }
+
+  .chip {
+    fill: var(--bg-sunken);
+    stroke: var(--line);
+    stroke-width: 1;
+  }
+
+  .chip.strong {
+    fill: var(--surface);
+    stroke: var(--line-2);
+  }
+
+  .chipText {
+    font-size: 12px;
+    fill: var(--ink-2);
+  }
+
+  .title {
+    font-size: 14px;
+    font-weight: 650;
+    fill: var(--ink);
+  }
+
+  .sub {
+    font-size: 12px;
+    fill: var(--ink-3);
+  }
+
+  .label {
+    font-size: 12px;
+    font-weight: 650;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    fill: var(--ink-3);
+  }
+
+  .tiny {
+    font-size: 11px;
+    fill: var(--ink-4);
+  }
+
+  .flowText {
+    font-size: 12px;
+    font-weight: 600;
+    fill: var(--ink-2);
+  }
+
+  .flow {
+    fill: none;
+    stroke: var(--ink-4);
+    stroke-width: 1.4;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .flow.accent {
+    stroke: var(--accent);
+  }
+</style>

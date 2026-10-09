@@ -1,0 +1,138 @@
+---
+/**
+ * 客户端交付闭环示意图（手写 SVG，无位图）。
+ *
+ * 它回答的是产品里最容易被误解的一件事：**客户端不是一个独立下载站**。
+ * 安装包与升级清单都来自员工登录的那台服务端，所以「服务端升了、客户端没升」这类
+ * 版本错配在结构上不可能发生。四步闭环 + 一条回环虚线把这个语义画出来。
+ *
+ * 与 ArchitectureDiagram 相同的约定：固定 viewBox、几何写死、颜色走 var(--…) 令牌、
+ * 文案走 locale 参数、不含任何品牌符号。
+ */
+interface Props {
+  locale?: 'root' | 'en'
+}
+
+const { locale = 'root' } = Astro.props
+const isEn = locale === 'en'
+
+const steps = isEn
+  ? [
+      { title: 'Server upgraded', lines: ['Point .env at the new', 'image tag and restart'] },
+      { title: 'Manifest published', lines: ['Version, absolute HTTPS', 'URL and SHA-256 per asset'] },
+      { title: 'Client verifies', lines: ['Resumable download, then', 'verified before install'] },
+      { title: 'Everyone in sync', lines: ['Sessions, sign-in and', 'settings carry over'] },
+    ]
+  : [
+      { title: '服务端升级', lines: ['改一个镜像标签', '重启即完成'] },
+      { title: '发布升级清单', lines: ['版本、绝对 HTTPS 地址', '与每个资产的 SHA-256'] },
+      { title: '客户端校验', lines: ['断点续传下载', '校验通过才安装'] },
+      { title: '全员版本一致', lines: ['登录态、会话与设置', '原样延续'] },
+    ]
+
+const loopText = isEn
+  ? 'Each client only talks to the server it signed in to — no public update endpoint, no per-channel update site.'
+  : '每个客户端只认它登录的那台服务器：不访问公网更新源，也没有按渠道划分的下载站。'
+
+const boxX = [40, 280, 520, 760]
+---
+
+<svg
+  class="delivery"
+  viewBox="0 0 960 210"
+  role="img"
+  aria-label={isEn
+    ? 'Client delivery loop: upgrade the server, publish the manifest, the client verifies the download, everyone stays in sync.'
+    : '客户端交付闭环：升级服务端 → 发布升级清单 → 客户端校验 → 全员版本一致。'}
+>
+  {steps.map((step, index) => (
+    <g>
+      <rect x={boxX[index]} y="20" width="200" height="118" rx="14" class="box" />
+      <circle cx={boxX[index] + 26} cy="46" r="12" class="stepDot" />
+      <text x={boxX[index] + 26} y="51" class="stepNum" text-anchor="middle">{index + 1}</text>
+      <text x={boxX[index] + 48} y="51" class="title">{step.title}</text>
+      <text x={boxX[index] + 20} y="86" class="sub">{step.lines[0]}</text>
+      <text x={boxX[index] + 20} y="108" class="sub">{step.lines[1]}</text>
+    </g>
+  ))}
+
+  {[0, 1, 2].map(index => (
+    <g>
+      <path d={`M${boxX[index] + 208} 79 H ${boxX[index + 1] - 8}`} class="flow" />
+      <path
+        d={`M${boxX[index + 1] - 20} 73 L${boxX[index + 1] - 8} 79 L${boxX[index + 1] - 20} 85`}
+        class="flow"
+      />
+    </g>
+  ))}
+
+  <!-- 回环：升级源只有一个 -->
+  <path d="M860 146 V 178 H 140 V 146" class="loop" />
+  <path d="M134 158 L140 146 L146 158" class="loop" />
+  <text x="500" y="200" class="loopText" text-anchor="middle">{loopText}</text>
+</svg>
+
+<style>
+  .delivery {
+    display: block;
+    width: 100%;
+    height: auto;
+    overflow: visible;
+  }
+
+  .delivery text {
+    font-family: var(--font-sans);
+  }
+
+  .box {
+    fill: var(--surface);
+    stroke: var(--line);
+    stroke-width: 1.2;
+  }
+
+  .stepDot {
+    fill: var(--accent-soft);
+    stroke: var(--accent-line);
+    stroke-width: 1;
+  }
+
+  .stepNum {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 700;
+    fill: var(--accent-strong);
+  }
+
+  .title {
+    font-size: 13px;
+    font-weight: 650;
+    fill: var(--ink);
+  }
+
+  .sub {
+    font-size: 11.5px;
+    fill: var(--ink-3);
+  }
+
+  .flow {
+    fill: none;
+    stroke: var(--accent);
+    stroke-width: 1.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .loop {
+    fill: none;
+    stroke: var(--ink-4);
+    stroke-width: 1.2;
+    stroke-dasharray: 5 5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .loopText {
+    font-size: 11.5px;
+    fill: var(--ink-4);
+  }
+</style>
