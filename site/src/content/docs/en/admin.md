@@ -106,9 +106,7 @@ Saving the configuration triggers one sync immediately, then a **full reconcilia
   replaced wholesale);
 - users that disappeared from the directory are **disabled automatically and all their tokens are revoked**
   (leavers are cut off immediately);
-- a previously disabled account is **not** re-enabled merely because it reappears in the directory — the sync only
-  ever disables, never enables; re-enabling is always an explicit admin action, and every account skipped in a round
-  writes a `directory_enable_skipped` audit entry;
+- **LDAP auto-sync is one-way**: a previously disabled account is **not** re-enabled merely because it reappears in the directory — the sync only ever auto-disables, never enables; re-enabling is always an explicit admin action, and every account skipped in a round writes a `directory_enable_skipped` audit entry;
 - a scan that returns **zero users refuses to run** (guards against a broken filter deactivating every external user).
 
 OIDC syncs groups only **at login** (from the IdP `groups` claim), so group changes apply on the user's next login;

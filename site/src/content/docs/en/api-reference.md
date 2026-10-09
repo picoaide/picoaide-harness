@@ -62,7 +62,7 @@ A failure response is always:
 | `NOT_FOUND` | 404 | Resource does not exist (including strict deny-by-default for unauthorized content, which does not leak existence) |
 | `VALIDATION` | 400 | Parameter validation failed |
 | `RATE_LIMITED` | 429 | Rate limited, or over the per-user in-flight cap |
-| `BALANCE_EXHAUSTED` | 429 | The balance gate refused: insufficient balance, balance check unavailable, or the balance cannot cover this request's minimum charge (administrators are exempt) |
+| `BALANCE_EXHAUSTED` | 429 | The balance gate refused, for one of three reasons: quantized balance ≤ 0, balance at or below the **learned floor** from the last settlement that failed for lack of funds while the balance did not grow, or balance below this request's **minimum charge**; it also fails closed when the balance settings cannot be read (administrators are exempt) |
 | `MODEL_NOT_PRICED` | 429 | The model cannot be priced (both input and output price empty or ≤ 0, or the minimum charge quantizes to zero); an administrator can allow it with a policy switch |
 | `UPSTREAM` | 502 | Upstream model error |
 | `INTERNAL` | 500 | Internal error (including a temporarily unavailable dependency) |
