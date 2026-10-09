@@ -19,69 +19,80 @@ const { Content } = await render(post)
 <Layout title={`${post.data.title} - PicoAide Harness`} description={post.data.description}>
   <Header />
 
-  <article class="container post-page">
-    <header class="post-page__header">
-      <h1>{post.data.title}</h1>
-      <p class="post-page__meta">
-        <time datetime={post.data.pubDate.toISOString()}>
-          {post.data.pubDate.toLocaleDateString('zh-CN')}
-        </time>
-        {post.data.author && <span> · {post.data.author}</span>}
-      </p>
+  <article>
+    <header class="page-head">
+      <div class="container container--narrow">
+        <div class="post-page__meta">
+          {post.data.version && <span class="update__badge">v{post.data.version}</span>}
+          <time datetime={post.data.pubDate.toISOString()}>
+            {post.data.pubDate.toLocaleDateString('zh-CN')}
+          </time>
+          {post.data.author && <span>· {post.data.author}</span>}
+        </div>
+        <h1>{post.data.title}</h1>
+        {post.data.description && <p class="page-head__lead">{post.data.description}</p>}
+        {post.data.tags.length > 0 && (
+          <div class="tag-row post-page__tags">
+            {post.data.tags.map(tag => <span class="badge">{tag}</span>)}
+          </div>
+        )}
+      </div>
     </header>
-    <div class="post-page__body prose">
+
+    <div class="container container--narrow section prose">
       <Content />
     </div>
   </article>
 
+  <section class="cta-band">
+    <div class="container cta-band__inner">
+      <h2>准备在自己内网跑起来？</h2>
+      <p>部署指南可以直接交给运维或 AI 执行：取镜像、导出部署文件、写完 .env 即完成。</p>
+      <div class="actions actions--center">
+        <a class="btn btn--light" href="/deployment/">阅读部署指南<span class="btn__arrow">→</span></a>
+        <a class="btn btn--ghost-light" href="/blog/">返回博客</a>
+      </div>
+    </div>
+  </section>
+
   <Footer />
 
   <style>
-    .post-page {
-      padding: 56px 24px 96px;
-      max-width: 780px;
-    }
-
-    .post-page__header h1 {
-      margin: 0 0 10px;
-      font-size: 2rem;
-    }
-
     .post-page__meta {
-      color: var(--ink-faint);
-      font-size: 0.9rem;
-      margin: 0 0 28px;
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 10px;
+      color: var(--ink-4);
+      font-size: 0.88rem;
+      margin-bottom: 12px;
     }
 
-    .prose {
-      color: var(--ink);
-      line-height: 1.8;
-      font-size: 1.05rem;
+    .post-page__tags {
+      margin-top: 18px;
     }
 
+    /* 正文区块在 .prose 基础上只补这一页特有的间距（其余在 global.css） */
     .prose :global(h2) {
-      margin-top: 2rem;
-      font-size: 1.5rem;
+      font-size: 1.42rem;
     }
 
-    .prose :global(h3) {
-      margin-top: 1.6rem;
-      font-size: 1.2rem;
+    .prose :global(table) {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1.4em 0;
+      font-size: 0.94rem;
     }
 
-    .prose :global(code) {
+    .prose :global(th),
+    .prose :global(td) {
+      border: 1px solid var(--line);
+      padding: 10px 14px;
+      text-align: left;
+    }
+
+    .prose :global(th) {
       background: var(--bg-soft);
-      padding: 2px 6px;
-      border-radius: 4px;
-      font-size: 0.92em;
-    }
-
-    .prose :global(pre) {
-      background: var(--bg-deep);
-      color: #e2e8f0;
-      border-radius: var(--radius-sm);
-      padding: 16px;
-      overflow-x: auto;
     }
   </style>
 </Layout>

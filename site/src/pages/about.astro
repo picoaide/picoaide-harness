@@ -2,56 +2,185 @@
 import Layout from '../layouts/Layout.astro'
 import Header from '../components/Header.astro'
 import Footer from '../components/Footer.astro'
+import Icon from '../components/Icon.astro'
+import logo from '../../../brands/official/logo.svg'
+import logoDark from '../../../brands/official/logo-dark.svg'
+
+/**
+ * 关于页（中文站）。改写要点：它以前是一段 720px 的散文，与首页的设计语言脱节。
+ * 现在复用首页的版块原语（page-head / card / ticks / cta-band），只保留一页能读完的信息量，
+ * 并把「我们做什么、不做什么」写清楚 —— 这是企业客户最先想确认的一件事。
+ */
+const pillars = [
+  {
+    icon: 'container' as const,
+    title: '交付一个可私有化的平台',
+    body: '桌面客户端、本地智能体引擎与企业服务端整合为一个平台，交付物是一个容器镜像，部署在企业自己的机器上。',
+  },
+  {
+    icon: 'shield' as const,
+    title: '把管控放在服务端',
+    body: '账号、模型目录、额度、审批与审计集中在一台内网服务器；员工机器上没有任何上游密钥。',
+  },
+  {
+    icon: 'layers' as const,
+    title: '与上游保持同一条版本线',
+    body: 'DeepSeek Harness 以固定版本原样运行，桌面壳与业务能力按官方 Cordis 插件机制组合，不魔改上游源码。',
+  },
+  {
+    icon: 'check' as const,
+    title: '关键承诺都有判据',
+    body: '文档数字、站内链接、品牌素材、补丁与发布产物都有自动化判据；改坏了会在门禁里红，而不是等客户发现。',
+  },
+]
 ---
 
-<Layout title="关于我们 - PicoAide Harness">
+<Layout
+  title="关于我们 - PicoAide Harness"
+  description="PicoAide 团队致力于为企业打造可控、可扩展、可私有化的 AI 工作底座。"
+>
   <Header />
 
-  <main class="container about">
-    <h1>关于我们</h1>
-    <p class="about__lead">
-      PicoAide 团队致力于为企业打造可控、可扩展的 AI 工作底座。
-    </p>
-    <div class="about__body">
-      <section>
-        <h2>愿景</h2>
-        <p>
-          让每位员工都能拥有自己的 AI 操作助手，让 AI 能力在企业内网安全地落地。
-        </p>
-      </section>
-      <section>
-        <h2>产品</h2>
-        <p>
-          PicoAide Harness 基于 DeepSeek Harness 构建，将桌面客户端、本地智能体引擎与管理后台整合为一个可私有化部署的平台。
-        </p>
-      </section>
-      <section>
-        <h2>社区</h2>
-        <p>
-          项目完全开源免费，欢迎前往 GitHub 仓库参与共建：<a href="https://github.com/picoaide/picoaide-harness" target="_blank" rel="noopener">picoaide/picoaide-harness</a>。
-        </p>
-      </section>
+  <section class="page-head">
+    <div class="container">
+      <span class="eyebrow">About</span>
+      <h1>关于我们</h1>
+      <p class="page-head__lead">
+        PicoAide 团队致力于为企业打造可控、可扩展的 AI 工作底座 ——
+        让每位员工都能拥有自己的 AI 操作助手，同时让这件事在企业的内网、账号体系与审计口径里成立。
+      </p>
     </div>
-  </main>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="grid grid--2">
+        <div class="about-block">
+          <h2>愿景</h2>
+          <p>
+            AI 走进企业时，真正难的不是「能不能用」，而是「能不能放心用」：
+            数据在哪、密钥在谁手里、谁批准了什么、花了多少钱、出问题能不能回溯。
+            PicoAide Harness 把这些当作产品的一部分来做，而不是部署之后再补的运维工作。
+          </p>
+          <p>
+            我们希望员工打开客户端就能干活，管理员打开后台就能看清全局 ——
+            两端用的是同一套账号、同一份模型目录与同一条审计链。
+          </p>
+        </div>
+
+        <div class="about-block">
+          <h2>产品</h2>
+          <p>
+            PicoAide Harness 基于 DeepSeek Harness 构建，把桌面客户端、本地智能体引擎与企业管理后台
+            整合为一个可私有化部署的平台：服务端、内置 PostgreSQL、反向代理与三平台客户端安装包
+            都在同一个容器镜像里。
+          </p>
+          <p>
+            客户端与它的服务端是绑定的：安装包与升级清单都由企业服务器自己下发，
+            所以「客户端升了、服务端没升」这类版本错配在结构上不会发生。
+          </p>
+          <div class="about-actions">
+            <a class="btn btn--primary btn--sm" href="/deployment/">部署指南</a>
+            <a class="btn btn--ghost btn--sm" href="/architecture/">系统架构</a>
+            <a class="btn btn--ghost btn--sm" href="/welcome/">Wiki 文档</a>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid grid--4 about-pillars">
+        {pillars.map(item => (
+          <article class="card">
+            <span class="card__icon"><Icon name={item.icon} size={18} /></span>
+            <h3>{item.title}</h3>
+            <p>{item.body}</p>
+          </article>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <section class="section section--soft">
+    <div class="container container--narrow prose">
+      <h2>开源与协作</h2>
+      <p>
+        项目完全开源免费，遵循 MIT License。仓库地址：
+        <a href="https://github.com/picoaide/picoaide-harness" target="_blank" rel="noopener">picoaide/picoaide-harness</a>。
+        问题、需求与缺陷都可以直接提到
+        <a href="https://github.com/picoaide/picoaide-harness/issues" target="_blank" rel="noopener">Issues</a>；
+        历史版本与镜像归档见
+        <a href="https://github.com/picoaide/picoaide-harness/releases" target="_blank" rel="noopener">Releases</a>。
+      </p>
+
+      <h2>与上游的关系</h2>
+      <p>
+        上游 <a href="https://github.com/deepseek-ai/deepseek-harness" target="_blank" rel="noopener">deepseek-ai/deepseek-harness</a>
+        提供核心智能体、插件系统与 Web UI；本项目负责桌面应用封装、本地服务的启动/停止/恢复、
+        企业级管理后台，以及三平台安装包的构建与发布。如果你想通过命令行使用 Harness，
+        或参与核心功能开发，请优先查看上游仓库。
+      </p>
+      <blockquote>
+        PicoAide Harness 是一个独立的社区项目，与 DeepSeek 官方没有隶属关系，也未获得其背书。
+        DeepSeek 是 DeepSeek AI 的商标。
+      </blockquote>
+      <p>
+        特别感谢上游项目与 DeepSeek AI 团队、Cordis 项目与 Koishi.js 社区，
+        以及 <a href="https://github.com/anywhere-labs/dsh-desktop" target="_blank" rel="noopener">anywhere-labs/dsh-desktop</a>
+        提供的源码与灵感 —— 本项目的桌面封装与插件化组合思路从该项目起步。
+      </p>
+    </div>
+  </section>
+
+  <section class="cta-band">
+    <div class="container cta-band__inner">
+      <picture>
+        <source srcset={logoDark.src} media="(prefers-color-scheme: dark)" />
+        <img src={logo.src} alt="" width="44" height="44" class="about-mark" />
+      </picture>
+      <h2>想先看看它长什么样？</h2>
+      <p>首页有完整的界面截图与能力清单；部署指南可以直接交给运维或 AI 执行。</p>
+      <div class="actions actions--center">
+        <a class="btn btn--light" href="/#screenshots">查看界面预览<span class="btn__arrow">→</span></a>
+        <a class="btn btn--ghost-light" href="/deployment/">阅读部署指南</a>
+      </div>
+    </div>
+  </section>
 
   <Footer />
 
   <style>
-    .about {
-      padding: 56px 24px 96px;
-      max-width: 720px;
+    .about-block h2 {
+      font-size: 1.35rem;
+      margin-bottom: 14px;
     }
-    .about h1 { margin-bottom: 8px; }
-    .about__lead {
-      color: var(--ink-soft);
-      font-size: 1.1rem;
+
+    .about-block p {
+      color: var(--ink-2);
+      font-size: 1rem;
+      margin-bottom: 14px;
     }
-    .about__body h2 {
-      font-size: 1.3rem;
-      margin-top: 36px;
+
+    .about-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 18px;
     }
-    .about__body p {
-      color: var(--ink-soft);
+
+    .about-pillars {
+      margin-top: 32px;
+    }
+
+    .about-mark {
+      width: 44px;
+      height: 44px;
+      border-radius: 11px;
+      margin-bottom: 20px;
+    }
+
+    @media (max-width: 720px) {
+      .about-actions .btn {
+        flex: 1 1 auto;
+      }
     }
   </style>
 </Layout>

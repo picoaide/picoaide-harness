@@ -1,12 +1,17 @@
 ---
-import { Image } from 'astro:assets'
-import logo from '../../../brands/official/logo.svg'
-import { headerNav, homeHref } from './site-nav.mjs'
+import logoLight from '../../../brands/official/logo.svg'
+import logoDark from '../../../brands/official/logo-dark.svg'
+import { headerActions, headerNav, homeHref } from './site-nav.mjs'
 
 /**
- * `locale` 缺省 `root` = 中文站：不传参数的页面渲染结果与历史逐字节一致。
- * 英文页（`src/pages/en/index.astro`）**必须**传 `locale="en"`，否则顶栏 6 条链接会把
- * 访客送回中文站（回归审计 v2.8.1→HEAD 的 E-04）。判据：`site/scripts/check-en-landing-nav.mjs`。
+ * 顶栏。**站内链接一律来自 `./site-nav.mjs`**，本模板里不得出现 href 字面量。
+ *
+ * 为什么这条要写死在注释里：`Header.astro` 同时挂在中文页与英文落地页上，
+ * 模板里一个硬编码的 `/deployment/` 就会让英文访客跳到中文站 —— 这正是回归审计
+ * E-04 的形态。判据 `site/scripts/check-en-landing-nav.mjs` 的接线面（C 组）
+ * 与数据面（A 组）盯着这件事。
+ *
+ * `locale` 缺省 `root` = 中文站；英文页（`src/pages/en/index.astro`）**必须**传 `locale="en"`。
  */
 interface Props {
   locale?: 'root' | 'en'
@@ -14,19 +19,46 @@ interface Props {
 
 const { locale = 'root' } = Astro.props
 const items = headerNav(locale)
+const actions = headerActions(locale)
+const home = homeHref(locale)
 ---
 
 <header class="nav">
   <div class="container nav__inner">
-    <a href={homeHref(locale)} class="nav__brand">
-      <Image src={logo} alt="PicoAide Harness" width={26} height={26} />
-      <span>PicoAide Harness</span>
+    <a href={home} class="nav__brand" aria-label="PicoAide Harness">
+      <picture>
+        <source srcset={logoDark.src} media="(prefers-color-scheme: dark)" />
+        <img src={logoLight.src} alt="" width="28" height="28" class="nav__logo" />
+      </picture>
+      <span class="nav__name">PicoAide Harness</span>
+      <span class="nav__edition">Enterprise</span>
     </a>
-    <nav class="nav__links">
-      {items.map(item => (
-        <a href={item.href} class="nav__link">{item.label}</a>
-      ))}
+
+    <nav class="nav__links" aria-label={locale === 'en' ? 'Main' : '主导航'}>
+      {items.map(item => <a href={item.href} class="nav__link">{item.label}</a>)}
     </nav>
+
+    <div class="nav__actions">
+      <a href={actions.repo.href} class="nav__link nav__repo" target="_blank" rel="noopener">
+        {actions.repo.label}
+      </a>
+      <a href={actions.switchHref} class="nav__lang" title={actions.switchTitle}>{actions.switchLabel}</a>
+      <a href={actions.cta.href} class="btn btn--primary btn--sm nav__cta">{actions.cta.label}</a>
+    </div>
+
+    <details class="nav__menu">
+      <summary aria-label={locale === 'en' ? 'Menu' : '菜单'}>
+        <span class="nav__burger" aria-hidden="true"><i></i><i></i><i></i></span>
+      </summary>
+      <div class="nav__panel">
+        {items.map(item => <a href={item.href} class="nav__panel-link">{item.label}</a>)}
+        <div class="nav__panel-foot">
+          <a href={actions.repo.href} class="nav__panel-link" target="_blank" rel="noopener">{actions.repo.label}</a>
+          <a href={actions.switchHref} class="nav__panel-link" title={actions.switchTitle}>{actions.switchLabel}</a>
+        </div>
+        <a href={actions.cta.href} class="btn btn--primary nav__panel-cta">{actions.cta.label}</a>
+      </div>
+    </details>
   </div>
 </header>
 
@@ -34,61 +66,208 @@ const items = headerNav(locale)
   .nav {
     position: sticky;
     top: 0;
-    z-index: 50;
-    background: rgba(255, 255, 255, 0.85);
-    backdrop-filter: blur(12px);
+    z-index: 60;
+    background: color-mix(in srgb, var(--bg) 82%, transparent);
+    backdrop-filter: saturate(180%) blur(14px);
+    -webkit-backdrop-filter: saturate(180%) blur(14px);
     border-bottom: 1px solid var(--line);
   }
 
   .nav__inner {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    height: 64px;
+    gap: 20px;
+    height: 66px;
   }
 
   .nav__brand {
     display: inline-flex;
     align-items: center;
     gap: 10px;
-    font-weight: 700;
-    font-size: 1.08rem;
+    flex: none;
     color: var(--ink);
   }
 
   .nav__brand:hover {
-    color: var(--brand);
+    color: var(--ink);
+  }
+
+  .nav__logo {
+    width: 28px;
+    height: 28px;
+    border-radius: 7px;
+    border: 1px solid var(--line);
+  }
+
+  .nav__name {
+    font-weight: 700;
+    font-size: 1.02rem;
+    letter-spacing: -0.015em;
+    white-space: nowrap;
+  }
+
+  .nav__edition {
+    font-family: var(--font-mono);
+    font-size: 0.66rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent-strong);
+    background: var(--accent-soft);
+    border: 1px solid var(--accent-line);
+    border-radius: var(--r-full);
+    padding: 2px 7px;
   }
 
   .nav__links {
     display: flex;
-    gap: 26px;
+    align-items: center;
+    gap: 4px;
+    margin-left: auto;
   }
 
   .nav__link {
-    color: var(--ink-soft);
-    font-weight: 500;
-    font-size: 0.96rem;
+    display: inline-block;
+    color: var(--ink-2);
+    font-weight: 550;
+    font-size: 0.94rem;
+    padding: 7px 11px;
+    border-radius: var(--r-xs);
+    white-space: nowrap;
+    transition: background 0.15s ease, color 0.15s ease;
   }
 
   .nav__link:hover {
-    color: var(--brand);
+    color: var(--ink);
+    background: var(--bg-sunken);
   }
 
-  @media (max-width: 640px) {
-    .nav__inner {
-      height: auto;
-      padding-top: 10px;
-      padding-bottom: 10px;
-      flex-wrap: wrap;
-      gap: 8px;
-    }
+  .nav__actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: none;
+  }
+
+  .nav__repo {
+    color: var(--ink-3);
+  }
+
+  .nav__lang {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--ink-2);
+    border: 1px solid var(--line-2);
+    border-radius: var(--r-xs);
+    padding: 5px 9px;
+    white-space: nowrap;
+  }
+
+  .nav__lang:hover {
+    color: var(--ink);
+    border-color: var(--ink-3);
+  }
+
+  .nav__cta {
+    margin-left: 4px;
+  }
+
+  /* 移动端：折叠菜单（纯 CSS，不引脚本） */
+  .nav__menu {
+    display: none;
+    margin-left: auto;
+    position: relative;
+  }
+
+  .nav__menu summary {
+    list-style: none;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    border: 1px solid var(--line-2);
+    border-radius: var(--r-xs);
+    color: var(--ink);
+  }
+
+  .nav__menu summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .nav__burger {
+    display: inline-flex;
+    flex-direction: column;
+    gap: 4px;
+    width: 18px;
+  }
+
+  .nav__burger i {
+    display: block;
+    height: 2px;
+    border-radius: 2px;
+    background: currentColor;
+  }
+
+  .nav__panel {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 10px);
+    width: min(78vw, 300px);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 12px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    box-shadow: var(--shadow-lg);
+  }
+
+  .nav__panel-link {
+    color: var(--ink-2);
+    font-weight: 550;
+    font-size: 0.96rem;
+    padding: 9px 12px;
+    border-radius: var(--r-xs);
+  }
+
+  .nav__panel-link:hover {
+    color: var(--ink);
+    background: var(--bg-sunken);
+  }
+
+  .nav__panel-foot {
+    display: flex;
+    gap: 2px;
+    margin-top: 4px;
+    padding-top: 8px;
+    border-top: 1px solid var(--line);
+  }
+
+  .nav__panel-cta {
+    margin-top: 10px;
+    justify-content: center;
+  }
+
+  @media (max-width: 1080px) {
     .nav__links {
-      gap: 10px;
-      flex-wrap: wrap;
+      gap: 0;
     }
-    .nav__brand span {
-      font-size: 0.95rem;
+    .nav__link {
+      padding: 7px 8px;
+      font-size: 0.9rem;
+    }
+  }
+
+  @media (max-width: 900px) {
+    .nav__links,
+    .nav__actions {
+      display: none;
+    }
+    .nav__menu {
+      display: block;
     }
   }
 </style>

@@ -1,0 +1,102 @@
+---
+/**
+ * 图标集（手写 SVG，**不引第三方图标库，也不复制任何品牌图形**）。
+ *
+ * 设计约束：
+ *   · 24×24 网格、`stroke="currentColor"` + `fill="none"`、线宽 1.6、圆角端点 ——
+ *     一套参数走到底，所以任意尺寸下粗细一致；
+ *   · 只用几何（圆、方、弧、线），不含任何商标或品牌符号；
+ *   · 颜色继承文本色（`currentColor`），因此在深色模式下自动跟随，不需要第二套资源。
+ *
+ * 用法：`<Icon name="mic" size={18} />`。新增图标时同时补 en 页面用得到的语义
+ * （中英两页共用同一套 name，不要在页面里写死路径）。
+ */
+interface Props {
+  name: keyof typeof ICONS
+  size?: number
+  class?: string
+}
+
+const ICONS = {
+  /** 智能对话：对话气泡 + 输入光标 */
+  chat:
+    '<path d="M4.6 6.2A2.2 2.2 0 0 1 6.8 4h10.4a2.2 2.2 0 0 1 2.2 2.2v6.4a2.2 2.2 0 0 1-2.2 2.2H10l-4 3.4v-3.4H6.8a2.2 2.2 0 0 1-2.2-2.2z"/>'
+    + '<path d="M8.4 8.6h7.2M8.4 11.6h4.4"/>',
+  /** 能力中心：四宫格 */
+  grid:
+    '<rect x="4" y="4" width="6.4" height="6.4" rx="1.6"/>'
+    + '<rect x="13.6" y="4" width="6.4" height="6.4" rx="1.6"/>'
+    + '<rect x="4" y="13.6" width="6.4" height="6.4" rx="1.6"/>'
+    + '<rect x="13.6" y="13.6" width="6.4" height="6.4" rx="1.6"/>',
+  /** 连接器：两个端点 + 连线 */
+  link:
+    '<circle cx="5.2" cy="12" r="2.4"/><circle cx="18.8" cy="12" r="2.4"/>'
+    + '<path d="M7.6 12h8.8"/><path d="M12 6.4v11.2"/>',
+  /** 定时任务：时钟 */
+  clock: '<circle cx="12" cy="12" r="8"/><path d="M12 7.4V12l3.2 2.1"/>',
+  /** 内置浏览器：窗口 + 光标 */
+  browser:
+    '<rect x="3.4" y="5" width="17.2" height="14" rx="2.2"/>'
+    + '<path d="M3.4 9.2h17.2"/>'
+    + '<path d="M6.4 7.1h.01M8.8 7.1h.01"/>'
+    + '<path d="M10.8 12.4l4.6 1.9-1.9.8-.8 1.9z"/>',
+  /** 语音输入：麦克风 */
+  mic:
+    '<rect x="9.2" y="3.6" width="5.6" height="10" rx="2.8"/>'
+    + '<path d="M6.4 11.6a5.6 5.6 0 0 0 11.2 0"/>'
+    + '<path d="M12 17.2V20M9.2 20h5.6"/>',
+  /** 记忆：分层 */
+  layers:
+    '<path d="M12 3.6 20.4 8 12 12.4 3.6 8z"/>'
+    + '<path d="M3.6 12.2 12 16.6l8.4-4.4"/>'
+    + '<path d="M3.6 16.2 12 20.6l8.4-4.4"/>',
+  /** 应用中心：立方体 */
+  cube:
+    '<path d="M12 3.4 19.4 7.7v8.6L12 20.6l-7.4-4.3V7.7z"/>'
+    + '<path d="M12 12.2 19.4 7.7M12 12.2 4.6 7.7M12 12.2v8.4"/>',
+  /** 凭据：钥匙 */
+  key:
+    '<circle cx="8" cy="12" r="3.2"/>'
+    + '<path d="M11.2 12h8.4"/><path d="M16.4 12v3.2"/><path d="M19.6 12v2.2"/>',
+  /** 令牌哈希：井号 */
+  hash: '<path d="M9.4 4 7.8 20M16.2 4l-1.6 16M4.6 9h14.8M4 15h14.8"/>',
+  /** 沙箱与权限：盾牌 + 勾 */
+  shield: '<path d="M12 3.4 19 6v6c0 4.3-2.9 7.4-7 8.6-4.1-1.2-7-4.3-7-8.6V6z"/><path d="M9 12l2.2 2.2L15.4 10"/>',
+  /** 出站边界：方框 + 向外箭头 */
+  outbound:
+    '<path d="M13.4 4.4h5.2a1 1 0 0 1 1 1v13.2a1 1 0 0 1-1 1h-5.2"/>'
+    + '<path d="M4 12h9.4"/><path d="M10.4 8.6 13.8 12l-3.4 3.4"/>',
+  /** 严格拒绝：禁止 */
+  ban: '<circle cx="12" cy="12" r="8"/><path d="M6.6 17.4 17.4 6.6"/>',
+  /** 数据主权：数据库 */
+  database:
+    '<rect x="4" y="4.6" width="16" height="5.6" rx="2.2"/>'
+    + '<rect x="4" y="13.8" width="16" height="5.6" rx="2.2"/>'
+    + '<path d="M7.4 7.4h.01M7.4 16.6h.01"/>',
+  /** 部署：容器/镜像 */
+  container:
+    '<path d="M12 3.6 20 8v8l-8 4.4L4 16V8z"/>'
+    + '<path d="M4 8l8 4.4L20 8"/>'
+    + '<path d="M12 12.4v8"/>',
+  /** 校验通过 */
+  check: '<circle cx="12" cy="12" r="8"/><path d="M8.4 12.2l2.4 2.4 4.8-5"/>',
+} as const
+
+const { name, size = 20, class: className } = Astro.props
+const paths = ICONS[name] ?? ICONS.grid
+---
+
+<svg
+  class={className}
+  width={size}
+  height={size}
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="1.6"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+  aria-hidden="true"
+  focusable="false"
+  set:html={paths}
+/>

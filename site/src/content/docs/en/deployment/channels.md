@@ -1,11 +1,23 @@
 ---
 title: Channels & white-label
-description: 'The PicoAide Harness channel mechanism: branding content, isolation checks and upgrade safety for official, pre-release and enterprise custom channels.'
+description: 'The PicoAide Harness channel mechanism: why channel content is built into the image, why channels never upgrade into one another, which deployment values must agree, and how to diagnose branding lost after an upgrade.'
 ---
 
-The same code base can be delivered as multiple **channels**. A channel decides what a given installer is
-called, what it looks like and where it upgrades from, and channels **never upgrade into one another** — this is
-a correctness requirement, not a configuration option.
+The same code base can be delivered as multiple **channels**. A channel decides what a given
+deliverable is called, what it looks like and where it upgrades from, and channels **never upgrade into
+one another** — this is a correctness requirement, not a configuration option.
+
+## What this page solves
+
+Deciding "which channel is this stack, and can an upgrade silently turn it into another one", plus what
+channel-related failures look like. It covers: the three channel types → where channel content lives and
+which fields exist → the release matrix (which tags build which channels) → the values that must agree
+on the deployment side → criteria → boundaries and failure behaviour (including diagnosing "branding
+disappeared after an upgrade").
+
+**Prerequisites**: channel content comes from the **private channel repository** (fetched at build time)
+and is injected into the image. This documentation always uses placeholders (`<channel id>`, `<brand>`,
+`harness.example.com`) — real channel identities never enter the public repository or this page.
 
 ## The three types of channel
 
@@ -13,7 +25,7 @@ a correctness requirement, not a configuration option.
 |---|---|---|
 | `official` | Official releases | Update server `release.picoaide.com/official/` + GitHub Release (complete historical archive) |
 | `beta` | Pre-release (version tags containing `-beta` / `-rc` / `-alpha`) | Update server `release.picoaide.com/beta/` + GitHub Pre-release |
-| `<brand-id>` | Enterprise custom / white-label delivery | **Only** via the update server `release.picoaide.com/<brand-id>/` (not published to public Releases or build artifacts) |
+| `<channel id>` | Enterprise custom / white-label delivery | **Only** via the update server `release.picoaide.com/<channel id>/` (never in a public Release) |
 
 Each channel has its own directory on the update server, with a structure identical to the official one:
 
@@ -23,165 +35,197 @@ Each channel has its own directory on the update server, with a structure identi
 <channel>/releases/<version>/SHA256SUMS
 ```
 
-## Channel content travels with the image
+## Design trade-offs
 
-A channel is not a runtime-uploaded configuration; it is **injected at build time** and baked into the image:
+**Why channel content is built into the image instead of uploaded at runtime.** Branding, copy, marks,
+data root and deep-link scheme are all injected at build time
+(`docker build --build-arg CHANNEL=<channel id>`), and the admin console deliberately offers **no**
+editor for them. Two reasons: **auditability** — "which brand is this machine running" can be read out
+of the image and compared byte for byte, rather than being a database row someone can edit; and
+**immutability** — once channel fields can be rewritten at runtime, "washing a customised deployment
+back to the official brand" is one mistaken edit away.
+
+**Why channels never upgrade into one another (refuse at startup instead of falling back).** At startup
+the server verifies "the channel inside the image == the process channel", and during update checks it
+verifies "the manifest's `channel_id` == this deployment's channel". Any mismatch **refuses**: an
+invalid `PICOAI_CHANNEL` refuses to start; content conflicting with the process channel refuses to
+start; a mismatched manifest channel is reported as "update check unavailable" (not as "no new
+version"). Why not fall back to `official`: a fallback would let a customised deployment accept the
+official manifest, losing its branding and channel configuration after the upgrade, **with no error
+anywhere**.
+
+**Why one image archive carries identical tags in every channel (while the content differs).** Channel
+differences live in the image **content** (`/opt/picoaide/channel/` and the baked channel marker), not
+in the tag. That creates an operational constraint worth remembering: a second channel stack on the same
+host overwrites identically named tags when it runs `docker load`, so every archive additionally carries
+a channel-specific tag and a multi-stack host's `.env` must point at it
+(see [Upgrade, backup & rollback](/en/deployment/upgrade/)).
+
+## Where channel content lives
+
+A channel is not a runtime configuration upload; it is injected at build time and frozen into the image:
 
 ```
-image build --build-arg CHANNEL=<channel>
-        ├─ ENV PICOAI_CHANNEL=<channel>     ← runtime channel identity
-        ├─ /opt/picoaide/CHANNEL            ← authoritative declaration file
-        └─ /opt/picoaide/channel/           ← channel content (name / copy / marks / accent color)
+image build --build-arg CHANNEL=<channel id>
+        ├─ ENV PICOAI_CHANNEL=<channel id>   ← runtime channel identity
+        ├─ /opt/picoaide/CHANNEL             ← authoritative declaration file (works even if the deployment sets nothing)
+        └─ /opt/picoaide/channel/            ← channel content (names / copy / marks / accent colour)
 ```
 
 Channel content includes:
 
 | Category | Content |
 |---|---|
-| Marks | Display name, short name (sidebar), title, tagline |
-| Copy | Login page and client welcome messages, portal welcome message |
-| Assets | Light/dark logo pair, favicon, accent color |
-| Client | Deep-link scheme (browser SSO callback), **app-origin scheme (`desktop.app_origin_scheme`, the WASM app origin — required for every channel)**, data-root directory, built-in server address, installer name and app ID |
+| Identity | Display name, short name (sidebar), window title, tagline |
+| Copy | Sign-in page and client welcome text, portal welcome text |
+| Assets | Light and dark logos, favicon, accent colour |
+| Client | Data root directory, built-in server address, installer name (slug), application id, deep-link scheme, app origin scheme |
+| Optional | Whether the speech model ships with the client (`desktop.speech_bundle_model`, on by default; when on the installer grows by about +140–250 MiB), whether the system proxy may be used (`desktop.allow_system_proxy`) |
 
-> **`desktop.app_origin_scheme` is a required field added on 2026-09-19** (including `official` / `beta`;
-> the official and prerelease channels use `picoaide-app`): it decides the origin of a WASM app inside
-> the client (`<scheme>://<app_id>`). **A missing / invalid field, the same value as the deep-link scheme,
-> or a value duplicated across channels aborts the CI build ⇒ that channel produces no artifacts**
-> (there is no silent fallback). Add the field in the channels repo, **push it, then tag** (CI pulls from
-> the channels repo's `origin/main`). Rules and consequences: channel package reference §4.4b.
+The same content drives the **client sign-in page, the client UI, the admin console sidebar and the
+portal** — one configuration, consistent across the product. When the server is unreachable or older, the
+client renders the **bundled copy** of the branding and never falls back to the vendor mark.
 
-This content applies at the same time to **the client login page, the client UI, the Admin Console sidebar and
-the portal page** — configured in one place, consistent across the product.
-When the server is unreachable or running an older version, the client shows branding from the copy shipped with
-the package and does not fall back to the vendor mark.
+`desktop.app_origin_scheme` (the origin scheme for WASM apps, `<scheme>://<app_id>`) is **mandatory for
+every channel**: missing / invalid / identical to the deep-link scheme / duplicated across channels ⇒
+**the build stops and that channel produces no artefact** (no silent fallback). Branded channels must
+also provide the logo and app icon: missing assets are caught by the packaging checks instead of
+producing an installer that carries the vendor icon.
 
-### Getting the speech model into a customer network (`desktop.speech_*`, since 2026-09-29)
+### Getting the speech model into a customer network (`desktop.speech_*`)
 
-Voice input recognizes speech on the machine, and **the model weights ship inside the client by default**
-(`desktop.speech_bundle_model` defaults to `true`): the build packs the int8 weights into the product and the
-desktop assembly points the upstream config items at them (`modelDirectory` / `vadModelPath`) — **zero network,
-zero download**. Only a channel that explicitly opts out (writes `false`) falls back to "download on first use",
-and that download goes **direct** (the client forbids proxies by default), so in a network where only an
-authenticated proxy reaches the internet an opted-out channel never gets past preparation. Of the four fields
-below, `speech_bundle_model` picks the path; the other three apply only **after** opting out (the bundled payload
-wins over a channel-configured directory or mirror — turn bundling off to override it):
+Speech input runs locally, and **the model weights ship with the client by default**
+(`desktop.speech_bundle_model` defaults to `true`): the build puts the weights into the artefact and the
+assembly step points the upstream configuration at them — **zero network, zero download**. Only a
+channel that explicitly opts out (writing `false`) falls back to "download on first use", and that
+download is **direct** (clients refuse to use any proxy by default), so in a network that reaches the
+internet *only* through an authenticated proxy an opted-out channel stays stuck at preparation failure.
 
-| Field | Effect | Value |
+| Field | Purpose | Value |
 |---|---|---|
-| `desktop.speech_bundle_model` | **Ship the weights with the client** (**on by default**: every channel's installer carries the model, so voice works right after install with zero network) | Boolean; default `true`. Set `false` to opt out (back to "download on first use"). When on, the installer grows by about **+140–250 MiB** (the weights are about 230MiB; the increase depends on how well the platform's package format compresses them) |
-| `desktop.speech_model_dir` | Pre-placed model directory (**zero download**) | An absolute path, or `{default, darwin, linux, win32}` (one config serves all three platforms) |
-| `desktop.speech_vad_path` | Pre-placed Silero VAD file (1.8MB; still downloaded when only the model directory is pre-placed) | Same as above |
-| `desktop.speech_model_origin` | Internal mirror (HuggingFace-compatible; model paths and file names unchanged) | `http(s)://host[:port]` only (plain **`http://` is accepted too** — the shape matches the upstream Config schema verbatim) — **no path** |
+| `desktop.speech_bundle_model` | **Ship the weights with the client** (on by default: works right after install, zero network, zero download) | Boolean, default `true`; write `false` to opt out. When on, the installer grows by about **+140–250 MiB** (the weights are about 230 MiB; the increase depends on how well the platform's package format compresses them) |
+| `desktop.speech_model_dir` | A pre-placed model directory (**zero download**) | An absolute path, or a `{default, darwin, linux, win32}` platform map |
+| `desktop.speech_vad_path` | A pre-placed Silero VAD file (still downloaded when only the model directory is pre-placed) | Same as above |
+| `desktop.speech_model_origin` | An intranet mirror (HuggingFace-compatible, same model paths and file names) | Only a `http(s)://host[:port]` shape (**plain `http://` is accepted too**, matching the upstream configuration schema exactly); **no path allowed** |
 
-What you must know:
+A few semantics worth knowing:
 
-- **`speech_bundle_model` is a build-time switch that defaults to on**: the build pulls the weights into the
-  artifact (sizes and sha256 verified against the upstream manifest), and the client points the plugin's own
-  `modelDirectory`/`vadModelPath` at the copy inside the client directory — the official config path, with no
-  "release on first run" step and no extra 230MiB in the data root. A build that cannot fetch the weights
-  **fails** rather than shipping a package that only pretends to carry them.
-- **A bundled payload wins over pre-placed/mirror configuration** (what is installed locally beats network config).
-- **Pre-placed files are not hash-verified** (upstream only checks that they exist), so version matching is the
-  deployment's responsibility; a wrong file shows up as an explicit `Speech model verification failed` rather than
-  a silent downgrade.
-- **Configuring `modelOrigin` removes the public fallback**: a mirror that is down means the download fails.
-- A malformed value (relative path, unknown platform key, mirror with a path, the string `"true"`) falls back to
-  downloading in the client, but **CI stops that channel at build time**.
+- **Bundled weights take precedence over a pre-placed directory or mirror**: when both are configured the
+  bundled payload wins (what is already on the machine beats a network configuration);
+- **Pre-placed paths are not checksum-verified** (upstream only checks that the file exists), so version
+  matching is the deployer's responsibility; a wrong path fails loudly with
+  `Speech model verification failed` during preparation rather than degrading into "looks fine but
+  transcribes nothing";
+- **Configuring `modelOrigin` removes the public fallback**: an unavailable mirror means a failed
+  download (an explicit source is an explicit intent);
+- A malformed value (relative path, unknown platform key, a mirror URL with a path, the string `"true"`)
+  makes the client **fall back to downloading**, but the **build-time** CI stops that channel — do not
+  ship a misconfiguration to customer machines.
 
 ## Release matrix (which tags build which channels)
 
 | Trigger | Channels built | Notes |
 |---|---|---|
-| Prerelease tag (`vX.Y.Z-beta.N` / `-rc` / `-alpha`, contains a hyphen) | **`beta` only** | Branded channels' clients are **not** produced on prerelease tags — a branded package can only be produced by a **stable tag** (the workflow has just `pull_request` and `push`; there is **no** `workflow_dispatch` manual entry point) |
-| Stable tag (plain `vX.Y.Z`) | **All channels** (official + beta + every branded channel) | A branded channel's image and installers appear only in that channel's own update directory |
-| Non-tag (PR / branch push) | `official` only | For gates and smoke tests, not a deliverable |
+| Pre-release tag (contains a hyphen, e.g. `vX.Y.Z-beta.N`) | **`beta` only** | Branded channels' clients are **not** produced on a pre-release tag — branded packages can only come from a **release tag** (the workflow only has `pull_request` and `push` triggers, with **no** `workflow_dispatch` manual entry point) |
+| Release tag (plain `vX.Y.Z`) | **All channels** (official + beta + every branded channel) | A branded channel's image and installers only appear in that channel's own update directory |
+| Not a tag (PR / branch push) | `official` only | Used for gates and smoke tests, not as a deliverable |
 
-⇒ **When adding or changing a field for a branded channel (e.g. `app_origin_scheme`)**: change it in the
-channels repo, **push**, then wait for a **stable tag** (prerelease tags do not build branded channels);
-otherwise customers keep receiving packages with the old behaviour.
+⇒ **When adding or changing a branded channel field**: make the change in the channel repository and
+**push** it, then wait for a **release tag**; otherwise customers keep receiving packages with the old
+behaviour. Criterion: whether that channel's `latest.json` on the update server already points
+`server.version` at the new release.
 
-> The release workflow has **no** `workflow_dispatch`: the `on:` block of `.github/workflows/ci.yml` carries
-> only `pull_request` and `push`. Claiming a manual entry point that does not exist just leads to a workflow
-> that never appears (or runs the default branch), so this page states the fact — wait for a stable tag.
+## Values the deployment side must keep consistent
 
-## Branded channels' assets are **required** (not an optional fallback)
-
-A branded channel (anything other than `official` / `beta`) must ship both assets below, and `assets.logo` in
-`channel.json` must point at the `logo.svg` one:
-
-| Asset | Used for | What breaks without it |
+| Value | Decided by | Notes |
 |---|---|---|
-| `logo.svg` + `assets.logo` in `channel.json` | Tray bitmaps, the bundled `web-brand/favicon.svg`, the in-package inline logo (login page while the server is unreachable) | Without `assets.logo` the package has no inline logo and the login page falls back to the **vendor mark**; declaring another file name gives the login page and the tray **two different brands** |
-| `app-icon.png` (1024×1024, 16-bit RGBA, embedded ICC) | Installer / Dock / taskbar / window icon | Without it the icons fall back to the **vendor icon** (with no signal on the deliverable) |
+| This deployment's channel | **The image** (`/opt/picoaide/CHANNEL`) | `.env`'s `PICOAI_CHANNEL` **may be left empty**; if set it must match the image |
+| Update manifest address | `PICOAI_UPDATE_ENDPOINT`, empty = this channel's default directory | **Empty does not mean off**; write `off` to disable |
+| The manifest's `channel_id` | The `latest.json` in that channel's directory | Must equal this deployment's channel |
+| The image tag (multi-stack hosts) | The `<channel id>-<version>` tag in each archive | Each stack's `SERVER_IMAGE` must point at its own channel tag |
 
-Both are enforced **at build time** (the field checks in `scripts/ci-channels.sh` plus `brand-prepare` during
-packaging), because the white-label gate re-derives assets with the same rules and compares — when both sides
-fall back to the official assets it is comparing a value with itself and structurally cannot see this.
-`official` / `beta` are exempt: their brand *is* the vendor's, so falling back to the official assets is
-expected there and is recorded with a searchable log line.
+The server enforces this at startup and during update checks:
 
-## Three values the deployment side must keep consistent
+- An invalid `PICOAI_CHANNEL` → **refuses to start** (it never falls back to `official`);
+- The image's channel conflicting with the process channel (typically because `.env` / compose overrode
+  the image declaration) → **refuses to start**;
+- A manifest `channel_id` that differs from this deployment → reported as "update check unavailable",
+  not as "no new version"; channels never silently upgrade into one another.
 
-| Value | Decided by | Description |
+> Upgrading from an older version: compose no longer hard-codes a channel. If `.env` still carries a
+> hand-written `PICOAI_CHANNEL=official`, a branded deployment is judged inconsistent — delete that line.
+
+## Criteria
+
+```bash
+cd /opt/picoaide
+DOMAIN=$(grep '^DOMAIN=' .env | cut -d= -f2-)
+
+# 1) the channel baked into the image (authoritative declaration)
+docker exec picoaide-server cat /opt/picoaide/CHANNEL
+
+# 2) the channel the server reports publicly
+curl -sk --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/api/client/v2/channel"
+
+# 3) the update endpoint resolved at startup
+docker compose logs --tail=200 server | grep -i 'channel resolved'
+
+# 4) the channel in the manifest (the one clients verify too)
+curl -sk --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/api/client/v2/updates/manifest"
+```
+
+| # | Criterion | Passing looks like | Failing looks like |
+|---|---|---|---|
+| 1 | The image channel is readable | `cat /opt/picoaide/CHANNEL` prints this stack's channel id | The file is missing ⇒ the image is not a released package |
+| 2 | The public channel agrees | `/api/client/v2/channel`'s `channel_id` == criterion 1 | They differ ⇒ the channel was overridden and the container may already have refused to start |
+| 3 | The update endpoint is right | the log's `channel resolved: … (update endpoint …)` points at this channel's directory | An empty endpoint ⇒ update checks were explicitly set to `off`; another channel's endpoint ⇒ the upgrade will be refused (never a silent cross-channel upgrade) |
+| 4 | The manifest channel agrees | `channel_id` == criterion 1 | Mismatch ⇒ the server reports the update check as unavailable |
+
+## Boundaries and failure behaviour
+
+| Symptom | Criterion (how to confirm) | Recovery |
 |---|---|---|
-| This deployment's channel | **Carried by the image** (`/opt/picoaide/CHANNEL`) | `PICOAI_CHANNEL` in `.env` **may simply be left empty**; if set, it must match the image |
-| Update manifest address | `PICOAI_UPDATE_ENDPOINT`; empty = this channel's default directory | **Empty does not mean disabled**; to disable it, explicitly write `off` |
-| `channel_id` in the manifest | `latest.json` in the corresponding directory on the update server | Must be the same as this deployment's channel |
-
-The server enforces these checks at startup and when checking for updates:
-
-- Invalid `PICOAI_CHANNEL` → **refuses to start** (it does not fall back to `official`: a fallback would let a
-  custom deployment accept the official manifest and wash its branding away);
-- The channel inside the image differs from the channel of the process (typically because `.env`/compose
-  overrode the image declaration) → **refuses to start**;
-- The manifest `channel_id` differs from this deployment → treated as "update check unavailable" rather than
-  "no new version", so that it is visible and can be fixed; upgrades never silently cross channels.
-
-> Note for deployments upgraded from older versions: the compose default **no longer hard-codes a channel**.
-> If `PICOAI_CHANNEL=official` was left in `.env` by hand, a custom-channel deployment will be judged
-> inconsistent — just delete that line.
-
-### The image tag is a fourth value on multi-stack hosts
-
-Channel differences live in the **image contents**, not in the tag: every channel's archive carries
-the same `picoaide-harness-server:v<version>`. On a host running two channel stacks, the later
-`docker load` overwrites that tag, so `docker compose up -d server` on either stack can rebuild it
-from the **other** channel's image (branding and bundled installers wrong, while `.env` looks
-perfectly correct). Each archive therefore also carries a channel-scoped tag
-`picoaide-harness-server:<channel-id>-<version>`; point each stack's `SERVER_IMAGE` at its own
-channel tag. Steps and the post-change verification are in
-[Upgrade, backup and rollback](/en/deployment/upgrade/).
-
-
-## Troubleshooting
-
-| Symptom | Cause |
-|---|---|
-| "New version found" never appears | The three channel values are inconsistent (most commonly: `PICOAI_CHANNEL` was changed but the endpoint was not, or vice versa); `docker compose logs server` prints `manifest channel "official" != this server's channel "…"`; it may also be that `PICOAI_UPDATE_ENDPOINT` was explicitly set to `off` |
-| The container exits immediately at startup, printing that the channel configuration is invalid | `PICOAI_CHANNEL` (or the in-image channel marker) is not a valid channel id; fix the spelling or remove the override |
-| The container exits immediately at startup, printing that the channels are inconsistent | The channel overridden by `.env`/compose differs from the image content; remove the override or set it to match the image |
-| Branding is gone after an upgrade | This should not happen on the normal path (two startup checks + the manifest channel comparison). If it does, someone manually pointed at the wrong image/manifest: stop the upgrade immediately and investigate |
+| "New version available" never appears | `docker compose logs server` prints `manifest channel "…" != this server's channel "…"` | The three channel values disagree: most often `PICOAI_CHANNEL` was changed without the endpoint (or the reverse); it may also be that the endpoint is set to `off`. The server caches for **6 hours**, so a delay right after a release is normal |
+| The container exits at startup, printing an invalid channel configuration | the log names `PICOAI_CHANNEL` | That value (or the image's channel marker) is not a valid channel id: fix the spelling or remove the override — **never** count on a fallback |
+| The container exits at startup, printing a channel mismatch | the log names the image channel and the process channel | `.env` / compose overrode the channel and it differs from the image content: remove the override or make it match the image |
+| Branding changed after an upgrade / the portal shows vendor branding | `cat /opt/picoaide/CHANNEL` ≠ `/api/client/v2/channel`'s `channel_id` | Wrong channel image: point `.env` back at this channel's **channel tag** and recreate; verify the image id as described in [Upgrade, backup & rollback](/en/deployment/upgrade/) and do not keep upgrading from it |
+| Customers received old-behaviour packages | That channel's `latest.json` still shows the old `server.version` | Branded channels are only produced on a **release tag**: wait for one, or confirm the channel repository change was pushed (CI fetches from the channel repository) |
+| The client shows different branding from the server | The client's sign-in page / sidebar branding | The client's branding comes from the **bundled copy** (used when the server is unreachable or older): reinstall the client delivered with the server (see [Client delivery & updates](/en/deployment/client-delivery/)) |
+| Two channel stacks on one host overwrite each other's branding | One stack's container image id points at another channel's image | Channel tag overwrite: redo the multi-stack section of [Upgrade, backup & rollback](/en/deployment/upgrade/) (`.env` must point at `<channel id>-<version>`) |
 
 ## Client data isolation (channels can coexist)
 
-A channel-specific client stores its configuration, sessions, connector credentials and browser data in **its
-own** data directory, so clients of different channels can be installed on the same machine without affecting
-each other (the official channel keeps its existing directory and behavior unchanged):
+A channel-scoped client keeps its configuration, sessions, connector credentials and browser data in its
+**own** data directory, so clients of different channels can live on the same machine without
+interfering:
 
 - Official channel: `~/.picoaide-harness`;
-- Custom channels: a separate directory derived from the channel (never mixed with the official directory);
-- The application's user data directory and the Windows application identity are likewise channel-specific, so
-  that two clients do not fight over each other's single-instance lock.
+- Pre-release channel (`beta`): **shares the official release's data directory** — a pre-release is the
+  release's own verification stage, so sign-in state, settings and sessions must carry over (this is
+  deliberate: a separate directory would make pre-release users lose their existing sessions after
+  upgrading);
+- Branded channels: a channel-derived separate directory, which **must not** share the official one
+  (the two clients may use different session-format generations, and sharing would silently fork the
+  data);
+- The application's user-data directory and the Windows application identity are channel-scoped too, so
+  two clients never steal each other's single-instance lock.
 
-Browser SSO callbacks use the channel's own deep-link scheme, so a login callback never crosses over to a client
-of another channel.
+Browser SSO callbacks use the channel's own deep-link scheme, so a sign-in callback never lands in
+another channel's client.
 
 ## How client upgrades relate to channels
 
-**An employee client does not need to know which channel it belongs to**: it only asks the server it logs in to,
-and that server's channel is structurally determined by its own image. So there is no state in which "the client
-channel differs from the server channel", and no possibility of being shuffled across channels by an upgrade.
+**Employee clients do not need to know which channel they belong to**: they only ask "the server I signed
+in to", and the server's channel is structurally decided by its own image. So a "client channel differs
+from server channel" state cannot exist, and no cross-channel upgrade can wash a deployment over.
 
-Enterprise custom installers are delivered directly by the server portal (see
-[Client delivery & updates](/en/deployment/client-delivery/)), and employee machines need no internet access at
-any point.
+Bespoke installers are delivered straight from the server's portal
+(see [Client delivery & updates](/en/deployment/client-delivery/)); employee machines never need the
+internet.
+
+## Related
+
+- [Deployment overview](/en/deployment/) — deliverable, certificate modes and the iron rules
+- [Upgrade, backup & rollback](/en/deployment/upgrade/) — channel tags on multi-stack hosts
+- [Client delivery & updates](/en/deployment/client-delivery/) — client branding and data roots
+- [Operations & troubleshooting](/en/deployment/operations/) — logs and common faults

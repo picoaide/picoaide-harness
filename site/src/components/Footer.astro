@@ -1,10 +1,14 @@
 ---
+import logoDark from '../../../brands/official/logo-dark.svg'
 import { footerContent } from './site-nav.mjs'
 
 /**
- * `locale` 缺省 `root` = 中文站：不传参数的页面渲染结果与历史逐字节一致。
- * 英文页（`src/pages/en/index.astro`）**必须**传 `locale="en"`，否则页脚 9 条站内链接会把
- * 访客送回中文站（回归审计 v2.8.1→HEAD 的 E-04）。判据：`site/scripts/check-en-landing-nav.mjs`。
+ * 页脚。**站内链接一律来自 `./site-nav.mjs`**（与 Header 同一条纪律：模板里不留 href 字面量）。
+ *
+ * 深色底用 `--panel-*` 令牌（与主题模式解耦），品牌 mark 用 `logo-dark.svg`
+ * （白底版）—— AGENTS 的强制双色规则：深色面用 dark 变体，不要在深色底上用黑底白纹那份。
+ *
+ * `locale` 缺省 `root` = 中文站；英文页必须传 `locale="en"`（判据同 Header）。
  */
 interface Props {
   locale?: 'root' | 'en'
@@ -13,78 +17,122 @@ interface Props {
 const { locale = 'root' } = Astro.props
 const content = footerContent(locale)
 const year = new Date().getFullYear()
-
-/*
- * 下面模板里的空白是**契约**，不是排版：
- *   · Astro 把模板中的换行 + 缩进折成**一个空格**（历史产物就是这个形态），而 `.map()`
- *     相邻兄弟之间**不产生**任何空白 ⇒ 直接 map 会让中文站页脚少掉 11 个空格、渲染结果
- *     不再与改动前逐字节一致。所以组与组、链接与链接之间显式补一个空格（`? null : ' '`）。
- *   · 反过来，**模板里的 JSX 式注释块会带来两个空格**（注释前后各一个空白文本节点，
- *     注释自身渲染为空）—— 实测把「品牌栏 → 产品栏」的分隔从 1 个空格变成 2 个。
- *     所以这条说明放在 frontmatter 里，不放进模板。
- * 校验：`site/scripts/check-en-landing-nav.mjs`（数据面 + 落点面 + 接线面）+ 构建产物对拍
- * （同一构建位置的改动前后两棵树：44 个 HTML 里 43 个逐字节相同，唯一不同的就是本修复的
- * 目标 `/en/` 落地页）。
- */
+const isEn = locale === 'en'
 ---
 
 <footer class="footer">
   <div class="container footer__grid">
-    <div class="footer__col">
-      <strong>PicoAide Harness</strong>
+    <div class="footer__brand">
+      <div class="footer__brandrow">
+        <img src={logoDark.src} alt="" width="30" height="30" class="footer__logo" />
+        <strong>PicoAide Harness</strong>
+      </div>
       <p>{content.tagline}</p>
+      <div class="footer__badges">
+        <span class="badge">{isEn ? 'MIT licensed' : 'MIT 开源'}</span>
+        <span class="badge">{isEn ? 'Self-hosted' : '私有化部署'}</span>
+        <span class="badge">{isEn ? 'Upstream pinned' : '上游固定版本'}</span>
+      </div>
     </div>
-    {content.groups.map((group, groupIndex) => (<Fragment>{groupIndex === 0 ? null : ' '}<div class="footer__col">
+
+    {content.groups.map(group => (
+      <div class="footer__col">
         <strong>{group.title}</strong>
-        {group.links.map((link, linkIndex) => (
-          <Fragment>{linkIndex === 0 ? null : ' '}<a
-            href={link.href}
-            target={link.blank ? '_blank' : undefined}
-            rel={link.blank ? 'noopener' : undefined}
-          >{link.label}</a></Fragment>
-        ))}
-      </div></Fragment>
+        <ul>
+          {group.links.map(link => (
+            <li>
+              <a
+                href={link.href}
+                target={link.blank ? '_blank' : undefined}
+                rel={link.blank ? 'noopener' : undefined}
+              >{link.label}</a>
+            </li>
+          ))}
+        </ul>
+      </div>
     ))}
   </div>
+
   <div class="container footer__bottom">
     <span>© {year} PicoAide. All rights reserved.</span>
-    <span>{content.note}</span>
+    <span class="footer__note">{content.note}</span>
   </div>
 </footer>
 
 <style>
   .footer {
-    background: var(--bg-deep);
-    color: #cbd5e1;
-    padding: 56px 0 28px;
+    background: var(--panel);
+    color: var(--panel-ink-2);
+    padding: clamp(48px, 6vw, 72px) 0 26px;
+    border-top: 1px solid var(--panel-line);
   }
 
   .footer__grid {
     display: grid;
-    grid-template-columns: 2fr 1fr 1fr 1fr;
-    gap: 32px;
-    margin-bottom: 40px;
+    grid-template-columns: minmax(0, 1.6fr) repeat(4, minmax(0, 1fr));
+    gap: 36px 28px;
   }
 
-  .footer__col {
+  .footer__brandrow {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+
+  .footer__logo {
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+  }
+
+  .footer__brand strong {
+    color: var(--panel-ink);
+    font-size: 1.02rem;
+    letter-spacing: -0.01em;
+  }
+
+  .footer__brand p {
+    margin: 0 0 16px;
+    color: var(--panel-ink-2);
+    font-size: 0.92rem;
+    max-width: 34ch;
+  }
+
+  .footer__badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .footer__badges .badge {
+    color: var(--panel-ink-2);
+    background: rgba(255, 255, 255, 0.05);
+    border-color: var(--panel-line);
+  }
+
+  .footer__col ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
     display: flex;
     flex-direction: column;
     gap: 10px;
   }
 
   .footer__col strong {
-    color: #fff;
-    font-size: 1rem;
-  }
-
-  .footer__col p {
-    margin: 0;
-    color: #94a3b8;
-    font-size: 0.92rem;
+    display: block;
+    color: var(--panel-ink);
+    font-size: 0.83rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-family: var(--font-mono);
+    font-weight: 600;
+    margin-bottom: 16px;
   }
 
   .footer__col a {
-    color: #cbd5e1;
+    color: var(--panel-ink-2);
     font-size: 0.92rem;
   }
 
@@ -94,21 +142,37 @@ const year = new Date().getFullYear()
 
   .footer__bottom {
     display: flex;
+    align-items: center;
     justify-content: space-between;
-    gap: 12px;
-    border-top: 1px solid rgba(255, 255, 255, 0.1);
-    padding-top: 20px;
-    color: #64748b;
-    font-size: 0.88rem;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: clamp(36px, 5vw, 56px);
+    padding-top: 22px;
+    border-top: 1px solid var(--panel-line);
+    color: var(--panel-ink-3);
+    font-size: 0.86rem;
   }
 
-  @media (max-width: 768px) {
+  .footer__note {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+  }
+
+  @media (max-width: 1080px) {
     .footer__grid {
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .footer__brand {
+      grid-column: 1 / -1;
+    }
+  }
+
+  @media (max-width: 560px) {
+    .footer__grid {
+      grid-template-columns: minmax(0, 1fr);
     }
     .footer__bottom {
-      flex-direction: column;
-      text-align: center;
+      justify-content: flex-start;
     }
   }
 </style>

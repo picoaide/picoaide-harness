@@ -76,38 +76,50 @@ const REQUIRED_PATHS = [
 
 /**
  * 冻结的 root（中文站）导航 —— `site-nav.mjs` 里 `root` 表必须逐字等于它。
- * 出处 = 改动前的 `Header.astro` / `Footer.astro` 字面量（审计基线 v2.8.1→HEAD）。
- * **要改中文导航就连这里一起改**（有意为之：这是"中文站逐字节不变"的锚）。
+ * 出处 = 本次官网改版时**有意定稿**的中文导航（版块 id 与 `/en/` 一一对应）。
+ * **要改中文导航就连这里一起改**（有意为之：这是"中文站导航不顺手漂移"的锚）。
  */
 const FROZEN_ROOT_HEADER = [
   { label: '首页', href: '/' },
-  { label: '部署', href: '/deployment/' },
-  { label: '功能', href: '/#features' },
+  { label: '功能', href: '/#capabilities' },
+  { label: '部署', href: '/#deployment' },
+  { label: '安全', href: '/#security' },
   { label: '截图', href: '/#screenshots' },
-  { label: '博客', href: '/blog/' },
   { label: 'Wiki', href: '/welcome/' },
 ]
 
 const FROZEN_ROOT_FOOTER = {
-  tagline: '企业级 DeepSeek Harness 一体化平台，支持私有化部署。',
+  tagline: '企业级 AI 一体化平台：桌面客户端、本地智能体引擎与企业管理后台，一个镜像完成私有化部署。',
   groups: [
     {
       title: '产品',
       links: [
-        { label: '私有化部署', href: '/#deployment' },
-        { label: '客户端交付', href: '/#delivery' },
-        { label: '核心特性', href: '/#features' },
-        { label: '界面截图', href: '/#screenshots' },
+        { label: '平台能力', href: '/#capabilities' },
+        { label: '企业管控', href: '/#control' },
+        { label: '安全与合规', href: '/#security' },
+        { label: '界面预览', href: '/#screenshots' },
       ],
     },
     {
-      title: '资源',
+      title: '部署',
+      links: [
+        { label: '部署总览', href: '/deployment/' },
+        { label: '容器化部署', href: '/deployment/compose/' },
+        { label: '升级与回滚', href: '/deployment/upgrade/' },
+        { label: '客户端分发', href: '/deployment/client-delivery/' },
+        { label: '渠道与白标', href: '/deployment/channels/' },
+        { label: '离线部署', href: '/deployment/offline/' },
+      ],
+    },
+    {
+      title: '文档',
       links: [
         { label: '快速开始', href: '/getting-started/' },
-        { label: '升级与回滚', href: '/deployment/upgrade/' },
-        { label: '博客', href: '/blog/' },
-        { label: 'Wiki 文档', href: '/welcome/' },
-        { label: '关于我们', href: '/about/' },
+        { label: '桌面客户端', href: '/desktop/' },
+        { label: '管理后台', href: '/admin/' },
+        { label: '系统架构', href: '/architecture/' },
+        { label: 'API 参考', href: '/api-reference/' },
+        { label: '常见问题', href: '/faq/' },
       ],
     },
     {
@@ -116,10 +128,11 @@ const FROZEN_ROOT_FOOTER = {
         { label: 'GitHub', href: 'https://github.com/picoaide/picoaide-harness' },
         { label: '版本归档', href: 'https://github.com/picoaide/picoaide-harness/releases', blank: true },
         { label: '提交 Issue', href: 'https://github.com/picoaide/picoaide-harness/issues', blank: true },
+        { label: '关于我们', href: '/about/' },
       ],
     },
   ],
-  note: '基于 DeepSeek Harness 构建。',
+  note: '基于 DeepSeek Harness 构建 · MIT License',
 }
 
 /**
@@ -129,7 +142,7 @@ const FROZEN_ROOT_FOOTER = {
 const REQUIRED_EN_HREFS = [
   '/en/',
   '/en/deployment/',
-  '/en/#features',
+  '/en/#capabilities',
   '/en/welcome/',
   '/en/deployment/client-delivery/',
   '/en/getting-started/',
@@ -279,6 +292,25 @@ for (const group of footerEn.groups) for (const link of group.links) checkItemHr
 
 check(homeRoot === '/' && homeEn === '/en/', 'A1', `homeHref: root=${homeRoot} en=${homeEn}（英文首页必须是 /en/）。`)
 
+// A7：顶栏动作区（主 CTA / 语言切换 / 仓库入口）——与导航同一套前缀规则。
+// 这一组是 2026-10 改版新增的：模板里任何一条硬编码链接都会重新引入 E-04 的形态。
+const actionsRoot = nav.headerActions('root')
+const actionsEn = nav.headerActions('en')
+checkItemHref(actionsRoot.cta, 'root', 'actions(root).cta')
+checkItemHref(actionsEn.cta, 'en', 'actions(en).cta')
+checkItemHref(actionsRoot.repo, 'root', 'actions(root).repo')
+checkItemHref(actionsEn.repo, 'en', 'actions(en).repo')
+checkTarget(actionsRoot.cta, 'actions(root).cta')
+checkTarget(actionsEn.cta, 'actions(en).cta')
+check(actionsRoot.repo.href === actionsEn.repo.href, 'A7', '两个 locale 的仓库入口必须是同一条外链。')
+check(
+  actionsRoot.switchHref === '/en/' && actionsEn.switchHref === '/',
+  'A7',
+  `语言切换必须互为对方的首页：root=${actionsRoot.switchHref} en=${actionsEn.switchHref}。`,
+)
+checkTarget({ label: 'actions(root).switch', href: actionsRoot.switchHref }, 'actions(root).switch')
+checkTarget({ label: 'actions(en).switch', href: actionsEn.switchHref }, 'actions(en).switch')
+
 // A2：英文文案里不得有中日韩字符。
 /** @param {unknown} value @param {string} where */
 function checkNoCjk(value, where) {
@@ -387,6 +419,10 @@ check(importsNavModule(headerSource, './site-nav.mjs'), 'C1', 'Header.astro 没�
   + '（硬编码标签/链接 = E-04 的原形态）。')
 check(/headerNav\(\s*locale\s*\)/u.test(headerSource), 'C1', 'Header.astro 没有按 locale 取表'
   + '（必须调用 headerNav(locale)）。')
+check(/headerActions\(\s*locale\s*\)/u.test(headerSource), 'C1', 'Header.astro 没有按 locale 取动作区'
+  + '（必须调用 headerActions(locale)：CTA 与语言切换的落点同样随 locale 变）。')
+check(!/\bhref\s*[:=]\s*['"]\//u.test(headerSource), 'C1', 'Header.astro 模板里出现了硬编码的站内 href'
+  + '（站内链接一律走 ./site-nav.mjs 的表 —— 与 Footer 同一条纪律）。')
 check(/const\s*\{[^}]*locale[^}]*\}\s*=\s*Astro\.props/u.test(headerSource), 'C1',
   'Header.astro 没有从 Astro.props 取 locale（缺省 root 的默认值也在这里）。')
 
