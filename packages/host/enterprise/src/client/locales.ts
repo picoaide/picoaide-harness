@@ -11,7 +11,7 @@ export const zh = {
   'capability.detail': '详情',
   'capability.detailDescription': '说明',
   'capability.detailNoDescription': '（这一条没有填写说明）',
-  'capability.subtitle': '技能与智能体：装一个就能在对话里直接 @ 使用',
+  'capability.subtitle': '技能与智能体：装一个，在对话里输入 / 就能调用',
   // 来源分区
   'capability.tabMine': '我的',
   'capability.tabMarket': '市场',
@@ -166,7 +166,7 @@ export const en: Record<keyof typeof zh, string> = {
   'capability.detail': 'Details',
   'capability.detailDescription': 'Description',
   'capability.detailNoDescription': '(no description provided)',
-  'capability.subtitle': 'Skills and agents — install one and @-mention it in chat',
+  'capability.subtitle': 'Skills and agents — install one, then type / in chat to use it',
   'capability.tabMine': 'Mine',
   'capability.tabMarket': 'Market',
   'capability.filterAll': 'All',
