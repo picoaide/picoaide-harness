@@ -3407,6 +3407,34 @@ const PINNED_STEP_POLICIES = [
       : `它的 \`working-directory\` 是 \`${item?.step?.['working-directory'] ?? '(缺)'}\` 而不是 `
         + '\`server/webadmin\`（`webadmin` 的用例只在那个目录里跑：换 cwd 就等于换了一批用例）'),
   },
+  {
+    id: 'macos-inplace-helper-tests',
+    label: '`yarn workspace dsh-plugin-desktop test tests/macos-update-helper.integration.spec.ts`（macOS 原地更新帮手：真 /bin/sh + ditto + codesign）',
+    match: (script, item) => item?.jobId === 'desktop-macos'
+      && executedCommands(script).some(entry => entry.command === 'yarn'
+        && (entry.argv[0] ?? '') === 'workspace'
+        && (entry.argv[1] ?? '') === 'dsh-plugin-desktop'
+        && (entry.argv[2] ?? '') === 'test'
+        && (entry.argv[3] ?? '') === 'tests/macos-update-helper.integration.spec.ts'),
+    ifPolicy: 'never',
+    // 载荷 = 必须真的跑那个 spec、真的产出 JSON 报告、报告判据真的在看"被跳过"的两个字段。
+    // 2026-10-12 合并前审计的 P0：这套用例是 `describe.skipIf(≠darwin)`，而唯一的 mac runner
+    // job 当时只打包（--no-gates）⇒ 它们在 CI 上**从未执行**（实测 5 skipped、退出码 0，
+    // 与"通过"不可区分）。这条登记就是不让那个结论再退化回去。
+    payload: script => {
+      if (!/macos-update-helper\.integration\.spec\.ts/u.test(script)) {
+        return '它没有跑 `tests/macos-update-helper.integration.spec.ts`（换 spec = 换判据面）'
+      }
+      if (!/--reporter=json/u.test(script)) {
+        return '它没有产出 JSON 报告:`跳过数必须为 0` 这条组级判据就没有输入'
+      }
+      if (!/numPendingTests/u.test(script) || !/numTodoTests/u.test(script)) {
+        return '它的报告判据不再检查 `numPendingTests` / `numTodoTests`'
+          + '（vitest 4.1.8 的"跳过"就在这两个字段里,`numSkipped` 根本不存在）'
+      }
+      return null
+    },
+  },
 ]
 /**
  * `if:` 允许形态的**登记值**。
@@ -3456,6 +3484,11 @@ const CI_JUDGEMENT_ARGV_PREFIXES = [
   ['pnpm', 'test'],
   ['make', 'check'],
   ['make', 'test'],
+  // 2026-10-12 合并前审计的 P0：macOS 原地更新帮手的集成用例步。它不是 `yarn test`
+  // （`yarn workspace <包> test <spec>`），所以**必须**显式进词表 —— 否则存在性对账看不见它，
+  // `REQUIRED_CI_STEPS` 里登记的那条会以"登记了却不存在"报红，而反向的"未登记判据步骤"
+  // 也永远不会命中它（两张表漂移）。
+  ['yarn', 'workspace', 'dsh-plugin-desktop', 'test'],
 ]
 /**
  * **[SK-23] 必须存在的判据步骤：登记表 + 双向对账**（R21 fix-6 / E-03）。
@@ -3526,6 +3559,18 @@ const REQUIRED_CI_STEPS = [
     label: '`npm test`（webadmin 测试，`working-directory: server/webadmin`）',
     why: 'webadmin 的 600+ 用例只在 CI 的这一步跑（根 `yarn check` 的 workspace 枚举不含它）；'
       + '删掉它后全仓门禁照旧绿（E-03 的现场之一）',
+  },
+  {
+    file: 'ci.yml',
+    job: 'desktop-macos',
+    argv: ['yarn', 'workspace', 'dsh-plugin-desktop', 'test'],
+    // R22 FIX-14 / E-03：接进 `PINNED_STEP_POLICIES`（存在性**不等于**可执行性/判据面）。
+    pinnedId: 'macos-inplace-helper-tests',
+    label: '`yarn workspace dsh-plugin-desktop test tests/macos-update-helper.integration.spec.ts`（帮手真跑 `/bin/sh` + `ditto` + `codesign`）',
+    why: '2026-10-12 合并前审计的 P0：这套用例是 `describe.skipIf(≠darwin)`，而唯一的 mac runner'
+      + ' job 当时只打包（每条命令都带 `--no-gates`）⇒ 它们在 CI 上**从未执行**，实测 5 skipped、'
+      + '退出码 0 —— 与"通过"不可区分。删掉这一步 / 给它加 `if: false` / 换掉 spec 路径，都会让'
+      + '"帮手真的能替换应用"重新变成没人看守的承诺',
   },
 ]
 
@@ -3636,6 +3681,12 @@ const PINNED_ENV_ALLOWED_KEYS = [
   { key: 'APPLE_API_KEY_ID', why: '同上,key id' },
   { key: 'APPLE_API_ISSUER', why: '同上,issuer' },
   { key: 'MAC_CERT_P12_BASE64', why: 'Developer ID 证书(P12 base64),签名用' },
+  {
+    key: 'PICOAI_RUNTIME_CACHE',
+    why: 'desktop-macos 的 job 级 env:随包 agent 运行时的制品缓存落点(`fetch-bundled-runtimes.mjs`'
+      + ' 读它)。它只影响"运行时从哪来",不换解释器、不改 argv/cwd —— 被钉的'
+      + ' `macos-inplace-helper-tests` 步骤不读它(它跑的是仓内 spec + 系统自带的 sh/ditto/codesign)。',
+  },
   { key: 'CSC_KEY_PASSWORD', why: 'P12 口令(签名工具读它)' },
   { key: 'MACOS_SIGN_IDENTITY', why: '签名身份名(Developer ID Application: …)' },
   { key: 'CHANNEL_NOTARIZE', why: '渠道 DMG 是否走公证路径的开关(打包脚本读)' },
@@ -3912,6 +3963,13 @@ const PINNED_JOB_RUNS_ON_REGISTRY = [
     runsOn: 'ubuntu-24.04',
     why: 'Go/服务端 job:含被钉的 `wasm-case-gate` 判据步(PG 容器 + `go test -json`),'
       + '托管 Ubuntu 24.04 是它的既有形态(PG 18 镜像与 go 版本都在这一步的判据面内)。',
+  },
+  {
+    job: 'desktop-macos',
+    runsOn: 'macos-15',
+    why: 'macOS 交付物 job:含 2026-10-12 起被钉的 `macos-inplace-helper-tests` 判据步 —— '
+      + '那一步真跑 `/bin/sh` + `ditto` + `codesign`，**镜像自带的这三个工具就是判据的一部分**'
+      + '（判据的全部意义是"在真 macOS 上跑得通"）；换标签/换自托管 runner 必须进 diff。',
   },
 ]
 
