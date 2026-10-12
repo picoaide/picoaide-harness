@@ -141,7 +141,12 @@ describe.skipIf(process.platform !== 'darwin')('macOS update helper (real /bin/s
     // 扮演"新版本启动"：真应用在启动路径上写同一个文件（`writeMacosUpdateBootMarker`）。
     // 帮手在重新打开应用之前会删一次这个文件，所以这里持续写，直到帮手退出。
     const marker = setInterval(() => {
-      writeFileSync(runner.bootMarkerPath, 'version=2.0.0\n', 'utf8')
+      // 标记必须**同时**带版本与 bundle（审计复核 P1）：只写版本号的标记会被判否。
+      writeFileSync(
+        runner.bootMarkerPath,
+        `version=2.0.0\nbundle=${runner.plan.bundlePath}\n`,
+        'utf8',
+      )
     }, 50)
     const code = await runner.exited
     clearInterval(marker)
@@ -186,7 +191,11 @@ describe.skipIf(process.platform !== 'darwin')('macOS update helper (real /bin/s
     // 关键判据：帮手必须在重新打开应用之前删掉启动标记。否则**上一次**（或旧版本）
     // 留下的同名标记会让它把"新版根本没起来"误判成成功，然后删掉唯一的备份。
     const runner = runHelper()
-    writeFileSync(runner.bootMarkerPath, 'version=2.0.0\n', 'utf8')
+    writeFileSync(
+      runner.bootMarkerPath,
+      `version=2.0.0\nbundle=${runner.plan.bundlePath}\n`,
+      'utf8',
+    )
     expect(await runner.exited).toBe(1)
 
     expect(readFileSync(join(runner.plan.bundlePath, 'Contents', 'Resources', 'marker.txt'), 'utf8')).toBe('OLD-BUILD')
@@ -200,7 +209,11 @@ describe.skipIf(process.platform !== 'darwin')('macOS update helper (real /bin/s
     // 本仓的版本号形态天然互为前缀（beta.1 vs beta.10、预发 vs 正式），所以这条不是假想。
     const runner = runHelper()
     const marker = setInterval(() => {
-      writeFileSync(runner.bootMarkerPath, 'version=2.0.0-beta.1\n', 'utf8')
+      writeFileSync(
+        runner.bootMarkerPath,
+        `version=2.0.0-beta.1\nbundle=${runner.plan.bundlePath}\n`,
+        'utf8',
+      )
     }, 50)
     const code = await runner.exited
     clearInterval(marker)
