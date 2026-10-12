@@ -4,7 +4,8 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { Worker } from 'node:worker_threads'
 import { dshHome } from './desktop-home.ts'
-import type { DiagnosticExportWorkerResult } from './diagnostic-export-worker.ts'
+import { macosUpdatePaths } from './macos-update-install.ts'
+import type { DiagnosticExportWorkerResult, MacosUpdateEvidencePaths } from './diagnostic-export-worker.ts'
 
 /** Bound both worker memory and the amount of potentially sensitive log history exported. */
 const MAX_DIAGNOSTIC_EVIDENCE_BYTES = 50 * 1024 * 1024
@@ -86,6 +87,25 @@ export function waitForDiagnosticExportWorker(
   })
 }
 
+/**
+ * macOS 原地更新的现场文件（帮手日志 / 结果 / 启动标记）。
+ *
+ * 路径唯一真源是 `macos-update-install.ts` 的 `macosUpdatePaths()`，在这里（主线程）
+ * 解析后原样传进 worker —— 与 `crashDumpsDir`/`runStatePath`/`sessionsDir` 同一口径：
+ * worker 不自己推导 userData 相对布局（独立线程里也就不必为了三个路径去 import
+ * 那个模块：它顶层 `import 'node:child_process'`，还有一条模块级常量
+ * `MACOS_UPDATE_HELPER_SOURCE = macosUpdateHelperScript()` 会在加载时执行）。
+ */
+function macosUpdateEvidencePaths(userDataDir: string): MacosUpdateEvidencePaths {
+  const paths = macosUpdatePaths(userDataDir)
+  return {
+    resultPath: paths.resultPath,
+    failuresPath: paths.failuresPath,
+    logPath: paths.logPath,
+    bootMarkerPath: paths.bootMarkerPath,
+  }
+}
+
 /** Write a diagnostics zip in a short-lived worker and return its published path. */
 export function exportDiagnosticsZip(
   logsDir: string,
@@ -110,6 +130,7 @@ export function exportDiagnosticsZip(
       ...(options.crashDumpsDir === undefined ? {} : { crashDumpsDir: options.crashDumpsDir }),
       ...(options.runStatePath === undefined ? {} : { runStatePath: options.runStatePath }),
       ...(options.sessionsDir === undefined ? {} : { sessionsDir: options.sessionsDir }),
+      macosUpdateEvidence: macosUpdateEvidencePaths(userDataDir),
     },
     resourceLimits: { maxOldGenerationSizeMb: 256 },
   })

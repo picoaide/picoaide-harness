@@ -1466,6 +1466,72 @@ jobs:
           tar -xzf package-input/workspace-build.tgz
           [ -d packages/host/desktop/lib ] || { echo "::error::workspace-build 解压后缺少 desktop lib"; exit 1; }
           [ -d packages/host/desktop/build ] || { echo "::error::workspace-build 解压后缺少 desktop build 产物"; exit 1; }
+      # ==== macOS 平台判据:原地更新帮手(2026-10-12 合并前审计 P0)====
+      #
+      # 为什么非要在这个 job 里真跑:`packages/host/desktop/tests/macos-update-helper.integration.spec.ts`
+      # 是 `describe.skipIf(process.platform !== 'darwin')`(5 条用例),它证明的是"真
+      # `/bin/sh` + 真 `ditto` + 真 `codesign` 之下替换/回滚真的发生了" —— 同族的单测
+      # 用命令替身,证明不了脚本的位置参数顺序、`ditto --noqtn` 的副本仍能过签名校验、
+      # 两条 `mv` 在真文件系统上的最终形态。而 gate(ubuntu)上这 5 条**全部 skipped 且
+      # 退出码 0**(实测 `Test Files 1 skipped (1)` / `Tests 5 skipped (5)` / exit 0)
+      # ⇒ 在 CI 上"跳过了"与"通过了"**不可区分**;本 job 又是本仓唯一的 mac runner,
+      # 但它此前只打包、且每条命令都带 `--no-gates` ⇒ 这条判据**从未在任何一个 runner
+      # 上真跑过**（2026-10-12 审计的 P0 缺口就是这个"退出码绿 + 零断言执行"）。
+      #
+      # 组级判据(退出码本身不够):`describe.skipIf` 的整块跳过不会让 vitest 变红,所以
+      # 判据必须读机器可读报告 —— **跳过的条数必须为 0**(平台不对就静默跳过的形态当场
+      # 红),且**用例数 ≥ 5**(防止 spec 被删成空壳/过滤器写错而这一步照旧绿)。
+      # 报告用 vitest 4.1.8 的真实字段:`numPendingTests` 就是"跳过"(该版本的 JSON
+      # reporter **没有** `numSkipped` —— 照那个名字判是恒红的假判据),`it.todo` 落在
+      # `numTodoTests`,两者都算"没真跑"。`--reporter=default` 与 json 并存,人类仍然
+      # 看得到 vitest 的常规输出(失败原因不必去 runner 上翻文件)。
+      - name: macOS in-place update helper (real /bin/sh, ditto, codesign; skipped must be 0)
+        run: |
+          set -euo pipefail
+          # 报告**先删**:留着上一次的清不掉,会把"这一步根本没跑起来"伪装成"跑过了"。
+          report="${RUNNER_TEMP}/macos-update-helper-report.json"
+          rm -f "$report"
+          # cwd = 包目录(yarn workspace 的语义);spec 路径与 vitest.config.ts 都按包目录解析。
+          yarn workspace dsh-plugin-desktop test tests/macos-update-helper.integration.spec.ts \
+            --reporter=default --reporter=json --outputFile="$report"
+          node -e '
+          const fs = require("node:fs")
+          const die = (message) => {
+            process.stdout.write("::error::" + message + "\n")
+            process.exit(1)
+          }
+          const reportPath = process.argv[process.argv.length - 1]
+          if (!fs.existsSync(reportPath)) {
+            die("macOS 原地更新判据**没跑**:vitest 没有写出 JSON 报告(" + reportPath + ")。"
+              + "这不是被跳过,是这一步根本没有执行到 vitest(检查命令、工作目录与依赖安装)。")
+          }
+          const report = JSON.parse(fs.readFileSync(reportPath, "utf8"))
+          const files = Array.isArray(report.testResults) ? report.testResults.length : 0
+          const total = report.numTotalTests || 0
+          const passed = report.numPassedTests || 0
+          const failed = report.numFailedTests || 0
+          const pending = report.numPendingTests || 0
+          const todo = report.numTodoTests || 0
+          const summary = "numTotalTests=" + total + " numPassedTests=" + passed
+            + " numFailedTests=" + failed + " numPendingTests=" + pending
+            + " numTodoTests=" + todo + " 测试文件=" + files
+          if (files === 0 || total === 0) {
+            die("macOS 原地更新判据**没跑**:报告里一条用例都没有(" + summary + ")。"
+              + "这不是被跳过,是 vitest 没有收集到 spec(路径/过滤器写错,或 spec 被删掉)。")
+          }
+          if (total < 5) {
+            die("macOS 原地更新判据被掏空:至少要有 5 条用例,报告里只有 " + total + " 条(" + summary + ")。")
+          }
+          if (pending + todo > 0) {
+            die("macOS 原地更新判据**被跳过 " + (pending + todo) + " 条**(" + summary + ")。"
+              + "跳过 = 一条断言都没真的跑过,而 vitest 的退出码仍然是 0 —— 平台不是 darwin"
+              + "(describe.skipIf)与用例被 it.skip/it.todo 掉都落在这里。")
+          }
+          if (failed > 0 || passed !== total) {
+            die("macOS 原地更新判据没有全过:passed=" + passed + " / total=" + total + "(" + summary + ")。")
+          }
+          console.log("macOS in-place update judge: PASS — " + summary)
+          ' "$report"
       # App Store Connect API Key:secret 里存的是 .p8 文件内容,写入临时文件
       # 以路径形式传给 electron-builder(正式分支专用;冒烟分支不ary用)。
       - name: Materialize App Store Connect API key

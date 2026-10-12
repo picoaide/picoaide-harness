@@ -555,6 +555,61 @@ describe('desktop update Host plugin', () => {
     }
   })
 
+  it('drops the ready state when handing the installer over fails', async () => {
+    // 审计 A11（2026-10-12）：交付失败**必须**同时撤掉 ready 状态。
+    //
+    // 原实现只记 `lastError`，于是「安装更新」入口一直挂着；而 `runManualCheckTask` 在
+    // `readyVersion !== undefined` 时直接转去安装 ⇒ 用户点「检查更新」也不会重新取清单/
+    // 重新下载，形成"点一次失败一次"的死循环（macOS 原地更新把"载荷与当前应用不同源"
+    // 判成抛错，正好走到这条路径）。
+    const root = await mkdtemp(join(tmpdir(), 'dsh-updates-install-failure-'))
+    try {
+      const bytes = installerArtifactFixture()
+      const installer = installerPathFor(root, '2.1.0')
+      const request = vi.fn(async (url: string) => {
+        if (url.endsWith('/api/client/v2/channel')) return channelResponse()
+        return manifestResponse('2.1.0', sha256Hex(bytes))
+      })
+      const harness = await createHarness({
+        packaged: false,
+        request,
+        userDataRoot: root,
+        downloadUpdate: async () => {
+          await mkdir(dirname(installer), { recursive: true })
+          await writeFile(installer, bytes)
+          return installer
+        },
+        installUpdate: async () => { throw new Error('the payload was rejected') },
+      })
+
+      // 现象：第一次点击触发检查 + 下载（与"下载后交给安装器"那条用例同一条路径）。
+      await harness.tray.invoke()
+      // 现象：下载完成后托盘标签进入"可安装"。
+      await vi.waitFor(() => { expect(harness.tray.label()).toBe('PicoAide Harness 2.1.0 Ready to Install') }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
+
+      // 现象：第二次点击把已下载的载荷交给平台安装流程（这一步在夹具里被改成抛错）。
+      await harness.tray.invoke()
+      // 现象：交付动作真的发生了 —— 夹具里的 installUpdate 被调用（并抛出）。
+      await vi.waitFor(() => { expect(harness.installUpdate).toHaveBeenCalledWith('2.1.0', installer) }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
+
+      // 现象：失败之后托盘**不再**提供"可安装" —— 用户不会被卡在同一个坏载荷上。
+      await vi.waitFor(() => { expect(harness.tray.label()).not.toContain('Ready to Install') }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
+      expect(harness.tray.label()).not.toContain('Ready to Install')
+
+      // 现象：**同一个坏载荷不会在下一次点击时被立刻再交付一次**（交付调用次数停在 1）。
+      // 这一条是"现炒现卖陷阱"的反向判据：撤掉 ready 之后，下一次点击走的是
+      // 「检查 → 取清单 → 重新接回待安装」，而不是原来那条"ready 还在 ⇒ 直接 installReady"
+      // 的近路。修复前这里会是 2（同一份载荷被立刻再交付一次）。
+      await harness.tray.invoke()
+      // 现象：第二次点击走的是"检查/取回载荷"这条路（而不是直接再交付一次）。
+      await vi.waitFor(() => { expect(harness.downloadUpdate).toHaveBeenCalled() }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
+      expect(harness.installUpdate).toHaveBeenCalledTimes(1)
+      await harness.dispose()
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('reuses a downloadable installer across a restart without transferring it again', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-updates-reuse-'))
     try {

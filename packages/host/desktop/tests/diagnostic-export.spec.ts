@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { Worker } from 'node:worker_threads'
 import { describe, expect, it } from 'vitest'
 import AdmZip from 'adm-zip'
@@ -25,6 +25,7 @@ import {
   applyInstallDshHome,
   channelDshHomeDir,
 } from '../src/desktop-home.ts'
+import { macosUpdatePaths } from '../src/macos-update-install.ts'
 
 const APP_VERSION = '2.0.1-test'
 
@@ -334,5 +335,167 @@ describe('exportDiagnosticsZip', () => {
     expect(names).not.toContain('dsh-2026-08-15.log')
     expect(names).not.toContain('dsh-2026-08-14.log')
     expect(zip.readAsText('system-info.txt')).toContain('omitted-log-files: 2')
+  })
+
+  // 审计 P3（2026-10-12）：失败弹窗把 `apply-update.log` 的路径显示给用户，产品自己的
+  // 导出面却拿不到它 —— 原地更新失败后，"导出诊断"里没有更新现场。下面这几条用例钉住：
+  // 现场**进了包**、超大日志被截断且留痕、没跑过原地更新时既不出错也不产生空条目。
+  // 现场文件的位置一律取自 `macosUpdatePaths()`（路径唯一真源），不在用例里另抄一份。
+  it('includes the macOS in-place update scene in the archive', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-dx-macos-update-'))
+    const logs = join(root, 'logs')
+    mkdirSync(logs)
+    writeFileSync(join(logs, 'dsh-2026-08-16.log'), 'owned\n')
+    const update = macosUpdatePaths(root)
+    mkdirSync(dirname(update.logPath), { recursive: true })
+    writeFileSync(update.logPath, 'helper start: pid=42 version=2.0.0\nreplaced target\n')
+    writeFileSync(update.resultPath, 'status=failed\nphase=codesign\nversion=2.0.0\nfrom=1.0.0\n')
+    writeFileSync(update.bootMarkerPath, 'version=2.0.0\nat=2026-10-12T00:00:00.000Z\n')
+    // 审计 A15 的失败账本也在同一个现场目录里，同样要进包。
+    writeFileSync(update.failuresPath, '2.0.0=2\n')
+
+    const out = await exportDiagnosticsZip(logs, root, { appVersion: APP_VERSION })
+
+    const zip = new AdmZip(out)
+    const names = zip.getEntries().map(entry => entry.entryName)
+    expect(names).toContain('updates/macos/apply-update.log')
+    expect(names).toContain('updates/macos/last-apply.txt')
+    expect(names).toContain('updates/macos/booted.txt')
+    expect(names).toContain('updates/macos/failures.txt')
+    expect(zip.readAsText('updates/macos/apply-update.log'))
+      .toBe('helper start: pid=42 version=2.0.0\nreplaced target\n')
+    expect(zip.readAsText('updates/macos/last-apply.txt'))
+      .toBe('status=failed\nphase=codesign\nversion=2.0.0\nfrom=1.0.0\n')
+    expect(zip.readAsText('updates/macos/booted.txt')).toBe('version=2.0.0\nat=2026-10-12T00:00:00.000Z\n')
+    expect(zip.readAsText('updates/macos/failures.txt')).toBe('2.0.0=2\n')
+    // 现场文件与普通日志同处一个包：加了现场不能把原来的日志挤掉。
+    expect(names).toContain('dsh-2026-08-16.log')
+    const info = zip.readAsText('system-info.txt')
+    expect(info).toContain('included-update-files: 4')
+    expect(info).toContain('omitted-update-files: 0')
+    expect(info).toContain('truncated-update-files: 0')
+    expect(info).not.toContain('update-evidence-error:')
+  })
+
+  it('archives only the update scene files that exist', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-dx-macos-update-partial-'))
+    const logs = join(root, 'logs')
+    mkdirSync(logs)
+    const update = macosUpdatePaths(root)
+    mkdirSync(dirname(update.logPath), { recursive: true })
+    // 只有结果文件（帮手还没写日志就被杀掉的那种现场）。
+    writeFileSync(update.resultPath, 'status=running\nphase=swapping\nversion=2.0.0\n')
+
+    const out = await exportDiagnosticsZip(logs, root, { appVersion: APP_VERSION })
+
+    const zip = new AdmZip(out)
+    const names = zip.getEntries().map(entry => entry.entryName)
+    expect(names).toContain('updates/macos/last-apply.txt')
+    expect(names).not.toContain('updates/macos/apply-update.log')
+    expect(names).not.toContain('updates/macos/booted.txt')
+    expect(zip.readAsText('system-info.txt')).toContain('included-update-files: 1')
+  })
+
+  it('keeps only the tail of an oversized update log and records the truncation', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-dx-macos-update-truncate-'))
+    const logs = join(root, 'logs')
+    mkdirSync(logs)
+    const update = macosUpdatePaths(root)
+    mkdirSync(dirname(update.logPath), { recursive: true })
+    // 帮手脚本往这一份日志里反复追加（没有天然上界）：1 MiB 以上的老内容必须被丢掉，
+    // 但"丢了"这件事两头都要留痕（包内的标记行 + system-info 的计数）。
+    const filler = 'applying chunk\n'.repeat(80_000)
+    writeFileSync(update.logPath, `FIRST-LINE-OF-APPLY-LOG\n${filler}NEWEST-APPLY-LINE\n`)
+
+    const out = await exportDiagnosticsZip(logs, root, { appVersion: APP_VERSION })
+
+    const zip = new AdmZip(out)
+    const names = zip.getEntries().map(entry => entry.entryName)
+    expect(names).toContain('updates/macos/apply-update.log')
+    const content = zip.readFile('updates/macos/apply-update.log')
+    expect(content).not.toBeNull()
+    const text = content!.toString('utf8')
+    expect(text).toContain('NEWEST-APPLY-LINE')
+    expect(text).not.toContain('FIRST-LINE-OF-APPLY-LOG')
+    expect(text).toContain('dsh-plugin-desktop: truncated update evidence')
+    // 单文件上限是**硬**预算：截断标记行也算在里面。
+    expect(content!.byteLength).toBeLessThanOrEqual(1024 * 1024)
+    const info = zip.readAsText('system-info.txt')
+    expect(info).toContain('included-update-files: 1')
+    expect(info).toContain('omitted-update-files: 0')
+    expect(info).toContain('truncated-update-files: 1')
+    expect(info).toContain('update-file-byte-limit: 1048576')
+  })
+
+  it('charges the update scene against the same archive byte limit as logs and dumps', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-dx-macos-update-budget-'))
+    const logs = join(root, 'logs')
+    mkdirSync(logs)
+    writeFileSync(join(logs, 'dsh-2026-08-16.log'), 'sixsix')
+    const update = macosUpdatePaths(root)
+    mkdirSync(dirname(update.logPath), { recursive: true })
+    writeFileSync(update.resultPath, 'eight888')
+    writeFileSync(update.logPath, 'a'.repeat(4096))
+
+    const out = await exportDiagnosticsZip(logs, root, {
+      appVersion: APP_VERSION,
+      maxEvidenceBytes: 10,
+    })
+
+    const zip = new AdmZip(out)
+    const names = zip.getEntries().map(entry => entry.entryName)
+    // 结果文件（8 字节）先进，把同一份预算吃掉 ⇒ 普通日志被排除；帮手日志连截断都
+    // 放不下（截断标记行也有预算）⇒ 计进 omitted-update-files，而不是静默消失。
+    expect(names).toContain('updates/macos/last-apply.txt')
+    expect(names).not.toContain('dsh-2026-08-16.log')
+    const info = zip.readAsText('system-info.txt')
+    expect(info).toContain('included-update-files: 1')
+    expect(info).toContain('omitted-update-files: 1')
+    expect(info).toContain('omitted-log-files: 1')
+    expect(info).toContain('included-evidence-bytes: 8')
+  })
+
+  it('adds no update entry and no error when the in-place update never ran', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-dx-macos-update-absent-'))
+    const logs = join(root, 'logs')
+    mkdirSync(logs)
+    writeFileSync(join(logs, 'dsh-2026-08-16.log'), 'owned\n')
+    // userData 下没有 updates/macos 目录：这台机器从没走过原地更新。
+    expect(existsSync(dirname(macosUpdatePaths(root).logPath))).toBe(false)
+
+    const out = await exportDiagnosticsZip(logs, root, { appVersion: APP_VERSION })
+
+    const zip = new AdmZip(out)
+    const names = zip.getEntries().map(entry => entry.entryName).sort()
+    expect(names).toEqual(['dsh-2026-08-16.log', 'system-info.txt'])
+    expect(names.some(name => name.startsWith('updates/'))).toBe(false)
+    const info = zip.readAsText('system-info.txt')
+    expect(info).toContain('included-update-files: 0')
+    expect(info).toContain('omitted-update-files: 0')
+    expect(info).toContain('truncated-update-files: 0')
+    expect(info).not.toContain('update-evidence-error:')
+  })
+
+  it('refuses a linked update scene directory instead of archiving foreign files', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-dx-macos-update-link-'))
+    const logs = join(root, 'logs')
+    mkdirSync(logs)
+    writeFileSync(join(logs, 'dsh-2026-08-16.log'), 'owned\n')
+    const update = macosUpdatePaths(root)
+    const foreign = join(root, 'elsewhere')
+    mkdirSync(foreign)
+    writeFileSync(join(foreign, basename(update.logPath)), 'foreign apply log\n')
+    mkdirSync(dirname(dirname(update.logPath)), { recursive: true })
+    symlinkSync(foreign, dirname(update.logPath), process.platform === 'win32' ? 'junction' : 'dir')
+
+    const out = await exportDiagnosticsZip(logs, root, { appVersion: APP_VERSION })
+
+    const zip = new AdmZip(out)
+    const names = zip.getEntries().map(entry => entry.entryName)
+    expect(names).not.toContain('updates/macos/apply-update.log')
+    expect(names.some(name => name.startsWith('updates/'))).toBe(false)
+    // 降级而不是让导出失败：原因必须留在 system-info 里。
+    expect(zip.readAsText('system-info.txt'))
+      .toContain('update-evidence-error: refusing linked update evidence directory')
   })
 })

@@ -70,6 +70,8 @@ interface Runner {
   readonly logPath: string
   readonly resultPath: string
   readonly bootMarkerPath: string
+  /** 负向标记：新版报告致命启动失败时写（审计复核 P1）。 */
+  readonly bootFailurePath: string
 }
 
 /**
@@ -129,6 +131,7 @@ function runHelper(options: {
     logPath: paths.logPath,
     resultPath: paths.resultPath,
     bootMarkerPath: paths.bootMarkerPath,
+    bootFailurePath: paths.bootFailurePath,
   }
 }
 
@@ -148,12 +151,18 @@ describe.skipIf(process.platform !== 'darwin')('macOS update helper (real /bin/s
     expect(readFileSync(join(runner.plan.bundlePath, 'Contents', 'Info.plist'), 'utf8')).toContain('2.0.0')
     // 替换后的包必须仍然能通过签名校验：`ditto` 不能把签名/资源叉丢掉。
     expect(verifySignature(runner.plan.bundlePath)).toBe(0)
-    // 备份与暂存都不留；启动标记被删掉（旧标记绝不能骗过下一次替换）。
-    expect(existsSync(runner.plan.backupPath)).toBe(false)
+    // 暂存件清掉、启动标记被删掉（旧标记绝不能骗过下一次替换）。
     expect(existsSync(runner.plan.stagingPath)).toBe(false)
+    // **备份留着**（审计复核 P1）：脚本侧不再删它 —— `pgrep -f` 只是命令行文本匹配，
+    // 分不清"新版本在跑"与"旧实例还活着"，删错就是删掉正在运行的那份文件。
+    // 删除点收敛到宿主侧 `settleMacosUpdate → removeMacosUpdateBackup`（fail-closed）。
+    expect(existsSync(runner.plan.backupPath)).toBe(true)
     expect(readFileSync(runner.resultPath, 'utf8')).toContain('status=ok')
-    expect(readFileSync(runner.logPath, 'utf8')).toContain('confirmed running')
-    expect(readdirSync(join(runner.plan.bundlePath, '..'))).toEqual(['PicoAide Harness.app'])
+    expect(readFileSync(runner.logPath, 'utf8')).toContain('left for the host to reclaim')
+    expect(readdirSync(join(runner.plan.bundlePath, '..')).sort()).toEqual([
+      '.PicoAide Harness.app.backup-2.0.0.app',
+      'PicoAide Harness.app',
+    ])
   })
 
   it('rolls back when the new version never starts', async () => {
@@ -183,6 +192,65 @@ describe.skipIf(process.platform !== 'darwin')('macOS update helper (real /bin/s
     expect(readFileSync(join(runner.plan.bundlePath, 'Contents', 'Resources', 'marker.txt'), 'utf8')).toBe('OLD-BUILD')
     expect(existsSync(runner.plan.backupPath)).toBe(false)
     expect(readFileSync(runner.resultPath, 'utf8')).toContain('reason=application-did-not-start')
+  })
+
+  it('does not accept a boot marker whose version merely extends the target (audit A1)', async () => {
+    // 目标 `2.0.0`、标记写的是 `2.0.0-beta.1`。子串匹配（`grep -q "version=2.0.0"`）会命中，
+    // 于是帮手承认"新版起来了"、删掉唯一的备份 —— 而真正起来的是**别的版本**。
+    // 本仓的版本号形态天然互为前缀（beta.1 vs beta.10、预发 vs 正式），所以这条不是假想。
+    const runner = runHelper()
+    const marker = setInterval(() => {
+      writeFileSync(runner.bootMarkerPath, 'version=2.0.0-beta.1\n', 'utf8')
+    }, 50)
+    const code = await runner.exited
+    clearInterval(marker)
+
+    expect(code).toBe(1)
+    expect(readFileSync(join(runner.plan.bundlePath, 'Contents', 'Resources', 'marker.txt'), 'utf8')).toBe('OLD-BUILD')
+    expect(readFileSync(runner.resultPath, 'utf8')).toContain('reason=application-did-not-start')
+    // 备份已经换回原位（回滚成功），不是被当成"成功"删掉。
+    expect(existsSync(runner.plan.backupPath)).toBe(false)
+    expect(readFileSync(runner.logPath, 'utf8')).toContain('rolling back')
+  })
+
+  it('does not accept a boot marker written by a different copy of the same version', async () => {
+    // 审计复核 P1：只认版本号的话，**同版本的另一份副本**（DMG 里那份、下载目录里的拷贝）
+    // 或 `yarn dev` 都能写出一条"看起来对"的标记。标记必须点名 bundle。
+    const runner = runHelper()
+    const marker = setInterval(() => {
+      writeFileSync(runner.bootMarkerPath, 'version=2.0.0\nbundle=/Volumes/Other/PicoAide Harness.app\n', 'utf8')
+    }, 50)
+    const code = await runner.exited
+    clearInterval(marker)
+
+    expect(code).toBe(1)
+    expect(verifySignature(runner.plan.bundlePath)).toBe(0)
+    expect(readFileSync(runner.resultPath, 'utf8')).toContain('reason=application-did-not-start')
+  })
+
+  it('rolls back immediately when the new version reports a fatal startup failure', async () => {
+    // 审计复核 P1：新版可能"起来了但根本不是应用"（启动路径上的致命错误会弹**同步**对话框，
+    // 进程带着目标主程序活很久）。它在弹窗之前写负向标记，帮手必须据此回滚 ——
+    // 否则唯一备份会被删掉，用户既没有可用的新版、也没有可退回的旧版。
+    const runner = runHelper()
+    const marker = setInterval(() => {
+      writeFileSync(
+        runner.bootFailurePath,
+        `version=2.0.0\nbundle=${runner.plan.bundlePath}\n`,
+        'utf8',
+      )
+    }, 50)
+    const code = await runner.exited
+    clearInterval(marker)
+
+    expect(code).toBe(1)
+    // 回滚完成：目标还是旧的那一份，备份已换回原位（不是被当成成功删掉）。
+    expect(readFileSync(join(runner.plan.bundlePath, 'Contents', 'Resources', 'marker.txt'), 'utf8')).toBe('OLD-BUILD')
+    expect(existsSync(runner.plan.backupPath)).toBe(false)
+    const result = readFileSync(runner.resultPath, 'utf8')
+    expect(result).toContain('status=failed')
+    expect(result).toContain('reason=application-did-not-start')
+    expect(readFileSync(runner.logPath, 'utf8')).toContain('reported a fatal startup failure')
   })
 
   it('refuses to move anything when the staged copy fails code signature verification', async () => {

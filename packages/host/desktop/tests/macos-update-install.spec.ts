@@ -21,28 +21,36 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  MACOS_UPDATE_FAILURE_LIMIT,
   MACOS_UPDATE_HELPER_SOURCE,
+  MacosCommandFailure,
   assertSameApplication,
   canInstallMacosInPlace,
-  clearMacosUpdateLeftovers,
-  clearMacosUpdateRecord,
+  clearAllMacosUpdateFailures,
+  clearMacosUpdateFailures,
+  clearMacosUpdateLeftovers,  clearMacosUpdateRecord,
   hasSpaceForUpdate,
   macAppBundlePath,
+  machOArchitectures,
   macosUpdateHelperScript,
   macosUpdatePaths,
   normalizeVersion,
   prepareMacosInPlaceUpdate,
   readMacAppIdentity,
+  readMacosUpdateFailureCount,
   readMacosUpdateOutcome,
   readMacosUpdateRecord,
   readTeamIdentifier,
+  recordMacosUpdateFailure,
   removeMacosUpdateBackup,
   singleApplicationInImage,
   spawnMacosUpdateHelper,
+  sweepMacosUpdateScripts,
   updateSidecarPaths,
+  writeMacosUpdateBootFailureMarker,
   writeMacosUpdateBootMarker,
   writeMacosUpdateHelper,
   type MacAppIdentity,
@@ -133,6 +141,14 @@ interface FakeCommands {
   /** 按包路径给出签名团队（默认两边都是同一个团队）。 */
   teamsFor: (bundlePath: string) => string | undefined
   kilobytes: number
+  /**
+   * `pgrep`（占用判据）的答案：false = 没有进程在跑（`pgrep` 的真实"无匹配"退出码 1），
+   * true = 有进程在跑（返回一行 pid）。
+   *
+   * 审计复核 P1 之后，`pgrep` 的答案改成 **fail-closed**：只有"退出码 1"才算没人占用，
+   * 其它失败一律按占用处理 —— 所以替身必须显式模拟"退出码 1"，而不是让未知命令一律返回成功。
+   */
+  inUse: boolean
 }
 
 /** 一个记录调用并按 `hdiutil attach` 钩子"挂载"影像的命令替身。 */
@@ -142,9 +158,14 @@ function fakeCommands(): FakeCommands {
     failing: new Set<string>(),
     teamsFor: () => 'TEAM123456',
     kilobytes: 1024,
+    inUse: false,
     run: (command, args) => {
       state.calls.push({ command, args })
       if (state.failing.has(command)) throw new Error(`${command} failed (injected)`)
+      if (command === 'pgrep') {
+        if (!state.inUse) throw new MacosCommandFailure('pgrep: no match', 1)
+        return '4242\n'
+      }
       if (command === 'plutil') return plistJson(args[args.length - 1] ?? '')  // 末位参数就是 plist 路径
       if (command === 'codesign') {
         return `Identifier=ai.test.app\nTeamIdentifier=${state.teamsFor(args[args.length - 1] ?? '') ?? 'not set'}\n`
@@ -535,21 +556,52 @@ describe('macosUpdateHelperScript', () => {
 
   it('keeps a rollback for every step that can destroy the installed application', () => {
     const script = MACOS_UPDATE_HELPER_SOURCE
-    // 落位失败 ⇒ 备份换回原名；新版起不来 ⇒ 新包挪开、备份换回原名。
-    expect(script.match(/\/bin\/mv "\$BACKUP" "\$TARGET"/gu)).toHaveLength(2)
+    // 落位失败 ⇒ 备份换回原名；新版起不来 ⇒ 新包挪开、备份换回原名；
+    // 以及 EXIT 兜底：两次 mv 之间被杀时把缺失的目标补回来（审计 A5/A6）。
+    expect(script.match(/\/bin\/mv "\$BACKUP" "\$TARGET"/gu)).toHaveLength(3)
     expect(script).toContain('/bin/rm -rf "$BROKEN"')
     // 一个字节都不动就放弃的两条：宿主没退出、暂存件签名不过。
     expect(script).toContain('application-still-running')
     expect(script).toContain('verification-failed')
+    // 审计 A6：每条出口都要卸载影像（原实现只有成功路径卸）。
+    expect(script).toContain('trap cleanup EXIT')
   })
 
   it('never interpolates a path into the script', () => {
     const script = MACOS_UPDATE_HELPER_SOURCE
     // 全部位置参数：脚本里出现的是变量引用，而不是宿主的路径。
-    for (const index of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]) {
+    for (const index of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]) {
       expect(script).toContain(index <= 9 ? `"$${String(index)}"` : `"\${${String(index)}}"`)
     }
     expect(script).not.toContain('@@')
+  })
+
+  it('confirms the boot with an exact line and never a prefix match', () => {
+    const script = MACOS_UPDATE_HELPER_SOURCE
+    // 审计 A1：`grep -q "version=$VERSION"` 是子串匹配，会被版本号前缀吃掉
+    // （目标 2.8.3 命中标记里的 2.8.3-beta.1 / 2.8.3-beta.10）⇒ 误判成功并删掉唯一备份。
+    //
+    // 注意这条是**拼写判据**：它能钉住"当前实现用的是整行定串"，但拦不住"换一种同样错的
+    // 子串写法"。语义判据（真喂一个前缀标记、要求回滚）在 darwin-only 的
+    // `tests/macos-update-helper.integration.spec.ts` 里，由 `desktop-macos` job 真跑。
+    expect(script).toContain('/usr/bin/grep -qxF "version=$VERSION" "$BOOT_FILE"')
+    expect(script).not.toContain('/usr/bin/grep -q "version=$VERSION"')
+    // 审计复核 P1：**不许**把"目标路径下有进程"当成功判据 —— `pgrep -f` 是命令行文本匹配，
+    // 把 TARGET 改名成 BACKUP 之后旧实例的 argv 仍然命中，会同时做出"不回滚 + 删掉正在运行的
+    // 那份文件 + 记成 ok"三件事。确认只认标记。
+    expect(script).not.toContain('target_running')
+    expect(script).not.toContain('backup_running')
+    expect(script).not.toContain('/usr/bin/pgrep')
+  })
+
+  it('unmounts the image and restores a missing target on every exit path', () => {
+    const script = MACOS_UPDATE_HELPER_SOURCE
+    // 审计 A5/A6：EXIT 兜底同时做"补回缺失目标"与"卸载影像"。
+    expect(script).toContain('cleanup() {')
+    expect(script).toContain('if [ ! -e "$TARGET" ] && [ -e "$BACKUP" ]; then')
+    expect(script).toContain('/usr/bin/hdiutil detach "$MOUNT" >/dev/null 2>&1 || true')
+    expect(script).toContain('trap cleanup EXIT')
+    expect(script).toContain("trap 'exit 1' INT TERM HUP")
   })
 
   it('only interpolates the tuned values, and refuses unsafe ones', () => {
@@ -597,9 +649,13 @@ describe('writeMacosUpdateHelper', () => {
       fromVersion: 'v1.0.0',
     })
     const paths = macosUpdatePaths(userDataPath)
+    // 审计 N8：脚本名带 pid —— 固定名 + 覆盖重写会让仍在运行的上一条 `/bin/sh`
+    // 读到错位内容（bash 按偏移增量读脚本）。
+    const scriptPath = join(dirname(paths.scriptPath), 'apply-update-4242.sh')
+    expect(helper.scriptPath).toBe(scriptPath)
     expect(helper.command).toBe('/bin/sh')
     expect(helper.args).toEqual([
-      paths.scriptPath,
+      scriptPath,
       '4242',
       '/Applications/My App.app',
       '/Volumes/X/My App.app',
@@ -611,10 +667,11 @@ describe('writeMacosUpdateHelper', () => {
       '2.0.0',
       paths.bootMarkerPath,
       '1.0.0',
+      paths.bootFailurePath,
     ])
     // 脚本逐字等于生产脚本：路径没有以任何形式被拼进去。
-    expect(readFileSync(paths.scriptPath, 'utf8')).toBe(MACOS_UPDATE_HELPER_SOURCE)
-    expect(readFileSync(paths.scriptPath, 'utf8')).not.toContain('My App.app')
+    expect(readFileSync(scriptPath, 'utf8')).toBe(MACOS_UPDATE_HELPER_SOURCE)
+    expect(readFileSync(scriptPath, 'utf8')).not.toContain('My App.app')
   })
 })
 
@@ -703,8 +760,10 @@ describe('spawnMacosUpdateHelper', () => {
 describe('update bookkeeping', () => {
   it('round-trips the helper result file and hands the caller a conclusion', () => {
     const userDataPath = makeTempDirectory()
-    writeMacosUpdateBootMarker(userDataPath, 'v2.0.0', '2026-10-09T00:00:00.000Z')
-    expect(readFileSync(macosUpdatePaths(userDataPath).bootMarkerPath, 'utf8')).toBe('version=2.0.0\nat=2026-10-09T00:00:00.000Z\n')
+    writeMacosUpdateBootMarker(userDataPath, 'v2.0.0', '/Applications/X.app', '2026-10-09T00:00:00.000Z')
+    // 标记里必须带 `bundle=`（审计复核 P1：只认版本号会被同版本的另一份副本或 yarn dev 伪造）。
+    expect(readFileSync(macosUpdatePaths(userDataPath).bootMarkerPath, 'utf8'))
+      .toBe('version=2.0.0\nbundle=/Applications/X.app\nat=2026-10-09T00:00:00.000Z\n')
 
     // 没有结果文件 ⇒ 什么都不做。
     expect(readMacosUpdateRecord(userDataPath)).toBeUndefined()
@@ -733,6 +792,7 @@ describe('update bookkeeping', () => {
     // 目标版本就是当前版本 ⇒ 更新已生效（帮手没写完也算），删备份。
     expect(readMacosUpdateOutcome(userDataPath, 'v2.0.0')).toEqual({
       kind: 'applied',
+      toVersion: '2.0.0',
       backupPath: '/Applications/.X.app.backup-2.0.0.app',
       logPath: '/tmp/log',
     })
@@ -763,9 +823,274 @@ describe('update bookkeeping', () => {
     const root = makeTempDirectory()
     const backup = join(root, '.X.app.backup-2.0.0.app')
     mkdirSync(backup)
-    removeMacosUpdateBackup(backup)
+    // 显式给"无匹配"（`pgrep` 退出码 1）：占用判据是 fail-closed，缺省替身回答不了它。
+    const idle: MacosCommandRunner = () => { throw new MacosCommandFailure('pgrep: no match', 1) }
+    removeMacosUpdateBackup(backup, () => {}, idle)
     expect(existsSync(backup)).toBe(false)
-    expect(() => removeMacosUpdateBackup(join(root, 'gone'))).not.toThrow()
+    expect(() => removeMacosUpdateBackup(join(root, 'gone'), () => {}, idle)).not.toThrow()
     expect(() => removeMacosUpdateBackup('')).not.toThrow()
+  })
+})
+
+/**
+ * 2026-10-12 审计修复批的判据。
+ *
+ * 每一条都对应审计报告里的一个编号（A1…N8）；编号写在用例名里，便于把"修复"与
+ * "判据"逐条对上 —— 本仓对"只改实现不补判据"的口径是当成没修。
+ */
+describe('macOS in-place update audit fixes (2026-10-12)', () => {
+  /** 主程序位置：与 `writeInfoPlist` 的缺省 `CFBundleExecutable`（`App`）对齐。 */
+  function stagedExecutablePath(mountPoint: string): string {
+    return join(mountPoint, 'PicoAide Harness.app', 'Contents', 'MacOS', 'App')
+  }
+
+  const THIN_ARM64 = [0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0x00, 0x00, 0x01]
+  const THIN_X86_64 = [0xcf, 0xfa, 0xed, 0xfe, 0x07, 0x00, 0x00, 0x01]
+
+  const prepareBase = {
+    platform: 'darwin' as const,
+    isPackaged: true,
+  }
+
+  it('A8: reads thin and fat Mach-O headers without shelling out to lipo', () => {
+    expect(machOArchitectures(Uint8Array.from(THIN_ARM64))).toEqual(['arm64'])
+    expect(machOArchitectures(Uint8Array.from(THIN_X86_64))).toEqual(['x86_64'])
+    // 胖二进制：0xcafebabe + nfat_arch=2 + 两条 20 字节表项。
+    const fat = new Uint8Array(8 + 2 * 20)
+    const view = new DataView(fat.buffer)
+    view.setUint32(0, 0xcafebabe, false)
+    view.setUint32(4, 2, false)
+    view.setUint32(8, 0x01000007, false)
+    view.setUint32(8 + 20, 0x0100000c, false)
+    expect(machOArchitectures(fat)).toEqual(['x86_64', 'arm64'])
+    // 认不出来的一律 undefined（调用方据此"放行并记日志"，不是当成不兼容）。
+    expect(machOArchitectures(Uint8Array.from([0, 1, 2, 3, 4, 5, 6, 7]))).toBeUndefined()
+    expect(machOArchitectures(Uint8Array.from(THIN_ARM64).subarray(0, 4))).toBeUndefined()
+  })
+
+  it('A8: rejects an image built for another architecture', async () => {
+    const { root, current, commands } = stageFixture()
+    const base = commands.onAttach
+    commands.onAttach = (mountPoint) => {
+      base?.(mountPoint)
+      const executable = stagedExecutablePath(mountPoint)
+      mkdirSync(dirname(executable), { recursive: true })
+      writeFileSync(executable, Buffer.from(THIN_ARM64))
+    }
+    await expect(prepareMacosInPlaceUpdate({
+      ...prepareBase,
+      executablePath: join(current, 'Contents', 'MacOS', 'App'),
+      installerPath: join(root, 'update.dmg'),
+      version: 'v1.1.0',
+      userDataPath: join(root, 'userData'),
+      run: commands.run,
+      arch: 'x64',
+    })).rejects.toThrow(/supports arm64, not x86_64/u)
+  })
+
+  it('A8: accepts an image that carries the current architecture', async () => {
+    const { root, current, commands } = stageFixture()
+    const base = commands.onAttach
+    commands.onAttach = (mountPoint) => {
+      base?.(mountPoint)
+      const executable = stagedExecutablePath(mountPoint)
+      mkdirSync(dirname(executable), { recursive: true })
+      writeFileSync(executable, Buffer.from(THIN_ARM64))
+    }
+    const preparation = await prepareMacosInPlaceUpdate({
+      ...prepareBase,
+      executablePath: join(current, 'Contents', 'MacOS', 'App'),
+      installerPath: join(root, 'update.dmg'),
+      version: 'v1.1.0',
+      userDataPath: join(root, 'userData'),
+      run: commands.run,
+      arch: 'arm64',
+    })
+    expect(preparation.kind).toBe('prepared')
+  })
+
+  it('A9: refuses to replace the running application with an older version', async () => {
+    const { root, current, commands } = stageFixture({ currentVersion: '2.0.0', nextVersion: '1.0.0' })
+    await expect(prepareMacosInPlaceUpdate({
+      ...prepareBase,
+      executablePath: join(current, 'Contents', 'MacOS', 'App'),
+      installerPath: join(root, 'update.dmg'),
+      version: 'v1.0.0',
+      userDataPath: join(root, 'userData'),
+      run: commands.run,
+    })).rejects.toThrow(/refusing to replace 2\.0\.0 with the older 1\.0\.0/u)
+  })
+
+  it('A13: falls back when the image cannot be attached', async () => {
+    const { root, current, commands } = stageFixture()
+    commands.failing.add('hdiutil')
+    const preparation = await prepareMacosInPlaceUpdate({
+      ...prepareBase,
+      executablePath: join(current, 'Contents', 'MacOS', 'App'),
+      installerPath: join(root, 'update.dmg'),
+      version: 'v1.1.0',
+      userDataPath: join(root, 'userData'),
+      run: commands.run,
+    })
+    expect(preparation).toEqual({ kind: 'fallback', reason: 'image-unavailable' })
+  })
+
+  it('A13: falls back when the mount point is still occupied', async () => {
+    const { root, current, commands } = stageFixture()
+    const paths = macosUpdatePaths(join(root, 'userData'))
+    mkdirSync(join(paths.mountPoint, 'leftover-from-last-time'), { recursive: true })
+    const preparation = await prepareMacosInPlaceUpdate({
+      ...prepareBase,
+      executablePath: join(current, 'Contents', 'MacOS', 'App'),
+      installerPath: join(root, 'update.dmg'),
+      version: 'v1.1.0',
+      userDataPath: join(root, 'userData'),
+      run: commands.run,
+    })
+    expect(preparation).toEqual({ kind: 'fallback', reason: 'image-busy' })
+  })
+
+  it('A15: stops retrying a version that already failed the allowed number of times', async () => {
+    const { root, current, commands } = stageFixture()
+    const paths = macosUpdatePaths(join(root, 'userData'))
+    mkdirSync(dirname(paths.failuresPath), { recursive: true })
+    writeFileSync(paths.failuresPath, `1.1.0=${String(MACOS_UPDATE_FAILURE_LIMIT)}\n`, 'utf8')
+    const preparation = await prepareMacosInPlaceUpdate({
+      ...prepareBase,
+      executablePath: join(current, 'Contents', 'MacOS', 'App'),
+      installerPath: join(root, 'update.dmg'),
+      version: 'v1.1.0',
+      userDataPath: join(root, 'userData'),
+      run: commands.run,
+    })
+    expect(preparation).toEqual({ kind: 'fallback', reason: 'too-many-failures' })
+  })
+
+  it('A15: records, reads and clears the failure ledger', () => {
+    const userDataPath = makeTempDirectory()
+    expect(readMacosUpdateFailureCount(userDataPath, '1.1.0')).toBe(0)
+    expect(recordMacosUpdateFailure(userDataPath, 'v1.1.0')).toBe(1)
+    expect(recordMacosUpdateFailure(userDataPath, '1.1.0')).toBe(2)
+    // 只记目标版本：别的版本互不影响。
+    expect(recordMacosUpdateFailure(userDataPath, '1.2.0')).toBe(1)
+    expect(readMacosUpdateFailureCount(userDataPath, '1.1.0')).toBe(2)
+    clearMacosUpdateFailures(userDataPath, '1.1.0')
+    expect(readMacosUpdateFailureCount(userDataPath, '1.1.0')).toBe(0)
+    expect(readMacosUpdateFailureCount(userDataPath, '1.2.0')).toBe(1)
+    // 清全账是**显式**接口（审计复核 P3：省略版本的默认值 = 静默删掉退避机制）。
+    clearAllMacosUpdateFailures(userDataPath)
+    expect(readMacosUpdateFailureCount(userDataPath, '1.2.0')).toBe(0)
+  })
+
+  it('A4: sweeps the .broken leftover the old shape never matched', () => {
+    const root = makeTempDirectory()
+    const applications = join(root, 'Applications')
+    const bundle = join(applications, 'X.app')
+    mkdirSync(bundle, { recursive: true })
+    const broken = join(applications, '.X.app.update-2.0.0.app.broken')
+    mkdirSync(broken, { recursive: true })
+    clearMacosUpdateLeftovers(bundle, join(root, 'missing-mount'), () => '')
+    expect(existsSync(broken)).toBe(false)
+  })
+
+  it('A2: keeps the backup the failure report names', () => {
+    const root = makeTempDirectory()
+    const applications = join(root, 'Applications')
+    const bundle = join(applications, 'X.app')
+    mkdirSync(bundle, { recursive: true })
+    const backup = join(applications, '.X.app.backup-2.0.0.app')
+    mkdirSync(backup, { recursive: true })
+    // 审计复核 P1：占用判据搬进了清理函数（原来只有 removeMacosUpdateBackup 有，
+    // 而清理发生在它之前 ⇒ 保护等于没有）。
+    const busy: MacosCommandRunner = () => '4242\n'
+    clearMacosUpdateLeftovers(bundle, join(root, 'missing-mount'), busy, () => {}, {})
+    expect(existsSync(backup)).toBe(true)
+    // `keep` 仍然管用（失败要通报的那一份）；无人占用时照旧清掉。
+    const idle: MacosCommandRunner = () => { throw new MacosCommandFailure('pgrep: no match', 1) }
+    clearMacosUpdateLeftovers(bundle, join(root, 'missing-mount'), idle, () => {}, { keep: backup })
+    expect(existsSync(backup)).toBe(true)
+    clearMacosUpdateLeftovers(bundle, join(root, 'missing-mount'), idle)
+    expect(existsSync(backup)).toBe(false)
+  })
+
+  it('N8: sweeps per-attempt helper scripts', () => {
+    const root = makeTempDirectory()
+    const scripts = join(root, 'updates', 'macos')
+    mkdirSync(scripts, { recursive: true })
+    writeFileSync(join(scripts, 'apply-update-4242.sh'), '', 'utf8')
+    writeFileSync(join(scripts, 'apply-update.sh'), '', 'utf8')
+    writeFileSync(join(scripts, 'unrelated.sh'), '', 'utf8')
+    sweepMacosUpdateScripts(scripts)
+    expect(existsSync(join(scripts, 'apply-update-4242.sh'))).toBe(false)
+    expect(existsSync(join(scripts, 'apply-update.sh'))).toBe(false)
+    expect(existsSync(join(scripts, 'unrelated.sh'))).toBe(true)
+  })
+
+  it('A10: keeps a backup that a process is still running from', () => {
+    const root = makeTempDirectory()
+    const backup = join(root, '.X.app.backup-2.0.0.app')
+    mkdirSync(backup, { recursive: true })
+    const inUse: MacosCommandRunner = () => ''
+    const messages: string[] = []
+    removeMacosUpdateBackup(backup, message => messages.push(message), inUse)
+    expect(existsSync(backup)).toBe(true)
+    expect(messages.join('\n')).toContain('kept the backup')
+    // `pgrep` 的真实"无匹配"是**退出码 1**：只有这一种答案才算没人占用（fail-closed）。
+    const idle: MacosCommandRunner = () => { throw new MacosCommandFailure('pgrep: no match', 1) }
+    removeMacosUpdateBackup(backup, message => messages.push(message), idle)
+    expect(existsSync(backup)).toBe(false)
+    // 其它失败（`pgrep` 不存在、被信号打断）一律按**占用**处理 —— 方向不能朝删除。
+    const broken: MacosCommandRunner = () => { throw new Error('spawnSync pgrep ENOENT') }
+    mkdirSync(backup, { recursive: true })
+    removeMacosUpdateBackup(backup, message => messages.push(message), broken)
+    expect(existsSync(backup)).toBe(true)
+  })
+
+  it('P1: the boot confirmation must name this very bundle and yield to a failure report', () => {
+    const script = MACOS_UPDATE_HELPER_SOURCE
+    // 正标记：版本 + bundle 都要整行命中（只认版本号会被同版本的另一份副本或 yarn dev 伪造）。
+    expect(script).toContain('boot_marker_confirms()')
+    expect(script).toContain('/usr/bin/grep -qxF "bundle=$TARGET" "$BOOT_FILE"')
+    // 负向标记：新版自己报告致命启动失败 ⇒ 立刻回滚（这条路径会弹同步对话框、进程活很久，
+    // 只看"目标主程序在跑"会把"根本没变成应用"判成成功）。
+    expect(script).toContain('boot_failed()')
+    expect(script).toContain('/usr/bin/grep -qxF "version=$VERSION" "$BOOT_FAIL_FILE"')
+    expect(script).toContain('/usr/bin/grep -qxF "bundle=$TARGET" "$BOOT_FAIL_FILE"')
+    expect(script).toContain('BOOT_FAIL_FILE="\${12}"')
+    // 两个标记都在重开应用之前删掉：等到的标记只可能是本次启动写的。
+    expect(script).toContain('/bin/rm -f "$BOOT_FILE" "$BOOT_FAIL_FILE"')
+  })
+
+  it('A9: lets an unorderable current version through and says so in the log', async () => {
+    // 当前版本不是规范 semver（例如某次手改的构建）：版本序判据认不出大小关系，
+    // 应当**放行并记日志**，而不是静默失效（审计复核：与架构判据对齐）。
+    const { root, current, commands } = stageFixture({ currentVersion: 'dev-build', nextVersion: '1.1.0' })
+    const messages: string[] = []
+    const preparation = await prepareMacosInPlaceUpdate({
+      ...prepareBase,
+      executablePath: join(current, 'Contents', 'MacOS', 'App'),
+      installerPath: join(root, 'update.dmg'),
+      version: 'v1.1.0',
+      userDataPath: join(root, 'userData'),
+      run: commands.run,
+      log: message => messages.push(message),
+    })
+    expect(preparation.kind).toBe('prepared')
+    expect(messages.join('\n')).toContain('could not order 1.1.0 against dev-build')
+  })
+
+  it('A14: reports why the boot marker could not be written', () => {
+    const root = makeTempDirectory()
+    const notADirectory = join(root, 'file')
+    writeFileSync(notADirectory, 'x', 'utf8')
+    expect(writeMacosUpdateBootMarker(notADirectory, '2.0.0', '/Applications/X.app', 'now')).toBeTypeOf('string')
+    const userDataPath = makeTempDirectory()
+    expect(writeMacosUpdateBootMarker(userDataPath, '2.0.0', '/Applications/X.app', 'now')).toBeUndefined()
+    expect(readFileSync(macosUpdatePaths(userDataPath).bootMarkerPath, 'utf8'))
+      .toBe('version=2.0.0\nbundle=/Applications/X.app\nat=now\n')
+    // 负向标记同一形状（审计复核 P1）：新版报告致命启动失败时写它，帮手据此回滚。
+    expect(writeMacosUpdateBootFailureMarker(userDataPath, '2.0.0', '/Applications/X.app', 'now')).toBeUndefined()
+    expect(readFileSync(macosUpdatePaths(userDataPath).bootFailurePath, 'utf8'))
+      .toBe('version=2.0.0\nbundle=/Applications/X.app\nat=now\n')
   })
 })

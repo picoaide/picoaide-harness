@@ -75,12 +75,18 @@ const macosUpdate = vi.hoisted(() => ({
     bootMarkerPath: '/tmp/dsh-desktop-user-data/updates/macos/booted.txt',
   })),
   spawnMacosUpdateHelper: vi.fn(async () => {}),
-  writeMacosUpdateBootMarker: vi.fn(),
+  // 返回 undefined = 写成功（审计 A14 之后它把失败原因作为返回值交出来）。
+  writeMacosUpdateBootMarker: vi.fn((): string | undefined => undefined),
   readMacosUpdateOutcome: vi.fn((): unknown => undefined),
   clearMacosUpdateRecord: vi.fn(),
   removeMacosUpdateBackup: vi.fn(),
   clearMacosUpdateLeftovers: vi.fn(),
+  // 审计 A15：失败账本（真逻辑在 macos-update-install.spec.ts 里判）。
+  readMacosUpdateFailureCount: vi.fn(() => 0),
+  recordMacosUpdateFailure: vi.fn(() => 1),
+  clearMacosUpdateFailures: vi.fn(),
   runMacosCommand: vi.fn(() => ''),
+  normalizeVersion: vi.fn((value: string) => value.replace(/^v/u, '')),
   macAppBundlePath: vi.fn(() => '/Applications/PicoAide Harness.app'),
   macosUpdatePaths: vi.fn(() => ({
     scriptPath: '/tmp/dsh-desktop-user-data/updates/macos/apply-update.sh',
@@ -88,6 +94,7 @@ const macosUpdate = vi.hoisted(() => ({
     resultPath: '/tmp/dsh-desktop-user-data/updates/macos/last-apply.txt',
     bootMarkerPath: '/tmp/dsh-desktop-user-data/updates/macos/booted.txt',
     mountPoint: '/tmp/dsh-desktop-user-data/updates/macos/image',
+    failuresPath: '/tmp/dsh-desktop-user-data/updates/macos/failures.txt',
   })),
 }))
 
@@ -1310,6 +1317,9 @@ describe('Electron compatibility runtime', () => {
       // 既不开磁盘映像（那等于把坏包交给用户），也不退出宿主。
       expect(electron.shell.openPath).not.toHaveBeenCalled()
       expect(requestQuit).not.toHaveBeenCalled()
+      // 审计复核 P2：准备阶段的抛错**不产生结果文件**，所以要在这里记一次失败 ——
+      // 否则"载荷不合格"永远撞不到退避上限（点一次失败一次的循环修不掉）。
+      expect(macosUpdate.recordMacosUpdateFailure).toHaveBeenCalledWith('/tmp/dsh-desktop-user-data', '2.1.0')
     })
 
     it('does not exit when the helper cannot be started', async () => {
@@ -1350,6 +1360,9 @@ describe('Electron compatibility runtime', () => {
 
     it('writes the boot marker while mounting the window, so the helper sees it', async () => {
       vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+      // 只在打包态写（审计复核 P1）：开发态与渠道安装共用同一份 userData，
+      // 让它参与更新握手会伪造出"某个版本起来了"。
+      electron.app.isPackaged = true
       const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
       const runtime = new ElectronDesktopRuntime(async () => {})
       const release = runtime.schedule(spec)
@@ -1359,8 +1372,22 @@ describe('Electron compatibility runtime', () => {
       expect(macosUpdate.writeMacosUpdateBootMarker).toHaveBeenCalledWith(
         '/tmp/dsh-desktop-user-data',
         APP_VERSION,
+        '/Applications/PicoAide Harness.app',
         expect.any(String),
       )
+      await release()
+    })
+
+    it('does not touch the update markers from an unpackaged run', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+      electron.app.isPackaged = false
+      const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+      const runtime = new ElectronDesktopRuntime(async () => {})
+      const release = runtime.schedule(spec)
+
+      await runtime.mountScheduled()
+
+      expect(macosUpdate.writeMacosUpdateBootMarker).not.toHaveBeenCalled()
       await release()
     })
 
@@ -1404,6 +1431,7 @@ describe('Electron compatibility runtime', () => {
       vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
       macosUpdate.readMacosUpdateOutcome.mockReturnValueOnce({
         kind: 'applied',
+        toVersion: '2.1.0',
         backupPath: '/Applications/.PicoAide Harness.app.backup-2.1.0.app',
         logPath: '/tmp/dsh-desktop-user-data/updates/macos/apply-update.log',
       })
@@ -1413,10 +1441,14 @@ describe('Electron compatibility runtime', () => {
 
       await runtime.mountScheduled()
 
+      // 审计 A10/A15：删备份前要先问"还有进程在跑它吗"（第三个参数就是那条命令边界），
+      // 并且这一版成功之后要把它的失败账清掉。
       expect(macosUpdate.removeMacosUpdateBackup).toHaveBeenCalledWith(
         '/Applications/.PicoAide Harness.app.backup-2.1.0.app',
         expect.any(Function),
+        macosUpdate.runMacosCommand,
       )
+      expect(macosUpdate.clearMacosUpdateFailures).toHaveBeenCalledWith('/tmp/dsh-desktop-user-data', '2.1.0')
       expect(electron.dialog.showMessageBox).not.toHaveBeenCalled()
       await release()
     })

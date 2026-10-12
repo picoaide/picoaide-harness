@@ -24,8 +24,8 @@ import {
 } from 'electron'
 import { spawn } from 'node:child_process'
 import { chmod } from 'node:fs/promises'
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, readFileSync } from 'node:fs'
+import { join, dirname } from 'node:path'
 import type {
   DesktopLocale,
   DesktopMicrophoneAdapter,
@@ -59,12 +59,15 @@ import {
 import { downloadDesktopUpdate } from './update-download.ts'
 import {
   canInstallMacosInPlace,
+  clearMacosUpdateFailures,
   clearMacosUpdateLeftovers,
   clearMacosUpdateRecord,
   macAppBundlePath,
   macosUpdatePaths,
+  normalizeVersion,
   prepareMacosInPlaceUpdate,
   readMacosUpdateOutcome,
+  recordMacosUpdateFailure,
   removeMacosUpdateBackup,
   runMacosCommand,
   spawnMacosUpdateHelper,
@@ -857,6 +860,11 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
         log: message => this.logError(`dsh-plugin-desktop: macos update: ${message}`),
       }).catch((cause: unknown) => {
         this.logError(`dsh-plugin-desktop: macos update preparation failed: ${cause instanceof Error ? cause.message : String(cause)}`)
+        // 审计复核 P2：准备阶段的抛错**不产生结果文件**，因此走不到 settle 的记账 ——
+        // 只记"帮手写过结果文件"那一类失败的话，"载荷不合格"永远撞不到退避上限，
+        // 用户看到的是"点一次失败一次"（`releaseReady()` 之后下一次检查会把同一份载荷
+        // 重新接回 ready）。这里补记一次，让上限对**所有**失败形态生效。
+        recordMacosUpdateFailure(app.getPath('userData'), normalizeVersion(version))
         throw cause
       })
       if (preparation.kind === 'fallback') return await this.openUpdateDiskImage(version, installerPath, preparation.reason)
@@ -933,28 +941,71 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   private settleMacosUpdate(): DesktopUpdateFailureNotice | undefined {
     if (this.platform !== 'darwin') return undefined
     const userDataPath = app.getPath('userData')
-    writeMacosUpdateBootMarker(userDataPath, PRODUCT_VERSION, new Date().toISOString())
+    const paths = macosUpdatePaths(userDataPath)
+    // 打包路径**先算**：标记要带 `bundle=`（审计复核 P1 —— 只认版本号会被同版本的另一份
+    // 副本或 `yarn dev` 伪造），它也是清理与"该不该保留备份"的输入。
     const bundlePath = macAppBundlePath(process.execPath)
+    // 审计 A14：标记写失败**不再静默**。它是"新版起来过"的契约证据；写不成时帮手还有
+    // "目标路径下的主程序在跑"这第二道判据兜底，但这件事必须进日志，否则现场只剩四个字。
+    // 只在打包态写：开发态（`yarn dev`）与渠道安装共用同一份 userData，让它参与更新握手
+    // 会伪造出"某个版本起来了"（审计复核 P1），也会读走/清掉真实的结果文件。
+    if (app.isPackaged) {
+      const markerFailure = writeMacosUpdateBootMarker(
+        userDataPath,
+        PRODUCT_VERSION,
+        bundlePath ?? '',
+        new Date().toISOString(),
+      )
+      if (markerFailure !== undefined) {
+        this.logError(`dsh-plugin-desktop: macos update: could not write the boot marker: ${markerFailure}`)
+      }
+    }
+    // 审计 A15 的账本自洁：**正在运行的版本**不可能是"装不上的版本"（用户手工装上了、
+    // 或者那是上一次成功留下的旧账）—— 清掉它，免得陈旧的计数挡住将来对同一版本的尝试。
+    clearMacosUpdateFailures(userDataPath, PRODUCT_VERSION)
+    // 审计 A2：**先读结论、再清理**。原顺序会先删掉备份，再把"旧版本备份：<那个路径>"
+    // 报给用户 —— 弹窗指着一个已经不存在的位置（`rollback-failed` 那条路径上它还是唯一副本）。
+    const outcome = readMacosUpdateOutcome(userDataPath, PRODUCT_VERSION)
+    // 要保留的备份：失败要通报的那一份（A2），以及**已生效**时帮手特意为"另一个实例还在跑"
+    // 而留下的那一份（A10）—— 后者由 `removeMacosUpdateBackup` 里的占用判据再决定删不删。
+    const keptBackup = outcome?.kind === 'failed'
+      ? outcome.record.backupPath
+      : outcome?.kind === 'applied'
+        ? outcome.backupPath
+        : undefined
     if (bundlePath !== undefined) {
       clearMacosUpdateLeftovers(
         bundlePath,
-        macosUpdatePaths(userDataPath).mountPoint,
+        paths.mountPoint,
         runMacosCommand,
         message => this.logError(`dsh-plugin-desktop: macos update: ${message}`),
+        {
+          ...(keptBackup === undefined || keptBackup === '' ? {} : { keep: keptBackup }),
+          scriptDirectory: dirname(paths.scriptPath),
+        },
       )
     }
-    const outcome = readMacosUpdateOutcome(userDataPath, PRODUCT_VERSION)
     if (outcome === undefined) return undefined
     clearMacosUpdateRecord(userDataPath)
     if (outcome.kind === 'applied') {
-      removeMacosUpdateBackup(outcome.backupPath, message => this.logError(`dsh-plugin-desktop: macos update: ${message}`))
+      clearMacosUpdateFailures(userDataPath, outcome.toVersion)
+      removeMacosUpdateBackup(
+        outcome.backupPath,
+        message => this.logError(`dsh-plugin-desktop: macos update: ${message}`),
+        runMacosCommand,
+      )
       return undefined
     }
+    // 审计 A15：把失败记进账本，准备阶段据此停止对同一版本的自动重试（回落成打开磁盘映像）。
+    const failures = recordMacosUpdateFailure(userDataPath, outcome.record.toVersion)
+    this.logError(`dsh-plugin-desktop: macos update: ${outcome.record.toVersion} has failed ${String(failures)} time(s)`)
     return {
       toVersion: outcome.record.toVersion,
       reason: outcome.record.reason,
       logPath: outcome.record.logPath,
-      backupPath: outcome.record.backupPath,
+      // 审计复核 P2：最常见的失败（`application-did-not-start`）里帮手已经把备份 `mv` 回原位，
+      // 记录里的路径**并不存在** —— 只报存在的，弹窗就不会指着一个空位置。
+      backupPath: existsSync(outcome.record.backupPath) ? outcome.record.backupPath : '',
     }
   }
 

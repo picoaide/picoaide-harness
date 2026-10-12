@@ -45,12 +45,15 @@
 import { spawn, spawnSync } from 'node:child_process'
 import {
   accessSync,
+  closeSync,
   constants as fsConstants,
   existsSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
+  readSync,
   rmdirSync,
   rmSync,
   statfsSync,
@@ -58,6 +61,31 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
+import { compareSemVerVersions } from './update-checker.ts'
+
+/**
+ * 同一个目标版本允许的**自动**原地安装失败次数上限（审计 A15）。
+ *
+ * 达到上限后不再走原地替换，而是回落成"打开磁盘映像"：用户仍能装上，但不会被
+ * "点一次失败一次"的循环困住。取值与 Squirrel.Mac 的
+ * `SQRLShipItMaximumInstallationAttempts` 一致（3 次里含首次尝试，这里按"已失败次数"计）。
+ */
+export const MACOS_UPDATE_FAILURE_LIMIT = 2
+
+/** Mach-O 的 CPU 类型（`<mach/machine.h>`）→ 人类可读架构名。 */
+const MACHO_CPU_TYPES: Readonly<Record<number, string>> = {
+  7: 'i386',
+  0x01000007: 'x86_64',
+  12: 'arm',
+  0x0100000c: 'arm64',
+}
+
+/** `process.arch` → Mach-O 架构名（判据两边的命名不同，必须显式映射）。 */
+const PROCESS_ARCH_TO_MACHO: Readonly<Record<string, string>> = {
+  arm64: 'arm64',
+  x64: 'x86_64',
+  ia32: 'i386',
+}
 
 /**
  * 命令执行边界：返回**合并后的 stdout + stderr**，非零退出抛错。
@@ -68,13 +96,34 @@ import { basename, dirname, join } from 'node:path'
  */
 export type MacosCommandRunner = (command: string, args: readonly string[]) => string
 
+/**
+ * 命令非零退出。
+ *
+ * 单独一个类型是因为有些判据必须区分"命令正常回答了没有"与"命令自己出问题了"——
+ * 典型是 `pgrep`：退出码 1 = 没匹配（= 没人占用），其它失败不能当成"没人占用"
+ * （审计 A10 的复核意见）。
+ */
+export class MacosCommandFailure extends Error {
+  /** 进程退出码（`null` = 被信号打断 / 起不来）。 */
+  readonly status: number | null
+
+  constructor(message: string, status: number | null) {
+    super(message)
+    this.name = 'MacosCommandFailure'
+    this.status = status
+  }
+}
+
 /** 生产用命令边界：`spawnSync` + 合并输出 + 非零即抛。 */
 export const runMacosCommand: MacosCommandRunner = (command, args) => {
   const result = spawnSync(command, [...args], { encoding: 'utf8' })
   if (result.error !== undefined) throw result.error
   const output = `${result.stdout ?? ''}${result.stderr ?? ''}`
   if (result.status !== 0) {
-    throw new Error(`${command} ${args.join(' ')} exited with ${String(result.status)}: ${output.trim()}`)
+    throw new MacosCommandFailure(
+      `${command} ${args.join(' ')} exited with ${String(result.status)}: ${output.trim()}`,
+      result.status,
+    )
   }
   return output
 }
@@ -90,6 +139,16 @@ export type MacosInPlaceFallbackReason =
   | 'read-only-location'
   | 'unwritable-location'
   | 'insufficient-space'
+  /**
+   * 影像挂载点被占（上一次的挂载还在、或影像已被挂在别处），或 `hdiutil attach` 失败。
+   *
+   * 2026-10-12 审计 A13：这两条都是**环境**原因（同一份载荷换个时机就能装），
+   * 改造前它们落在"抛错"桶里 ⇒ 用户看到 `invalid-artifact` 并被卡在点一次失败一次的循环里。
+   */
+  | 'image-busy'
+  | 'image-unavailable'
+  /** 该版本已经原地安装失败过 {@link MACOS_UPDATE_FAILURE_LIMIT} 次（审计 A15）。 */
+  | 'too-many-failures'
 
 /** 一次原地更新的执行计划：路径全部由宿主算好，帮手只按 argv 执行。 */
 export interface MacosInPlaceUpdatePlan {
@@ -134,6 +193,13 @@ export interface MacosInPlacePrepareOptions extends MacosInPlacePrecondition {
   readonly run?: MacosCommandRunner
   /** 追加一行诊断（默认丢弃）。 */
   readonly log?: (message: string) => void
+  /**
+   * 当前进程架构（审计 A8 的判据输入）；缺省 = `process.arch`。
+   *
+   * 单独开一个口子是因为架构判据必须能在 Linux 上跑判据 —— 否则它和 macOS 真机绑死，
+   * 又会变成"CI 里没人看守"的那一类（见本轮审计的 P0）。
+   */
+  readonly arch?: string
 }
 
 /** 应用包的身份：替换前后必须一致的那几项。 */
@@ -187,13 +253,18 @@ export interface MacosUpdateRecord {
 /** 上一次更新尝试对**本次启动**的结论。 */
 export type MacosUpdateOutcome =
   /** 目标版本就是当前运行的版本 ⇒ 更新已生效：删备份、清记录。 */
-  | { readonly kind: 'applied'; readonly backupPath: string; readonly logPath: string }
+  | { readonly kind: 'applied'; readonly toVersion: string; readonly backupPath: string; readonly logPath: string }
   /** 目标版本不是当前版本，而记录说没成 ⇒ 报一次失败：清记录、留备份与日志。 */
   | { readonly kind: 'failed'; readonly record: MacosUpdateRecord }
 
 /** 原地更新相关的全部落点（都在应用私有目录下，随渠道隔离）。 */
 export interface MacosUpdatePaths {
-  /** 脚本：`<userData>/updates/macos/apply-update.sh`。 */
+  /**
+   * 脚本目录里的**基准**名：真实脚本是 `<userData>/updates/macos/apply-update-<pid>.sh`。
+   *
+   * 2026-10-12 审计 N8：固定文件名 + 每次覆盖重写会让**上一条仍在运行的 `/bin/sh`**
+   * 读到错位内容（bash 是按偏移增量读脚本的）。带 pid 的唯一名把这条路径彻底避开。
+   */
   readonly scriptPath: string
   /** 日志：`<userData>/updates/macos/apply-update.log`。 */
   readonly logPath: string
@@ -201,14 +272,24 @@ export interface MacosUpdatePaths {
   readonly resultPath: string
   /** 启动标记：`<userData>/updates/macos/booted.txt`。 */
   readonly bootMarkerPath: string
+  /**
+   * 负向标记：`<userData>/updates/macos/boot-failed.txt`。
+   *
+   * 新版在"能写启动标记"之后、变成可用应用之前**致命失败**时写它（审计复核 P1：
+   * 只有正标记会让"进程起来了但根本不是应用"被当成成功，于是不回滚还删掉唯一备份）。
+   * 帮手在承认成功之前必须先看它。
+   */
+  readonly bootFailurePath: string
   /** 挂载点：`<userData>/updates/macos/image`。 */
   readonly mountPoint: string
+  /** 失败账：`<userData>/updates/macos/failures.txt`（审计 A15）。 */
+  readonly failuresPath: string
 }
 
 /**
  * 应用私有目录下的固定落点。
  * @param userDataPath - `app.getPath('userData')`。
- * @returns 五个绝对路径。
+ * @returns 六个绝对路径。
  */
 export function macosUpdatePaths(userDataPath: string): MacosUpdatePaths {
   const root = join(userDataPath, 'updates', 'macos')
@@ -217,7 +298,9 @@ export function macosUpdatePaths(userDataPath: string): MacosUpdatePaths {
     logPath: join(root, 'apply-update.log'),
     resultPath: join(root, 'last-apply.txt'),
     bootMarkerPath: join(root, 'booted.txt'),
+    bootFailurePath: join(root, 'boot-failed.txt'),
     mountPoint: join(root, 'image'),
+    failuresPath: join(root, 'failures.txt'),
   }
 }
 
@@ -285,27 +368,69 @@ export async function prepareMacosInPlaceUpdate(
   const version = normalizeVersion(options.version)
   const paths = macosUpdatePaths(options.userDataPath)
   const current = readMacAppIdentity(run, bundlePath)
-  if (current.version === version) throw new Error(`dsh-plugin-desktop: ${version} is already installed`)
+  // 审计 A9：原先只判"相等"，于是**降级**也会被当成一次正常更新。客户端数据面是前向
+  // only 的（会话格式跨代、迁移 0066 让存量会话失效），静默降级可能得到"旧 app + 新数据"。
+  const order = compareSemVerVersions(version, current.version)
+  if (order === 0) throw new Error(`dsh-plugin-desktop: ${version} is already installed`)
+  if (order !== null && order < 0) {
+    throw new Error(`dsh-plugin-desktop: refusing to replace ${current.version} with the older ${version}`)
+  }
+  if (order === null) {
+    // 审计复核：与架构判据对齐，认不出大小关系时**留一行日志**再放行 ——
+    // 静默放行会让"版本序判据"在异常输入下无声失效。
+    log(`could not order ${version} against ${current.version}; continuing without the version order judgement`)
+  }
+  // 审计 A15：同一版本反复装不上就不再自动重试，回落成"打开磁盘映像"，用户仍有路可走。
+  if (readMacosUpdateFailureCount(options.userDataPath, version) >= MACOS_UPDATE_FAILURE_LIMIT) {
+    log(`${version} already failed ${String(MACOS_UPDATE_FAILURE_LIMIT)} times; falling back to opening the disk image`)
+    return { kind: 'fallback', reason: 'too-many-failures' }
+  }
 
   // 上一次留下的挂载点/暂存件先清干净：挂载点必须存在且为空，`hdiutil attach` 才肯用。
   clearMacosUpdateLeftovers(bundlePath, paths.mountPoint, run, log)
   // **只用 `rmdir`（空目录才行），绝不在挂载点路径上做递归删除**：万一上一次的影像
   // 还挂着（且卸载失败），递归删除会去删**卷里的内容**。卷是只读挂载所以它只会失败，
-  // 但让"删不干净就报错"比"依赖卷是只读的"更结实。非空 ⇒ 交给 attach 自己报错。
+  // 但让"删不干净就报错"比"依赖卷是只读的"更结实。
   try {
     rmdirSync(paths.mountPoint)
   } catch {
     // 不存在（首次）或非空（残留挂载）：两种都继续往下走。
   }
+  // 审计 A13：清理之后仍然非空 ⇒ 挂载点被占（陈旧挂载、或影像已被挂在别处）。
+  // 这是**环境**原因而不是"这份载荷不能用"，因此回落而不是抛错。
+  if (existsSync(paths.mountPoint) && readdirSync(paths.mountPoint).length > 0) {
+    log(`${paths.mountPoint} is still occupied; falling back to opening the disk image`)
+    return { kind: 'fallback', reason: 'image-busy' }
+  }
   mkdirSync(paths.mountPoint, { recursive: true })
 
   let mounted = false
   try {
-    run('hdiutil', ['attach', '-nobrowse', '-readonly', '-noverify', '-mountpoint', paths.mountPoint, options.installerPath])
+    try {
+      run('hdiutil', ['attach', '-nobrowse', '-readonly', '-noverify', '-mountpoint', paths.mountPoint, options.installerPath])
+    } catch (cause) {
+      // 审计 A13：挂不上同样是环境原因（镜像已挂载、被别的进程占着…）。
+      log(`could not attach ${options.installerPath}: ${cause instanceof Error ? cause.message : String(cause)}`)
+      return { kind: 'fallback', reason: 'image-unavailable' }
+    }
     mounted = true
+    if (listApplicationsInImage(paths.mountPoint).length === 0 && readdirSync(paths.mountPoint).length === 0) {
+      // 挂上了、但卷根是空的：这是挂载问题（例如影像已被挂在别处），不是载荷问题。
+      log(`${paths.mountPoint} mounted empty; falling back to opening the disk image`)
+      detachImage(run, paths.mountPoint, log)
+      mounted = false
+      return { kind: 'fallback', reason: 'image-busy' }
+    }
     const sourcePath = singleApplicationInImage(paths.mountPoint)
     const source = readMacAppIdentity(run, sourcePath)
     assertSameApplication(current, source, version)
+    // 审计 A8：非本机架构的载荷装上去只会"换完起不来再回滚"，在这里就拒掉。
+    assertImageSupportsCurrentArchitecture({
+      sourcePath,
+      executable: source.executable,
+      currentArch: options.arch ?? process.arch,
+      log,
+    })
     // 空间判据在**挂载之后**（要先看到新副本有多大），但仍在**动用户文件之前**。
     if (!hasSpaceForUpdate(run, sourcePath, dirname(bundlePath))) {
       detachImage(run, paths.mountPoint, log)
@@ -354,13 +479,21 @@ export function writeMacosUpdateHelper(options: {
   readonly tuning?: Partial<MacosUpdateHelperTuning>
 }): MacosUpdateHelper {
   const paths = macosUpdatePaths(options.userDataPath)
+  // 审计复核 F8：脚本名里带 pid（见下），所以 pid 必须是安全整数 —— 否则会拼出一个
+  // 既逃过 `sweepMacosUpdateScripts`（只认 `\d+`）又不会被回收的文件名。
+  if (!Number.isSafeInteger(options.pid) || options.pid <= 0) {
+    throw new Error(`dsh-plugin-desktop: unsafe macOS update helper pid ${String(options.pid)}`)
+  }
   mkdirSync(dirname(paths.scriptPath), { recursive: true })
-  writeFileSync(paths.scriptPath, macosUpdateHelperScript(options.tuning), { encoding: 'utf8', mode: 0o700 })
+  // 审计 N8：脚本名带 pid —— `/bin/sh`（bash 3.2）按偏移增量读脚本，固定名 + 覆盖重写
+  // 会让**上一条仍在运行的**帮手读到错位内容或提前 EOF。唯一名把这条路径彻底避开。
+  const scriptPath = join(dirname(paths.scriptPath), `apply-update-${String(options.pid)}.sh`)
+  writeFileSync(scriptPath, macosUpdateHelperScript(options.tuning), { encoding: 'utf8', mode: 0o700 })
   return {
-    scriptPath: paths.scriptPath,
+    scriptPath,
     command: '/bin/sh',
     args: [
-      paths.scriptPath,
+      scriptPath,
       String(options.pid),
       options.plan.bundlePath,
       options.plan.sourcePath,
@@ -372,6 +505,7 @@ export function writeMacosUpdateHelper(options: {
       normalizeVersion(options.version),
       paths.bootMarkerPath,
       normalizeVersion(options.fromVersion),
+      paths.bootFailurePath,
     ],
     resultPath: paths.resultPath,
     logPath: paths.logPath,
@@ -453,6 +587,178 @@ export function readTeamIdentifier(run: MacosCommandRunner, bundlePath: string):
 }
 
 /**
+ * 从一个 Mach-O 文件头里读出它支持的架构（审计 A8）。
+ *
+ * 自己解析而不是调 `lipo`：`lipo` 属于 Xcode 命令行工具，**裸机 macOS 不保证有**
+ * （docs/decisions 里已经为 `xcrun stapler` 记过同一类坑）。自己解析还带来一个好处 ——
+ * 判据可以在 Linux 上喂合成文件头跑，不需要 mac 真机。
+ * @param header - 文件开头若干字节（至少 8 字节；胖二进制需要覆盖各架构表项）。
+ * @returns 架构名列表（`arm64` / `x86_64` / `i386` / `arm`）；认不出时为 undefined。
+ */
+export function machOArchitectures(header: Uint8Array): readonly string[] | undefined {
+  if (header.byteLength < 8) return undefined
+  const view = new DataView(header.buffer as ArrayBuffer, header.byteOffset, header.byteLength)
+  const bigMagic = view.getUint32(0, false)
+  const littleMagic = view.getUint32(0, true)
+  // 胖（fat / universal）二进制：`0xcafebabe` 是大端写法，字段也按大端读；`0xbebafeca`
+  // （FAT_CIGAM）是它的字节序镜像，字段按小端读。
+  if (bigMagic === 0xcafebabe || bigMagic === 0xbebafeca) {
+    const littleEndian = bigMagic === 0xbebafeca
+    const count = view.getUint32(4, littleEndian)
+    if (count > 64) return undefined
+    const architectures: string[] = []
+    for (let index = 0; index < count; index += 1) {
+      const offset = 8 + index * 20
+      if (offset + 4 > header.byteLength) break
+      const name = MACHO_CPU_TYPES[view.getUint32(offset, littleEndian)]
+      if (name !== undefined) architectures.push(name)
+    }
+    return architectures.length === 0 ? undefined : architectures
+  }
+  // 单架构（thin）二进制：magic 按文件自身字节序写，两种读法各命中一种。
+  const littleEndian = littleMagic === 0xfeedfacf || littleMagic === 0xfeedface
+  const bigEndian = bigMagic === 0xfeedfacf || bigMagic === 0xfeedface
+  if (!littleEndian && !bigEndian) return undefined
+  const name = MACHO_CPU_TYPES[view.getUint32(4, littleEndian)]
+  return name === undefined ? undefined : [name]
+}
+
+/** 读一个可执行文件的架构；读不到/认不出时为 undefined。 */
+export function readExecutableArchitectures(filename: string): readonly string[] | undefined {
+  // 只读文件头（审计复核 P3）：`machOArchitectures` 最多需要 8 + 64×20 = 1288 字节，
+  // 而 `readFileSync` 会把整个主可执行文件（Electron 上百 MB、且常在 DMG 冷缓存上）读进来。
+  let handle: number | undefined
+  try {
+    handle = openSync(filename, 'r')
+    const buffer = Buffer.alloc(4096)
+    const read = readSync(handle, buffer, 0, buffer.byteLength, 0)
+    return machOArchitectures(buffer.subarray(0, read))
+  } catch {
+    return undefined
+  } finally {
+    if (handle !== undefined) {
+      try {
+        closeSync(handle)
+      } catch {
+        // 关不上没有后果：进程结束会回收。
+      }
+    }
+  }
+}
+
+/**
+ * 影像里的新版本必须支持**当前进程的架构**（审计 A8）。
+ *
+ * 判据取 `process.arch` 而不是 `uname -m`：后者在 Rosetta 下会报 `x86_64` 之外的东西，
+ * 而真正决定"这份二进制能不能在这台机器上起来"的是当前进程的架构。
+ * 读不出架构时**放行并记日志**：真正不兼容时随后的校验/启动会失败，而那条路径已经会回滚，
+ * 拿不到架构就挡住更新反而是把可用用户关在门外。
+ * @param options - 影像里的应用包、它的 `CFBundleExecutable`、当前进程架构、日志。
+ */
+export function assertImageSupportsCurrentArchitecture(options: {
+  readonly sourcePath: string
+  readonly executable: string
+  readonly currentArch: string
+  readonly log?: (message: string) => void
+}): void {
+  const log = options.log ?? (() => {})
+  const expected = PROCESS_ARCH_TO_MACHO[options.currentArch]
+  if (expected === undefined) return
+  const filename = join(options.sourcePath, 'Contents', 'MacOS', options.executable)
+  const architectures = readExecutableArchitectures(filename)
+  if (architectures === undefined) {
+    log(`could not read the architectures of ${filename}; skipping the architecture judgement`)
+    return
+  }
+  if (!architectures.includes(expected)) {
+    throw new Error(
+      `dsh-plugin-desktop: the update image supports ${architectures.join(', ')}, not ${expected}`,
+    )
+  }
+}
+
+/**
+ * 读"某版本原地安装失败过几次"（审计 A15）。
+ * @param userDataPath - 应用私有目录。
+ * @param version - 目标版本（已去 `v`）。
+ * @returns 已失败次数；没有记录时为 0。
+ */
+export function readMacosUpdateFailureCount(userDataPath: string, version: string): number {
+  const raw = readFailureLedger(userDataPath)
+  const value = raw.get(normalizeVersion(version))
+  return value === undefined || !Number.isFinite(value) ? 0 : value
+}
+
+/**
+ * 记一次失败（审计 A15）。
+ *
+ * 刻意**不**在这里判上限，只记账：上限的判定在准备阶段（回落成"打开磁盘映像"），
+ * 于是"记"与"判"各自只有一处，谁也不会漏。
+ * @param userDataPath - 应用私有目录。
+ * @param version - 目标版本（已去 `v`）。
+ * @returns 记录后的失败次数。
+ */
+export function recordMacosUpdateFailure(userDataPath: string, version: string): number {
+  const ledger = readFailureLedger(userDataPath)
+  const key = normalizeVersion(version)
+  const next = (ledger.get(key) ?? 0) + 1
+  ledger.set(key, next)
+  writeFailureLedger(userDataPath, ledger)
+  return next
+}
+
+/**
+ * 清掉某个版本的失败账（审计 A15）。
+ *
+ * 刻意**没有**"省略版本就清全账"的重载（审计复核 P3）：那种默认值一旦被漏传
+ * （例如记录里少了 `toVersion`）就是**静默把退避机制删掉**。要清全账请显式调用
+ * {@link clearAllMacosUpdateFailures}。
+ * @param userDataPath - 应用私有目录。
+ * @param version - 目标版本（已去 `v`）。
+ */
+export function clearMacosUpdateFailures(userDataPath: string, version: string): void {
+  const ledger = readFailureLedger(userDataPath)
+  ledger.delete(normalizeVersion(version))
+  writeFailureLedger(userDataPath, ledger)
+}
+
+/** 清掉整本失败账（显式接口，见 {@link clearMacosUpdateFailures} 的说明）。 */
+export function clearAllMacosUpdateFailures(userDataPath: string): void {
+  writeFailureLedger(userDataPath, new Map())
+}
+
+/** 失败账本体：`<版本>=<次数>` 逐行（与结果文件同一种"人能看懂"的形态）。 */
+function readFailureLedger(userDataPath: string): Map<string, number> {
+  const ledger = new Map<string, number>()
+  let raw: string
+  try {
+    raw = readFileSync(macosUpdatePaths(userDataPath).failuresPath, 'utf8')
+  } catch {
+    return ledger
+  }
+  for (const line of raw.split('\n')) {
+    const separator = line.indexOf('=')
+    if (separator <= 0) continue
+    const value = Number.parseInt(line.slice(separator + 1), 10)
+    if (!Number.isFinite(value) || value <= 0) continue
+    ledger.set(line.slice(0, separator), value)
+  }
+  return ledger
+}
+
+/** 写失败账；写不了只记日志 —— 它是**诊断与退避**用的，不该成为更新的阻断点。 */
+function writeFailureLedger(userDataPath: string, ledger: Map<string, number>): void {
+  const path = macosUpdatePaths(userDataPath).failuresPath
+  const body = [...ledger.entries()].map(([version, count]) => `${version}=${String(count)}`).join('\n')
+  try {
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, body === '' ? '' : `${body}\n`, 'utf8')
+  } catch {
+    // 见上：账本写不进去不影响这次更新。
+  }
+}
+
+/**
  * 影像里的应用包：卷根下**有且只有一个** `.app`。
  *
  * electron-builder 的 DMG 卷根是 `<产品名>.app` + 指向 `/Applications` 的符号链接，
@@ -461,15 +767,7 @@ export function readTeamIdentifier(run: MacosCommandRunner, bundlePath: string):
  * @returns 唯一的 `.app` 绝对路径。
  */
 export function singleApplicationInImage(mountPoint: string): string {
-  const entries = readdirSync(mountPoint)
-  const applications = entries.filter((entry) => {
-    if (!entry.endsWith('.app')) return false
-    try {
-      return lstatSync(join(mountPoint, entry)).isDirectory()
-    } catch {
-      return false
-    }
-  })
+  const applications = listApplicationsInImage(mountPoint)
   const only = applications[0]
   if (only === undefined) {
     throw new Error(`dsh-plugin-desktop: the update disk image contains no application bundle (${mountPoint})`)
@@ -478,6 +776,28 @@ export function singleApplicationInImage(mountPoint: string): string {
     throw new Error(`dsh-plugin-desktop: the update disk image contains ${String(applications.length)} application bundles`)
   }
   return join(mountPoint, only)
+}
+
+/**
+ * 卷根下的应用包名（**不抛错**的版本）。
+ *
+ * 分成两个函数是为了让调用方能区分"挂载有问题（卷根是空的）"与"载荷有问题
+ * （有文件、但没有或有多个 `.app`）"—— 前者该回落，后者该拒（审计 A13）。
+ * 必须用 `lstatSync` 判目录：`statSync` 会把 electron-builder 放在卷根的
+ * 「指向 /Applications 的符号链接」也认成目录。
+ * @param mountPoint - 卷根绝对路径。
+ * @returns `.app` 目录名列表（不含路径前缀）。
+ */
+export function listApplicationsInImage(mountPoint: string): readonly string[] {
+  const entries = readdirSync(mountPoint)
+  return entries.filter((entry) => {
+    if (!entry.endsWith('.app')) return false
+    try {
+      return lstatSync(join(mountPoint, entry)).isDirectory()
+    } catch {
+      return false
+    }
+  })
 }
 
 /**
@@ -547,6 +867,7 @@ export function clearMacosUpdateLeftovers(
   mountPoint: string,
   run: MacosCommandRunner,
   log: (message: string) => void = () => {},
+  options: { readonly keep?: string; readonly scriptDirectory?: string } = {},
 ): void {
   // 挂载点不存在 ⇒ 上一次根本没有挂过影像：不要每次启动都去 spawn 一个 `hdiutil`
   // 并记一行"卸载失败"的假错误（这条路径在每个 macOS 进程的启动路径上）。
@@ -561,13 +882,61 @@ export function clearMacosUpdateLeftovers(
   }
   for (const entry of entries) {
     if (!entry.startsWith(prefix)) continue
-    // 只删「本应用的暂存/备份」这一种形状：.<名字>.update-<版本>.app / .<名字>.backup-<版本>.app
-    if (!/\.(?:update|backup)-[^/]+\.app$/u.test(entry)) continue
+    // 只删「本应用的暂存/备份」这一种形状：
+    //   .<名字>.update-<版本>.app / .<名字>.backup-<版本>.app
+    // 以及回滚失败时留下的 `…update-<版本>.app.broken`（审计 A4：原先的正则要求以 `.app`
+    // **结尾**，于是 `.broken` 那种残留永远不会被清掉，会一直占着 ~400MB 留在「应用程序」里）。
+    if (!/\.(?:update|backup)-[^/]+\.app(?:\.broken)?$/u.test(entry)) continue
+    const absolute = join(directory, entry)
+    // 审计 A2：上一次失败要报给用户的那个备份必须留下 —— 通报里点名了它的路径。
+    if (options.keep !== undefined && absolute === options.keep) {
+      log(`kept the backup ${entry} for the pending failure report`)
+      continue
+    }
+    // 占用判据**只有这一处**（审计复核 P1）：备份件上还有进程在跑就不删。
+    // 原来只有 `removeMacosUpdateBackup` 里查占用，而清理发生在那之前 ——
+    // 于是"帮手故意留下备份"（多用户/多实例）在下一次启动就被这里无条件删掉，
+    // 保护等于没有。`.update-*` / `.broken` 是纯垃圾，不查占用。
+    if (/\.backup-/u.test(entry) && isBundleInUse(run, absolute)) {
+      log(`kept the backup ${entry}: a process is still running from it`)
+      continue
+    }
     try {
-      rmSync(join(directory, entry), { recursive: true, force: true })
+      rmSync(absolute, { recursive: true, force: true })
       log(`removed leftover ${entry}`)
     } catch {
       // 删不掉不是错误：它只占空间，不影响这次更新。
+    }
+  }
+  sweepMacosUpdateScripts(options.scriptDirectory, log)
+}
+
+/**
+ * 清掉历次留下的帮手脚本（审计 N8 的配套）。
+ *
+ * 脚本名现在带 pid（`apply-update-<pid>.sh`），因此每次更新都会多一个小文件。
+ * 在这里回收：删掉正在运行的脚本也不会打断它（POSIX 下 unlink 只摘目录项，
+ * 已打开的 inode 继续有效），所以这条清理对"上一条帮手还在跑"同样安全。
+ * @param scriptDirectory - 脚本所在目录；未给时跳过。
+ * @param log - 诊断输出。
+ */
+export function sweepMacosUpdateScripts(scriptDirectory: string | undefined, log: (message: string) => void = () => {}): void {
+  if (scriptDirectory === undefined) return
+  let entries: string[]
+  try {
+    entries = readdirSync(scriptDirectory)
+  } catch {
+    return
+  }
+  for (const entry of entries) {
+    // 带 pid 的新名（`apply-update-<pid>.sh`）与改造前的固定名（`apply-update.sh`）都收：
+    // 固定名是旧版本留下的，不一起清就会一直躺在用户的更新目录里。
+    if (!/^apply-update(?:-\d+)?\.sh$/u.test(entry)) continue
+    try {
+      unlinkSync(join(scriptDirectory, entry))
+      log(`removed stale helper script ${entry}`)
+    } catch {
+      // 同上：删不掉不影响这次更新。
     }
   }
 }
@@ -600,13 +969,52 @@ export function detachImage(run: MacosCommandRunner, mountPoint: string, log: (m
  * @param version - 当前运行版本。
  * @param stamp - 时间戳（便于诊断）。
  */
-export function writeMacosUpdateBootMarker(userDataPath: string, version: string, stamp: string): void {
+export function writeMacosUpdateBootMarker(userDataPath: string, version: string, bundlePath: string, stamp: string): string | undefined {
   const paths = macosUpdatePaths(userDataPath)
+  // 审计复核：标记里必须带 `bundle=`。只认版本号的话，**同版本的另一份副本**
+  // （DMG 里那份、下载目录里的拷贝）或 `yarn dev` 都能写出一条"看起来对"的标记；
+  // 带上 bundle 路径并要求帮手比对，才把"是**这一份**应用起来了"钉住。
+  return writeUpdateMarker(paths.bootMarkerPath, [
+    `version=${normalizeVersion(version)}`,
+    `bundle=${bundlePath}`,
+    `at=${stamp}`,
+  ])
+}
+
+/**
+ * 写**负向**标记：新版在启动路径上致命失败时调用（审计复核 P1）。
+ *
+ * 与 {@link writeMacosUpdateBootMarker} 同一形状（版本 + bundle + 时间），但语义相反：
+ * 帮手看到"版本与 bundle 都命中"的负向标记时**不承认成功**，走回滚。
+ * 写失败同样只返回原因（这条路径本身已经在处理致命错误，不能再抛）。
+ * @param userDataPath - 应用私有目录。
+ * @param version - 当前运行版本。
+ * @param bundlePath - 当前应用包路径（不是 `.app` 时为 `''`）。
+ * @param stamp - 时间戳（诊断用）。
+ * @returns 出错原因；成功时 undefined。
+ */
+export function writeMacosUpdateBootFailureMarker(
+  userDataPath: string,
+  version: string,
+  bundlePath: string,
+  stamp: string,
+): string | undefined {
+  const paths = macosUpdatePaths(userDataPath)
+  return writeUpdateMarker(paths.bootFailurePath, [
+    `version=${normalizeVersion(version)}`,
+    `bundle=${bundlePath}`,
+    `at=${stamp}`,
+  ])
+}
+
+/** 写一个 `key=value` 标记文件；写不成返回原因（两个标记共用）。 */
+function writeUpdateMarker(path: string, lines: readonly string[]): string | undefined {
   try {
-    mkdirSync(dirname(paths.bootMarkerPath), { recursive: true })
-    writeFileSync(paths.bootMarkerPath, `version=${normalizeVersion(version)}\nat=${stamp}\n`, 'utf8')
-  } catch {
-    // 写不了标记只会让帮手回滚一次已经装好的更新（并在结果里留痕），不是崩溃点。
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, `${lines.join('\n')}\n`, 'utf8')
+    return undefined
+  } catch (cause) {
+    return cause instanceof Error ? cause.message : String(cause)
   }
 }
 
@@ -674,20 +1082,69 @@ export function readMacosUpdateOutcome(
   if (record === undefined) return undefined
   const current = normalizeVersion(currentVersion)
   if (record.toVersion === current) {
-    return { kind: 'applied', backupPath: record.backupPath, logPath: record.logPath }
+    return { kind: 'applied', toVersion: record.toVersion, backupPath: record.backupPath, logPath: record.logPath }
   }
   if (record.status === 'failed' || record.status === 'running') return { kind: 'failed', record }
-  return { kind: 'applied', backupPath: '', logPath: record.logPath }
+  return { kind: 'applied', toVersion: record.toVersion, backupPath: '', logPath: record.logPath }
 }
 
-/** 删掉备份目录（更新被当前版本确认之后才调用）。 */
-export function removeMacosUpdateBackup(backupPath: string, log: (message: string) => void = () => {}): void {
+/**
+ * 删掉备份目录（更新被当前版本确认之后才调用）。
+ *
+ * 审计 A10：**删除前先看有没有进程还在备份件上跑**。多用户 Mac 上另一个账号可能正跑着
+ * 被换下来的那一份（单实例锁是按 userData 隔离的，挡不住跨账号实例），删掉正在使用的
+ * bundle 会让那个进程变成"文件已删"的幽灵。有占用就留给下次启动的清理再收。
+ * @param backupPath - 备份目录绝对路径。
+ * @param log - 诊断输出。
+ * @param run - 命令边界（`pgrep`）；缺省 = 真实 `spawnSync`。
+ */
+export function removeMacosUpdateBackup(
+  backupPath: string,
+  log: (message: string) => void = () => {},
+  run: MacosCommandRunner = runMacosCommand,
+): void {
   if (backupPath === '') return
+  if (isBundleInUse(run, backupPath)) {
+    log(`kept the backup ${backupPath}: a process is still running from it`)
+    return
+  }
   try {
     rmSync(backupPath, { recursive: true, force: true })
   } catch (cause) {
     log(`could not remove the update backup ${backupPath}: ${cause instanceof Error ? cause.message : String(cause)}`)
   }
+}
+
+/**
+ * 有没有进程正在从某个 bundle 里跑。
+ *
+ * 用 `pgrep -f "<bundle>/Contents/MacOS/"` 取"命令行里提到这个 bundle 的主程序目录"的进程。
+ * `Contents/MacOS/` 前缀足够精确 —— Electron 的 helper 子进程跑在 `Contents/Frameworks/…`
+ * 下，不会误命中。
+ *
+ * 两条口径（都是审计复核定的）：
+ * - **模式要转义**：`pgrep -f` 收的是 ERE，而 bundle 路径里可能出现 `.`、`(`、`[` 这类
+ *   元字符（应用名来自渠道配置，本仓管不到）。不转义时 `.` 会通配（把
+ *   `…backup-2X8X3.app` 判成本 bundle），未配对的括号更会让 `pgrep` 以退出码 2 失败。
+ * - **方向 fail-closed**：只有 `pgrep` 明确回答"没匹配"（退出码 1）才算没人占用；
+ *   其它失败（`pgrep` 不存在、非法模式、被信号打断）一律按**占用**处理 —— 删掉正在运行的
+ *   bundle 会让那个进程变成"文件已删"的幽灵，而留着备份只是多占一点磁盘。
+ * @param run - 命令边界。
+ * @param bundlePath - 应用包绝对路径。
+ * @returns 是否有进程在跑。
+ */
+export function isBundleInUse(run: MacosCommandRunner, bundlePath: string): boolean {
+  try {
+    run('pgrep', ['-f', escapeForPgrep(`${bundlePath}/Contents/MacOS/`)])
+    return true
+  } catch (cause) {
+    return !(cause instanceof MacosCommandFailure && cause.status === 1)
+  }
+}
+
+/** 把一段字面文本转成 `pgrep -f`（ERE）里的字面模式。 */
+export function escapeForPgrep(literal: string): string {
+  return literal.replace(/[\\^$.*+?()[\]{}|]/gu, '\\$&')
 }
 
 /** 去掉前导 `v`（清单里的版本两种形态都出现过）。 */
@@ -775,6 +1232,7 @@ export interface MacosUpdateHelperTuning {
  * $9  目标版本
  * $10 启动标记文件
  * $11 更新前版本
+ * $12 负向标记文件（新版报告致命启动失败时写；帮手先看它再决定承不承认成功）
  * ```
  *
  * 规矩：外部命令一律写绝对路径（帮手继承的环境不保证 PATH 完好）；每一步失败都先
@@ -834,6 +1292,7 @@ LOG_FILE="$8"
 VERSION="$9"
 BOOT_FILE="\${10}"
 FROM_VERSION="\${11}"
+BOOT_FAIL_FILE="\${12}"
 
 log() { /usr/bin/printf '%s %s\\n' "$(/bin/date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >> "$LOG_FILE" 2>/dev/null || true; }
 record() {
@@ -842,6 +1301,37 @@ record() {
     "$1" "$2" "$3" "$VERSION" "$FROM_VERSION" "$TARGET" "$BACKUP" "$LOG_FILE" > "$RESULT" 2>/dev/null || true
 }
 relaunch() { @@RELAUNCH@@ "$1" >/dev/null 2>&1 || true; }
+
+# 正标记是否**同时**命中版本与 bundle（审计复核 P1：只认版本号会被同版本的另一份
+# 副本或 yarn dev 伪造；bundle= 那一行把"是这一份应用起来了"钉住）。
+# 两条 grep 都是 -qxF（整行、定串）：审计 A1 —— 子串匹配会被版本号前缀吃掉
+# （目标 2.8.3 命中标记里的 2.8.3-beta.1 / 2.8.3-beta.10），于是"别的版本的标记"
+# 被当成新版起来了，备份随即被删、回滚能力一起消失。
+boot_marker_confirms() {
+  [ -f "$BOOT_FILE" ] || return 1
+  /usr/bin/grep -qxF "version=$VERSION" "$BOOT_FILE" 2>/dev/null || return 1
+  /usr/bin/grep -qxF "bundle=$TARGET" "$BOOT_FILE" 2>/dev/null || return 1
+  return 0
+}
+# 新版**自己报告**了致命启动失败（审计复核 P1）：命中的话立刻回滚，绝不承认成功 ——
+# 否则"进程起来了但根本不是可用应用"会被当成更新成功，还会删掉唯一的备份。
+boot_failed() {
+  [ -f "$BOOT_FAIL_FILE" ] || return 1
+  /usr/bin/grep -qxF "version=$VERSION" "$BOOT_FAIL_FILE" 2>/dev/null || return 1
+  /usr/bin/grep -qxF "bundle=$TARGET" "$BOOT_FAIL_FILE" 2>/dev/null || return 1
+  return 0
+}
+
+# 收尾：任何出口都 (1) 补回缺失的目标（两次 mv 之间被杀）(2) 卸载影像（审计 A5/A6）。
+# SIGKILL 与断电不在此列 —— 那条路径没有可靠的自救手段，已在决策文档的"认账"里写明。
+cleanup() {
+  if [ ! -e "$TARGET" ] && [ -e "$BACKUP" ]; then
+    /bin/mv "$BACKUP" "$TARGET" 2>/dev/null || true
+  fi
+  /usr/bin/hdiutil detach "$MOUNT" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+trap 'exit 1' INT TERM HUP
 
 record running waiting ""
 log "helper start: pid=$PID version=$VERSION target=$TARGET"
@@ -900,25 +1390,52 @@ if ! /bin/mv "$STAGING" "$TARGET" >>"$LOG_FILE" 2>&1; then
 fi
 log "replaced $TARGET"
 /usr/bin/xattr -dr com.apple.quarantine "$TARGET" >>"$LOG_FILE" 2>&1 || true
-/bin/rm -f "$BOOT_FILE" >>"$LOG_FILE" 2>&1 || true
+# 两个标记都在**重开应用之前**删掉：这样"等到的标记"只可能是本次启动写的，
+# 上一次留下的（正的或负的）都骗不过这一次（审计复核 P1）。
+/bin/rm -f "$BOOT_FILE" "$BOOT_FAIL_FILE" >>"$LOG_FILE" 2>&1 || true
 
 # 5) 先把新版本打开，再收尾（卸载影像）。顺序有讲究：卸载影像可能是秒级，而用户此刻
 #    正盯着"应用已经关了"的空白期 —— 让他先看到图标在跳，而不是白等。
 relaunch "$TARGET"
+# LaunchServices 的注册是**异步**的（审计 N1），显式重注册一次。放在 relaunch **之后**：
+# 它是同步阻塞的（审计复核 F6），排在前面会把"重新打开应用"推迟。跳过与失败都记一行日志
+# （与 A14 的"不再静默"同口径）。
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+if [ -x "$LSREGISTER" ]; then
+  "$LSREGISTER" -f "$TARGET" >>"$LOG_FILE" 2>&1 || log "lsregister failed for $TARGET (the app was already reopened)"
+else
+  log "lsregister is not available at $LSREGISTER; relying on open to register $TARGET"
+fi
 /usr/bin/hdiutil detach "$MOUNT" >>"$LOG_FILE" 2>&1 || true
 waited=0
+confirmed=0
 while [ "$waited" -lt @@BOOT_WAIT_TICKS@@ ]; do
-  if [ -f "$BOOT_FILE" ] && /usr/bin/grep -q "version=$VERSION" "$BOOT_FILE" 2>/dev/null; then
-    /bin/rm -rf "$BACKUP" >>"$LOG_FILE" 2>&1 || true
-    record ok done ""
-    log "version $VERSION confirmed running; backup removed"
-    exit 0
+  # 负向标记优先，而且**不等满窗口**：新版自己说了"我起不来"就立刻回滚。
+  if boot_failed; then
+    log "the new version reported a fatal startup failure; rolling back"
+    break
+  fi
+  if boot_marker_confirms; then
+    confirmed=1
+    log "boot marker confirms version $VERSION"
+    break
   fi
   /bin/sleep 0.5
   waited=$((waited + 1))
 done
 
-# 6) 新版没起来：把新包挪开、备份换回原位、重新打开旧版本。
+if [ "$confirmed" -eq 1 ]; then
+  # **不在这里删备份**（审计复核 P1）：pgrep 只是命令行文本匹配 —— 把 TARGET 改名成
+  # BACKUP 之后，一个**旧实例**的 argv 仍然是 TARGET/Contents/MacOS/…，脚本侧的占用判据
+  # （无论怎么写）都可能把它判成"没人占用"，于是删掉的正是那个正在运行的实例的文件。
+  # 删除点收敛到**宿主侧唯一一处**：settleMacosUpdate 的 removeMacosUpdateBackup
+  # （fail-closed 的 isBundleInUse，且能对模式做转义）。
+  record ok done ""
+  log "version $VERSION confirmed running; the backup is left for the host to reclaim"
+  exit 0
+fi
+
+# 6) 新版没起来（标记没有、目标下的主程序也没在跑）：把新包挪开、备份换回原位、重开旧版本。
 log "version $VERSION did not start within @@BOOT_WAIT_SECONDS@@s; rolling back"
 BROKEN="$STAGING.broken"
 if /bin/mv "$TARGET" "$BROKEN" >>"$LOG_FILE" 2>&1 && /bin/mv "$BACKUP" "$TARGET" >>"$LOG_FILE" 2>&1; then
@@ -927,7 +1444,8 @@ if /bin/mv "$TARGET" "$BROKEN" >>"$LOG_FILE" 2>&1 && /bin/mv "$BACKUP" "$TARGET"
   relaunch "$TARGET"
   exit 1
 fi
-log "rollback failed: $TARGET still holds the new version, backup kept at $BACKUP"
+# 走到这里说明两次 mv 里至少有一次没成：目标可能已经不在原位，备份仍在 $BACKUP。
+log "rollback failed: $TARGET is missing or the backup could not be moved back (backup kept at $BACKUP)"
 record failed rolling-back rollback-failed
 exit 1
 `

@@ -1134,6 +1134,15 @@ export function apply(ctx: Context, config: Config): void {
         await adapter.installUpdate(version, path)
       } catch {
         lastError = 'invalid-artifact'
+        // 2026-10-12 审计 A11：交付失败必须**同时撤掉 ready 状态**。
+        //
+        // 原实现只记 `lastError`，于是「安装更新」入口一直挂着；而 `runManualCheckTask`
+        // 在 `readyVersion !== undefined` 时**直接转去 installReady**，所以用户点「检查更新」
+        // 也不会重新取清单/重新下载 —— 只要磁盘上那份载荷与当前应用不同源（macOS 原地更新
+        // 会把这类情况判成"载荷不合格"并抛错），用户就进入"点一次失败一次"的死循环，
+        // 唯一出路是上游发一个更新的版本或清掉 userData。
+        // 撤掉 ready 之后，下一次检查会重新取清单，必要时重新下载。
+        releaseReady()
         refreshTray()
         publishState()
       }

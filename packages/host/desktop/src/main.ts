@@ -48,6 +48,7 @@ import { assertRequiredClientEntries, assertRequiredRowsActive } from './startup
 import { fatalBootIdentity, reportFatalBootFailure, type FatalBootChoice } from './fatal-boot.ts'
 import { provideWasmAppsWindows } from './wasm-apps-windows.ts'
 import { applyInstallDshHome, isSystemWorkingDirectory } from './desktop-home.ts'
+import { macAppBundlePath, writeMacosUpdateBootFailureMarker } from './macos-update-install.ts'
 import { desktopUserDataDirectoryName } from './desktop-user-data.ts'
 import { desktopProductVersion, ElectronDesktopRuntime } from './electron-runtime.ts'
 import { desktopStartupCopy } from './tray-locale.ts'
@@ -286,6 +287,23 @@ async function reportFatalStartupFailure(
   runtime: ElectronDesktopRuntime | undefined,
   logger: DesktopLogger,
 ): Promise<FatalBootChoice> {
+  // 2026-10-12 审计复核 P1：把"新版起不来"告诉**帮手**。
+  //
+  // 这条路径弹的是**同步**原生对话框，进程会带着"目标路径下的主可执行文件"活很久
+  // （用户不点它就不走）。而帮手的第二道判据是"目标下的主程序在跑" —— 只看它的话，
+  // 一个根本没变成应用的新版本会被判成更新成功、唯一备份被删。所以在这里、在弹窗**之前**
+  // 写负向标记；帮手看到它立刻回滚，不等满窗口。
+  if (process.platform === 'darwin' && app.isPackaged) {
+    const problem = writeMacosUpdateBootFailureMarker(
+      app.getPath('userData'),
+      desktopProductVersion(),
+      macAppBundlePath(process.execPath) ?? '',
+      new Date().toISOString(),
+    )
+    if (problem !== undefined) {
+      logger.error(`${BIN_NAME}: could not write the macOS boot failure marker: ${problem}`)
+    }
+  }
   // 身份取值走 `fatalBootIdentity`（可注入 runtime 的纯函数）：窗口内 `runtime`
   // 还是 undefined，直接解引用就会在这里抛 TypeError（那是本条修复要消灭的形态）。
   const identity = fatalBootIdentity(runtime, { locale: DEFAULT_HOST_LOCALE, productName: PRODUCT_NAME })
