@@ -63,10 +63,12 @@
 4. **tag 组合下的测试会静默不跑**：CI 只有一个 `go test` 步（`ci.yml:1025-1046`），`scripts/wasm/check-go-test-json.mjs` 只判"报告里出现的用例"。⇒ 必须新增"变体矩阵跑测试"的判据，否则减配变体的代码永不被测。
 5. **关闭态不得用 nil handler 表达**：gin 的 `addRoute` 只断言 `len(handlers) > 0`（源码核证见 §9），传 nil 会**照常注册**，症状是每个请求 panic→Recovery→500 —— 既不是约定的 404，也躲开了"路由消失声明表"的视线。必须走 `registerXxx` 的**提前 return**（既有唯一范例：`server/internal/router/router.go:136-138` 的 `if d.Wasm == nil { return }`）。
 
-### 3.2 客户端侧的两条硬约束
+### 3.2 客户端侧的三条硬约束
 
 1. **技能面住在必需包里**：能力中心是 `packages/host/enterprise/src/client/index.ts:34` 的静态 import（→ `capability-surface.tsx` → `CapabilityCenterPanel.tsx`，约 2012 行），而 enterprise 同时承载登录门/品牌/账号设置段/更新/网关/应用本机 API。⇒ **拆包是前置条件**，不是优化项。
 2. **打包配置的合法改写通道**：渠道那套生成 `<desktop>/temp/channel-electron-builder.cjs` + `--config` 的先例可以照抄（`scripts/channel-build.ts:341-353`、`:671-701`；官方渠道返回 `[]` 保证零影响）。**不要**把变体差异写进 `package.json` 的 build 块（会被 `tests/package.spec.ts:270-320` 的漂移断言咬住）。
+3. **拆包必须连 host 面一起搬，只搬 UI 等于没拆**（2026-10-13 实测教训）：模块的"本机 API"（`/api/pico/<模块>/*`）如果留在必需包里，关闭模块时它照样进 app.asar。P0 的第一版就把技能面拆成了"UI 搬走、host 代理留在 `@picoaide/dsh-enterprise`" —— 四组本机路由仍在 `packages/host/enterprise/src/auth-gate.ts:2031`（`/api/pico/skills`）、`:2399`（`/agent-presets`）、`:2632`（`/shared-skills`）、`:2841`（`/capabilities`）（该文件 3142 行），apps 侧同形（`packages/host/enterprise/src/wasm-apps.ts`）。
+   搬运口径：**被基础功能真实调用的留 base，只服务模块自身的随模块走**；host 面可以放在模块包的第二入口（照 `packages/host/connectors` 的 host + client 双面形态），不要新建"模块 host 包 + 模块 client 包"两个包去骗自己。
 
 ## 4. 数据库一致性口径
 
@@ -101,6 +103,7 @@
 | 期 | 内容 | 收敛判据 |
 |---|---|---|
 | **P0**（进行中） | w1 拆 enterprise（技能面搬出）；w2 解耦 `browser → connectors` 的 tsc 边；w3 `features` 契约 + 哨兵串 | 三支各自"实施→独立审计→修复→复审"到 P0/P1 归零 |
+| **P0-b**（w1 之后追加） | 把模块的 **host 面**随模块搬走：skills 的四组本机路由（`auth-gate.ts:2031/2399/2632/2841`）、apps 的 `wasm-apps.ts`；分类口径见 §3.2-3 | 不变量 1 对 skills/apps 成立（依赖图检查无模块包残留） |
 | **集成** | 合并三分支、跑全量门禁、对**集成态**再审计一轮 | 门禁全绿 + 集成态审计 P0/P1 归零 |
 | **P0.5** | §5 的八条处置（readyz 替身、权限点登记、scheme 放宽、pack-assets 搬家、播种条件化…） | 同上 |
 | **P1** | 服务端：单一入口 + tag 接线提供者、②的 nil 守卫（当前 76 处裸引用）、③整块条件化（6 条调度器 / 演示播种 / `publishRouteReservedAppIDs`）、变体矩阵编译与测试 | 四组合 `go build`/`go vet`/`go test` 全绿 + 产物哨兵缺席 + schema 对拍 |
