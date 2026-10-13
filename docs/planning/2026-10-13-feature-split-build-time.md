@@ -106,7 +106,7 @@
 **新增**
 1. 产物哨兵缺席：服务端二进制（符号/字符串）、app.asar、webadmin dist；
 2. 变体矩阵编译与测试（四组合 `go build` / `go vet` / `go test`，且**非缺省 tag 的用例必须真跑**）；
-3. schema 快照跨变体逐字节对拍 + `migrations-pg/` 无 `//go:build`；
+3. schema 快照跨变体逐字节对拍 + `migrations-pg/` 无 `//go:build`。**现状（别重复造）**：`server/internal/serverstore/migrate_checksum_test.go:76-106` 已对拍**内嵌迁移集合 ↔ 磁盘生成的 `migrations-checksums.json`**（双向：死条目/未登记都红，并逐条比 sha256 与字节数）⇒ "迁移集合固定、不随构建方式变"这条**已有强判据**；缺的只是 (a) 变体之间**最终 schema 相同**的运行期对拍、(b) "禁止在迁移序列之外做 DDL"的结构判据（防止将来有人用 `//go:build` 文件里的 `CREATE TABLE IF NOT EXISTS` 绕开迁移序列）；
 4. `features` 键的形状/取值/缺省判据（含变异自证）。
 
 **按变体给期望（否则变体一建就红）**
