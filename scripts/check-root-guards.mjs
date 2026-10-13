@@ -164,8 +164,14 @@ const REGISTERED_GUARD_ENTRIES = new Map([
   // ⇒ 该守卫脚本内容变了，按本表上方的
   // 纪律在同一个改动里更新摘要（取值来自 `--print-digests` 的复算结果，
   // 由 `check-guard-parser-integrity.mjs` 与 `verify-check-workspaces.mjs` 各自独立复算对拍）。
+  // 2026-10-14：`scripts/check-workflows.mjs` 的 `ci-go-vet` 载荷从"`argv[1]` 逐字 `./...`"
+  // 改成"**第一个不以 `-` 开头的词**逐字 `./...`"（意图不变：包面不许缩到子集；放行包面
+  // **之前**的 flag —— `-tags=…` 只能写在那里，写成 `go vet ./... -tags=…` 会被 Go 当成
+  // 包模式直接失败）。⇒ 该守卫脚本内容变了，按本表上方的纪律在同一个改动里同步摘要
+  // （取值来自 `--print-digests` 的复算结果，且必须取**工作树**=提交后 HEAD 那份，
+  // 由 `check-guard-parser-integrity.mjs` 与 `verify-check-workspaces.mjs` 各自独立复算对拍）。
   ['check:layout', { script: 'node scripts/verify-layout.mjs', argvTail: [], digest: 'c7851ab69aab2e137758d69dfe56c777627ae404dd5a36b619f0d89cfd4bdc1d' }],
-  ['check:workflows', { script: 'node scripts/check-workflows.mjs', argvTail: [], digest: '4752f083dafb3efa6658b7a7707c606ef814d6c014dac3804057b33a4246cd57' }],
+  ['check:workflows', { script: 'node scripts/check-workflows.mjs', argvTail: [], digest: '6135549c5839a56cd2b51aa36801cbde4b474c4d5fbc2164c40d0783aa27c457' }],
   ['check:ci-scripts', { script: 'node scripts/verify-ci-scripts.mjs', argvTail: [], digest: '1251b7fcfaf871b2369a311224f1b7b177fd7327a6fa1c356a32c5ba7509efb1' }],
   ['check:patch-resolutions', { script: 'node scripts/verify-patch-resolutions.mjs', argvTail: [], digest: '6dcde2281311235a57722608d91e6a1fa59734411ad65cda76ea2bdc43145c83' }],
   ['check:patch-pin', { script: 'node scripts/check-patch-pin.mjs', argvTail: [], digest: 'a8fe5b45df5dfadd7a87332b31f9e14c4a6722a41f21cf0f0d9afa6450a3ba84' }],

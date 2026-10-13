@@ -59,9 +59,12 @@ P0 §5 的硬约束是"三处只能读同一个串，不得各自按三个布尔
 - `server/Dockerfile`：`ARG GO_TAGS=skills,apps,connectors` + 三处 `go build`（server /
   app-compile / 演示应用）都带 `-tags=$GO_TAGS`。不传该 build-arg 时镜像内容与本改造之前同源。
 - `server/scripts/build-demo-apps.sh`：`GO_TAGS` 缺省同上，wasm 编译带 `-tags=`。
-- `.github/workflows/ci.yml`：`go test` 那一步带 `-tags=skills,apps,connectors`。
+- `.github/workflows/ci.yml`：`go vet` 与 `go test` 两步都带 `-tags=skills,apps,connectors`
+  （字面量与 Makefile 的 `GO_TAGS ?=` 缺省值逐字相同；CI 刻意自持这一份，不随构建脚本的变量
+  漂移 —— 与本文件 `go test` 的 `-timeout 15m` 同一口径）。vet 那一步为此改了守卫的一条载荷
+  口径，见下。
 
-### `go vet` 那一步为什么**没有**带 `-tags`（实测结论，别再试一遍）
+### `go vet` 那一步怎么拿到 `-tags`（连带改了 `ci-go-vet` 的载荷口径）
 
 `go` 自带 flag 解析在**第一个非 flag 词处停止** ⇒ `-tags` 只能写在**包面之前**：
 
@@ -70,14 +73,35 @@ $ go vet ./... -tags=skills
 malformed import path "-tags=skills": leading dash      # 退出码 1，这不是"接受了但忽略"
 ```
 
-而 `.github/workflows/ci.yml` 的 `go vet` 步骤的包面被 `scripts/check-workflows.mjs` 的
-`ci-go-vet` 策略钉成 **argv[1] 逐字 `./...`**（意图 = 静态分析面必须是整个 module）⇒
-`go vet -tags=… ./...` 必红。两条路都不通，因此本片**刻意不动那一步**，缺的那一半由
-`make check-tags`（对每个组合真的跑一次 `go vet`）补上。**不要**为了这一步去注册
-`GOFLAGS` 之类的环境键（`PINNED_ENV_ALLOWED_KEYS` 是白名单制，而 `GOFLAGS` 同时给出
-`-toolexec` 通道 = 在判据步骤里任意执行代码）；也**不要**为此放宽 `ci-go-vet` 的 argv 口径 ——
-若确实要让 CI 的 vet 覆盖发布态组合，那是"改守卫口径"这类需要单独评审的动作（一行：把
-`argv[1]` 换成"第一个不以 `-` 开头的词"），属于 P1 第二片或更后面的决定。
+而已有的 `scripts/check-workflows.mjs` 的 `ci-go-vet` 载荷把包面钉成 **argv[1] 逐字 `./...`**
+⇒ `go vet -tags=… ./...` 必红。两者相撞时"给 vet 加构建变体"结构上不可能，而那条策略的
+**意图**是"包面不许缩到子集"—— 与"包面之前允不允许有 flag"无关。所以 2026-10-14 把它改成
+**"第一个不以 `-` 开头的词逐字 `./...`"**，并在**同一个提交**里按纪律重登记了
+`scripts/check-root-guards.mjs` 的 `check:workflows` 摘要（`--print-digests` 复算，
+有意变更的两半必须同批）。
+
+- 放行：`go vet -tags=skills,apps,connectors ./...`；
+- 仍然红（实测）：`go vet ./cmd`、`go vet -tags=skills ./cmd` —— 第一个非 flag 词都不是 `./...`，
+  与 E-03 的缩面形态同一判据面；
+- 已知边界：`-tags x` 的**分离写法**会让"值"成为第一个非 flag 词 ⇒ 判红。这是刻意的
+  （判据不自带 flag 语法表），写法归一到 `-flag=值` 即可。
+
+**没有采用的别名**（都试过/评过，别再走一遍）：
+
+- `GOFLAGS` 环境键（`PINNED_ENV_ALLOWED_KEYS` 是白名单制）——`GOFLAGS` 同时给出 `-toolexec`
+  通道 = 在判据步骤里任意执行代码；
+- 被钉步骤上的 `env: GO_TAGS:` + `-tags=$GO_TAGS` —— 实测 `[SK-17]` 当场判红：新增一个环境键
+  要过白名单，等于让"判据步骤的构建变体由环境决定"。所以 CI 那两处是**字面量**，不是变量。
+
+**改 `ci.yml` 时踩到的两个坑**（都实测过，写给下一个人）：
+
+1. `check-workflows` 的命令位判据读的是 `run:` 的**可执行文本**（注释先被剥掉）—— 注释里写
+   历史命令不会误判，可以放心写明"为什么这么写"。
+2. 但 `check-install-integrity` 的 `CI_REFERENCED_EXECUTION_REGISTRY` 是拿正则
+   `(?:scripts|packages)/…\.(mjs|cjs|js|ts|sh|json)` 扫**整份 workflow 文本**（YAML 注释也算），
+   而且扫的是 **HEAD 字节**：在 ci.yml 的注释里写一个 `scripts/*.mjs` 路径，它会被当成
+   "CI 引用的执行体"并要求登记（改动没提交时 HEAD 未变，判据照旧用旧字节 ⇒ "我明明删了它还红"）。
+   本文提到的 `scripts/check-go-build-tags.mjs` 因此**只出现在 Makefile 与本文档里**，不进 ci.yml。
 
 ## 4. 判据在哪
 
@@ -118,5 +142,5 @@ node server/scripts/check-go-build-tags.mjs --self-test     # 只自证判据引
    被裁掉的模块该不该注册路由、接口该返回什么，是第二片的接口面决定（P0 §5 的消费契约表）。
 4. **没有哨兵串判据**：`picoaide.feature.<module>.v1` 那一族是**端到端副证**（P0 §6），
    承重的依赖图判据是本文 §4 的 ③；产物级双侧判据要等裁剪落地才有"关闭变体"可比。
-5. **CI 的 `go vet` 仍只覆盖"不带 tag"这一种组合**（§3 的原因）；发布态组合的 vet 覆盖
-   目前只在 `make check-tags` 里。
+5. **CI 只覆盖发布态组合**：`go vet` / `go test` 两步都带 `-tags=skills,apps,connectors`（全开），
+   其余组合的 build + vet 只在 `make check-tags` 里跑（尚未进 CI）。
