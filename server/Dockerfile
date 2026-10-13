@@ -48,6 +48,13 @@ ARG TARGETARCH=amd64
 # VERSION 由构建方注入(CI 传 git tag 去掉 v 前缀;本地默认 dev):
 #   cmd/server/main.go 的 var version = "dev",用 -X main.version=$VERSION 覆盖
 ARG VERSION=dev
+# 可选模块的编译期开关（2026-10-14，P1 第一片）：唯一真源 = `internal/features` 的
+# build tag 文件，模块名与渠道契约逐字一致（skills / apps / connectors）。**缺省全开** ⇒
+# 不传这个 build-arg 时镜像内容与本改造之前同源（本片只接线、不裁剪）。
+# 取值逗号分隔、不加空格；`--build-arg GO_TAGS=`（空）= 三个模块全关的变体。
+# `make docker-image` 会把自己的 `GO_TAGS`（同一份缺省值）透传过来；**必须写在包面
+# 之前**（`go` 的 flag 解析在第一个非 flag 词处停止）。
+ARG GO_TAGS=skills,apps,connectors
 COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd/ ./cmd/
@@ -58,12 +65,12 @@ COPY demoapps/ ./demoapps/
 COPY --from=webadmin /build/dist ./webadmin/dist/
 COPY webadmin/embed.go ./webadmin/
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o /out/picoaide-server ./cmd/server
+    go build -tags=$GO_TAGS -trimpath -ldflags "-s -w -X main.version=$VERSION" -o /out/picoaide-server ./cmd/server
 # WASM 应用平台的编译子进程（R19/R31）：**必须**与 server 二进制同目录 ——
 # compile.resolveChildBinary 按"自身可执行文件所在目录 + picoaide-app-compile"解析。
 # 缺它的后果：发布链路 fail-closed（启动不再 Fatal，但功能不可用）。
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -trimpath -ldflags "-s -w" -o /out/picoaide-app-compile ./cmd/picoaide-app-compile
+    go build -tags=$GO_TAGS -trimpath -ldflags "-s -w" -o /out/picoaide-app-compile ./cmd/picoaide-app-compile
 # 演示应用：目标是 **wasm32-wasip1**（不是宿主平台）。
 # 2026-09-20 起是**三个功能不同**的演示（能力全集 / 内部小论坛 / 留言板），各一份
 # 制品，清单逐条指出用哪一份（`wasm` 字段）以及窗口比例（`window`）。共用运行时
@@ -71,7 +78,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
 RUN mkdir -p /out/demo-apps \
  && for app in showcase forum board; do \
       CGO_ENABLED=0 GOOS=wasip1 GOARCH=wasm \
-        go build -trimpath -ldflags "-s -w" -o /out/demo-apps/$app.wasm ./demoapps/$app; \
+        go build -tags=$GO_TAGS -trimpath -ldflags "-s -w" -o /out/demo-apps/$app.wasm ./demoapps/$app; \
     done \
  && cp demoapps/demos.json /out/demo-apps/demos.json
 

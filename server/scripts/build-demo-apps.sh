@@ -32,6 +32,14 @@ export GOMODCACHE="${GOMODCACHE:-/root/go/pkg/mod}"
 export GOPROXY="${GOPROXY:-off}"
 mkdir -p "$GOCACHE"
 
+# 可选模块的编译期开关：与 `server/Makefile` 的 `GO_TAGS` **同一份缺省值（全开）**，
+# 唯一真源仍是 `server/internal/features` 的 build tag 文件。演示应用本身不 import
+# 任何可选模块，这里接线是为了"构建入口不留一处不传 tags 的口子"——
+# 否则将来某个演示应用一旦依赖可选包，它的 wasm 产物就会与宿主二进制不同组合。
+# 注意：`-tags=` 必须写在包面**之前**（`go` 的 flag 解析在第一个非 flag 词处停止）。
+GO_TAGS="${GO_TAGS:-skills,apps,connectors}"
+GO_TAG_FLAG="-tags=$GO_TAGS"
+
 fail() { echo "✗ $*" >&2; exit 1; }
 
 for app in "${APPS[@]}"; do
@@ -48,8 +56,8 @@ for app in "${APPS[@]}"; do
   raw="$out_dir/$app.wasm"
   packed="$out_dir/$app-packed.wasm"
 
-  echo "→ 编译 $app（wasm32-wasip1）"
-  ( cd "$SERVER" && GOOS=wasip1 GOARCH=wasm go build -trimpath -ldflags "-s -w" -o "$raw" "./demoapps/$app" )
+  echo "→ 编译 $app（wasm32-wasip1，-tags=$GO_TAGS）"
+  ( cd "$SERVER" && GOOS=wasip1 GOARCH=wasm go build $GO_TAG_FLAG -trimpath -ldflags "-s -w" -o "$raw" "./demoapps/$app" )
 
   echo "→ 打包前端资源 $app"
   node "$PACK" --in "$raw" --out "$packed.$$" \
