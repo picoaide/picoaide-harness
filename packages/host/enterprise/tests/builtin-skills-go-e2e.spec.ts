@@ -149,6 +149,10 @@ it.skipIf(!enabled)('服务端（Go）打的包 → 真安装器 → <dshHome>/s
   expect(entries).toContain('SKILL.md')
   expect(entries).toContain('references/publishing.md')
   expect(entries).toContain('examples/go/main.go')
+  // 构建期由中性源**注入**技能目录的文件也必须在包里（2026-10-13 打包器解耦）：它不在
+  // `server/skills/` 源树上，只由 `server/Dockerfile` 注入 —— 出口若打的是源树，员工装到的
+  // 技能就缺这个文件，而技能文档仍按这个相对路径引用它。
+  expect(entries).toContain('scripts/pack-assets.mjs')
   expect(entries.every(p => !p.startsWith('/') && !p.split('/').includes('..'))).toBe(true)
 
   vi.stubGlobal('fetch', vi.fn(async (url: string | URL) => {
