@@ -931,3 +931,44 @@ func TestRealDBGateNeverSilentlySkipsWhenReachable(t *testing.T) {
 		t.Fatal("dsnTarget 回显了口令")
 	}
 }
+
+// 门户下载区按渠道声明的交付平台收窄(2026-10-13):未声明的平台**整块不渲染**，
+// 而不是渲染成一张"该平台暂无可用安装包"的灰卡片 —— 后者会让客户以为是我们漏打包。
+func TestPortalDownloadsFollowDeclaredPlatforms(t *testing.T) {
+	withPortalReleaseDir(t)
+	t.Setenv(clientrelease.PublicBaseURLEnv, "")
+
+	// 渠道只交付 win + mac（镜像里也只有这两份安装包：装配期已经过滤过）。
+	dir := writeChannelDirRaw(t, `{"schema":1,"channel_id":"acme","identity":{"display_name":"Acme"},
+		"desktop":{"app_origin_scheme":"acme-app","platforms":["win","mac"]}}`)
+	pointChannelDir(t, dir)
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/portal", nil)
+	c.Request.Host = "ai.example.com"
+	c.Request.Header.Set("X-Forwarded-Proto", "https")
+
+	items, note := portalDownloads(c, nil)
+	if note != "" {
+		t.Fatalf("安全来源不该有说明: %q", note)
+	}
+	if len(items) != 2 {
+		t.Fatalf("只声明了 win+mac ⇒ 只应渲染 2 块下载区,实际 %d: %+v", len(items), items)
+	}
+	if items[0].Name != "Windows" || items[1].Name != "macOS" {
+		t.Fatalf("渲染顺序应是 Windows → macOS,实际 %q → %q", items[0].Name, items[1].Name)
+	}
+	for _, p := range items {
+		if p.URL == "" {
+			t.Errorf("%s 应有下载地址(安全来源 + 镜像里有该平台安装包),实际为空(meta=%q)", p.Name, p.Meta)
+		}
+	}
+	// 未声明的平台连"暂无可用安装包"都不该出现 —— 这条是本次改动的核心语义。
+	for _, p := range items {
+		if p.Name == "Linux" {
+			t.Fatalf("未声明的平台不得出现在下载区: %+v", items)
+		}
+	}
+}

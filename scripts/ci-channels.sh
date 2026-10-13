@@ -54,6 +54,9 @@ DEST="channels"
 LIST="channels.list"
 RESOLVE_ONLY=0
 PIN="${CI_CHANNELS_PIN:-}"
+# 官方渠道"模板完整性"判据的开关（2026-10-13）。CI 的取渠道包步骤带上它：
+# 官方渠道是后续新增渠道的模板，必须逐键显式声明；合成夹具不带，因此不必构造完整模板。
+REQUIRE_TEMPLATE=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -61,6 +64,7 @@ while [ $# -gt 0 ]; do
     --list) LIST="$2"; shift 2 ;;
     --pin) PIN="${2:-}"; shift 2 ;;
     --resolve-only) RESOLVE_ONLY=1; shift ;;
+    --require-template) REQUIRE_TEMPLATE=1; shift ;;
     *) echo "ci-channels: 未知参数 $1" >&2; exit 2 ;;
   esac
 done
@@ -651,21 +655,40 @@ if ! CHANNEL_ASSET_FILES="$(node -e '
     if (!files || typeof files.logo !== "string" || typeof files.appIcon !== "string") {
       throw new Error("CHANNEL_ASSET_FILES 形态不对")
     }
-    process.stdout.write(`${files.logo}\t${files.appIcon}`)
+    // 平台交付面与"官方模板键"同一处取(2026-10-13):本函数必须**恰好一处**
+    // `node -e … <常量模块>.ts` 取常量 —— 根守卫按这个形状抽调用并在"没有
+    // node_modules 的检出"里实跑它（release job 的真实条件）。多一处就会只覆盖到
+    // 其中一个（守卫会当场红），所以四段一起输出、由 shell 拆。
+    const tokens = mod.CHANNEL_PLATFORMS
+    const keys = mod.CHANNEL_TEMPLATE_KEYS
+    if (!Array.isArray(tokens) || tokens.length === 0) throw new Error("CHANNEL_PLATFORMS 为空")
+    if (!Array.isArray(keys) || keys.length === 0) throw new Error("CHANNEL_TEMPLATE_KEYS 为空")
+    process.stdout.write(`${files.logo}\t${files.appIcon}\t${tokens.join(",")}\t${keys.join(",")}`)
   }).catch((error) => {
     console.error(`channel-asset-files: ${error instanceof Error ? error.message : String(error)}`)
     process.exit(1)
   })
 ' "$REPO_ROOT/packages/host/desktop/scripts/channel-constants.ts")"; then
-  echo "::error::读不到渠道素材文件名清单(packages/host/desktop/scripts/channel-constants.ts 的 CHANNEL_ASSET_FILES)" >&2
+  echo "::error::读不到渠道常量(素材文件名 / 平台 token / 官方模板键；packages/host/desktop/scripts/channel-constants.ts)" >&2
   exit 1
 fi
 LOGO_FILE_NAME="${CHANNEL_ASSET_FILES%%$'\t'*}"
-APP_ICON_FILE_NAME="${CHANNEL_ASSET_FILES##*$'\t'}"
+CHANNEL_ASSET_REST="${CHANNEL_ASSET_FILES#*$'\t'}"
+APP_ICON_FILE_NAME="${CHANNEL_ASSET_REST%%$'\t'*}"
+CHANNEL_ASSET_REST="${CHANNEL_ASSET_REST#*$'\t'}"
+CHANNEL_PLATFORM_TOKENS="${CHANNEL_ASSET_REST%%$'\t'*}"
+CHANNEL_TEMPLATE_KEY_LIST="${CHANNEL_ASSET_REST#*$'\t'}"
 if [ -z "$LOGO_FILE_NAME" ] || [ -z "$APP_ICON_FILE_NAME" ] || [ "$LOGO_FILE_NAME" = "$APP_ICON_FILE_NAME" ]; then
   echo "::error::渠道素材文件名清单为空/同值 —— 逐渠道的素材必需集判据靠它派生,不能猜测" >&2
   exit 1
 fi
+if [ -z "$CHANNEL_PLATFORM_TOKENS" ] || [ -z "$CHANNEL_TEMPLATE_KEY_LIST" ]; then
+  echo "::error::平台 token / 模板键清单为空 —— desktop.platforms 的取值校验与官方模板判据都靠它们派生" >&2
+  exit 1
+fi
+export CHANNEL_PLATFORM_TOKENS CHANNEL_TEMPLATE_KEY_LIST
+export CHANNEL_REQUIRE_TEMPLATE="$REQUIRE_TEMPLATE"
+export CHANNEL_REQUIRE_TEMPLATE="$REQUIRE_TEMPLATE"
 for id in "${SELECTED[@]}"; do
   manifest="$DEST/$id/channel.json"
   # channel.json 与素材同一条规则(2026-09-26 审计 W5-01 的同族):必须是**普通
@@ -842,6 +865,46 @@ for id in "${SELECTED[@]}"; do
     const speechBundleModel = cfg?.desktop?.speech_bundle_model
     if (speechBundleModel !== undefined && typeof speechBundleModel !== "boolean") {
       invalid.push("desktop.speech_bundle_model(须为布尔;缺省=true 随包,显式 false 关闭)")
+    }
+    // ---- desktop.platforms:本渠道交付哪些客户端平台(2026-10-13)----
+    //
+    // 语义:缺省 = 三端全交付(向后兼容:既有渠道不写这个键,行为逐字节不变);
+    // 写了就必须是**合法子集**。写错的两种后果都在客户机器上才暴露:
+    //   · 多写一个不存在的 token ⇒ 交付面静默收窄成"没有该平台"(门户少一块、
+    //     更新清单少一个键);
+    //   · 少写/写错 ⇒ 该平台明明不交付却仍进镜像与更新面。
+    // **取值刻意不回显**(可能是任意字符串) —— 只报字段名与合法取值来源。
+    const KNOWN_PLATFORMS = (process.env.CHANNEL_PLATFORM_TOKENS || "").split(",").filter(Boolean)
+    const rawPlatforms = cfg?.desktop?.platforms
+    if (rawPlatforms !== undefined) {
+      if (!Array.isArray(rawPlatforms)) {
+        invalid.push("desktop.platforms(须是数组,如 [\"win\", \"mac\"])")
+      } else {
+        const picked = rawPlatforms.map(v => (typeof v === "string" ? v.trim().toLowerCase() : ""))
+        if (picked.some(v => v === "")) {
+          invalid.push("desktop.platforms(每项必须是非空字符串)")
+        } else if (new Set(picked).size !== picked.length) {
+          invalid.push("desktop.platforms(不得重复)")
+        } else if (!picked.every(v => KNOWN_PLATFORMS.includes(v))) {
+          invalid.push("desktop.platforms(含未登记的平台名;合法取值见 packages/host/desktop/scripts/channel-constants.ts 的 CHANNEL_PLATFORMS,取值不回显)")
+        }
+      }
+    }
+    // ---- 官方渠道 = 新增渠道的模板:必须逐键显式(2026-10-13 用户定案)----
+    //
+    // 新增渠道的动作是"拷贝官方目录 → 改身份字段 → 裁剪交付面"。官方配置里缺键,
+    // 那几个键就藏在代码兜底值里:复制出来的渠道会带着看不见的继承行为,而且要翻源码
+    // 才知道有哪些键存在。所以 CI 取渠道包时带 `--require-template`,对**官方**渠道逐键
+    // 检查;键表在 channel-constants.ts 的 CHANNEL_TEMPLATE_KEYS(**故意不含**三个
+    // speech_* 覆盖型键:它们是"不写=随包默认",写进模板等于把路径钉死)。
+    // 只对 official 生效:品牌渠道按自己的交付面裁剪,不要求与模板同形。
+    const templateMissing = []
+    if (id === "official" && process.env.CHANNEL_REQUIRE_TEMPLATE === "1") {
+      const templateKeys = (process.env.CHANNEL_TEMPLATE_KEY_LIST || "").split(",").filter(Boolean)
+      const pickPath = (obj, path) => path.split(".").reduce((acc, seg) => (acc !== null && typeof acc === "object" ? acc[seg] : undefined), obj)
+      for (const key of templateKeys) {
+        if (pickPath(cfg, key) === undefined) templateMissing.push(key)
+      }
     }
     // 声明的素材文件必须存在(否则客户端/服务端会拿到死链或被忽略的配置)。
     //
@@ -1044,7 +1107,10 @@ for id in "${SELECTED[@]}"; do
       // "对比私有仓的 assets 键"排查，不靠公开日志。
       console.error("::warning::渠道包里有 " + unknownAssetKeys + " 个未知素材字段(已忽略,可能是拼写错误;键名不回显): assets.<unknown>")
     }
-    if (missing.length > 0 || invalid.length > 0) {
+    if (templateMissing.length > 0) {
+      console.error("::error::官方渠道配置缺少模板键: " + templateMissing.join(", ") + " —— 官方渠道是新增渠道的模板(拷贝 → 改身份字段 → 裁剪交付面);缺键意味着那几个键藏在代码兜底值里:复制出来的渠道会带着看不见的继承行为(少写 slug 就回落厂商包名、少写 home_dir 就共用数据根),而且要翻源码才知道有哪些键。请逐键补齐 —— 值取现行兜底值,因此显式化本身不改变任何行为")
+    }
+    if (missing.length > 0 || invalid.length > 0 || templateMissing.length > 0) {
       if (missing.length > 0) {
         console.error("::error::渠道包缺少必需字段: " + missing.join(", ") + " —— 品牌字段缺失时客户端登录页/侧边栏在服务端不可达会回落中性占位/厂商名;desktop.app_origin_scheme 缺失时 WASM 应用的协议 origin 没有权威来源(服务端与客户端必须显式一致,派生缺省只允许存在于本地开发)。请补齐后重新发布")
       }

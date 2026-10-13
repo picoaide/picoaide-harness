@@ -69,6 +69,14 @@ type Config struct {
 		// 上的请求转成平台信封,平台要用**同一个** scheme 组装"自身源"做跨源写判据,
 		// 并对信封里的 host 做逐字符校验。两端 scheme 不一致 ⇒ 所有非幂等请求 403。
 		AppOriginScheme string `json:"app_origin_scheme"`
+		// Platforms 是本渠道**实际交付**的客户端平台(2026-10-13,渠道配置
+		// `desktop.platforms`);缺省 = 三端全交付(向后兼容,既有渠道行为不变)。
+		//
+		// 服务端只用它决定**门户页渲染哪些下载卡片**:镜像里本来就只有声明过的平台
+		// 安装包(构建期过滤),所以"平台没声明"与"平台没有安装包"在产物上是同一件事;
+		// 这里再按配置收窄一次,是为了让**没声明的平台整块不出现**,而不是渲染成一张
+		// "该平台暂无可用安装包"的灰卡片(那会让客户以为是我们漏打包)。
+		Platforms []string `json:"platforms"`
 	} `json:"desktop"`
 }
 
@@ -211,6 +219,63 @@ func AppOriginScheme() (string, error) {
 		return "", fmt.Errorf("渠道配置的 desktop.app_origin_scheme 不得与 desktop.deep_link_scheme 同值（都是 %q）", scheme)
 	}
 	return scheme, nil
+}
+
+// DefaultClientPlatforms 是渠道**没有**声明 `desktop.platforms` 时的客户端交付面:
+// 三端全交付(向后兼容 —— 既有渠道与 official/beta 都不写这个键,缺省必须让它们的
+// 行为逐字节不变)。要与官方渠道共用一个数据根的 beta 同理:交付面不同不代表数据面
+// 可以不同。
+//
+// 顺序与客户端 `channel-constants.ts` 的 `CLIENT_PLATFORM_ASSETS` 一致,门户下载区
+// 按这个顺序渲染(改这里要连它一起改,否则两端渲染顺序会分叉)。
+var DefaultClientPlatforms = []string{"mac", "win", "linux"}
+
+// clientPlatformTokens 是合法 token 集合。**真源在客户端**的
+// `channel-constants.ts`（CHANNEL_PLATFORMS）;构建期由 `ci-channels.sh` 拿它校验,
+// 服务端这里只是运行期容错解析,不构成第二份权威。
+var clientPlatformTokens = map[string]bool{"mac": true, "win": true, "linux": true}
+
+// ClientPlatforms 返回本渠道实际交付的客户端平台 token（渠道配置 `desktop.platforms`）。
+//
+// 语义（与构建期、客户端的同一份口径）:
+//   - 缺省 / 空数组 / 全是未登记的 token ⇒ **三端全交付**。取"收敛到全交付"而不是
+//     "收敛到空":写错一个词就把交付面清空会让门户下载区与更新面同时消失,而那是
+//     不可自愈的(客户看不到任何安装包);构建期已经对未知取值 fail-loud,运行期
+//     不该再因为一个没见过的平台名放大成整块消失。
+//   - 合法 token 保序去重;未知 token 丢弃。
+func ClientPlatforms() []string {
+	declared := Load().Desktop.Platforms
+	if len(declared) == 0 {
+		return append([]string(nil), DefaultClientPlatforms...)
+	}
+	out := make([]string, 0, len(declared))
+	seen := make(map[string]bool, len(declared))
+	for _, raw := range declared {
+		token := strings.ToLower(strings.TrimSpace(raw))
+		if !clientPlatformTokens[token] || seen[token] {
+			continue
+		}
+		seen[token] = true
+		out = append(out, token)
+	}
+	if len(out) == 0 {
+		return append([]string(nil), DefaultClientPlatforms...)
+	}
+	return out
+}
+
+// SupportsClientPlatform 报告本渠道是否交付 token 对应的客户端平台。
+//
+// 门户下载区用它决定**整块渲不渲染**:没声明的平台不是"暂无可用安装包"那种可恢复
+// 状态,而是这个渠道根本不提供 —— 渲染成灰卡片会让客户以为是我们漏打包。
+func SupportsClientPlatform(token string) bool {
+	needle := strings.ToLower(strings.TrimSpace(token))
+	for _, candidate := range ClientPlatforms() {
+		if candidate == needle {
+			return true
+		}
+	}
+	return false
 }
 
 // Dir 渠道目录(测试可改)。

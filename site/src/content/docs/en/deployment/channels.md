@@ -92,6 +92,35 @@ every channel**: missing / invalid / identical to the deep-link scheme / duplica
 also provide the logo and app icon: missing assets are caught by the packaging checks instead of
 producing an installer that carries the vendor icon.
 
+### Which platforms a channel ships (`desktop.platforms`)
+
+A channel package ships **all three platforms** (Windows / macOS / Linux) by default. If only some of
+them are needed, declare the delivery surface in the channel configuration:
+
+```json
+"desktop": { "platforms": ["win", "mac"] }
+```
+
+- The only valid values are `win` / `mac` / `linux`; **omitting the key means all three** (existing
+  channels keep their exact behaviour);
+- Declaring it narrows **four places at once**: the platform jobs skip packaging undeclared platforms →
+  the private R2 transfer only moves the declared ones → the image assembly only carries them
+  (a declared platform with no artefact makes the build **fail**, rather than silently dropping an
+  entry) → the portal download section and `GET /api/client/v2/updates/manifest` no longer list them;
+- An undeclared platform is **omitted entirely** from the portal (not shown as a grey
+  "no installer available yet" card, which would look like we forgot to build it);
+- Dropping a platform saves one installer per version (Linux ≈ 350 MiB, macOS ≈ 380 MiB,
+  Windows ≈ 430 MiB), and since each channel keeps the latest plus the previous version on the update
+  server, the saving is **doubled**.
+
+> **The official channel is the template for new channels**: CI validates that
+> `channels/official/channel.json` declares **every key explicitly** (the key list lives in
+> `packages/host/desktop/scripts/channel-constants.ts` as `CHANNEL_TEMPLATE_KEYS`); a missing key fails
+> the build and names it. So adding a channel = copy `channels/official/` → change the identity fields
+> → trim `desktop.platforms`, without reading source code to discover which keys exist. The three
+> `desktop.speech_*` keys are **overrides** (absent = use the bundled model) and are deliberately not
+> part of the template — putting them in would pin the paths.
+
 ### Getting the speech model into a customer network (`desktop.speech_*`)
 
 Speech input runs locally, and **the model weights ship with the client by default**

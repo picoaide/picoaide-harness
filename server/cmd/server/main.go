@@ -646,19 +646,35 @@ func portalDownloads(c *gin.Context, settings map[string]string) ([]portal.Platf
 		return portal.Platform{Name: name, Meta: meta, URL: url}
 	}
 
-	platforms := []portal.Platform{
-		item("Windows", "x64 · .exe 安装程序", settings["portal.client_download_win"], "win-x64"),
+	// 平台卡片表:顺序 = 渲染顺序。token 与客户端 `channel-constants.ts` 的
+	// CHANNEL_PLATFORMS 同源,assetKey 与运行期读清单的 `desktop-release.ts` 同源,
+	// settings 键由 token 派生(`portal.client_download_<token>`)。
+	//
+	// **未声明的平台整块不渲染**(2026-10-13):渠道配置 `desktop.platforms` 决定交付面,
+	// 镜像里本来也只有声明过的平台安装包 —— 此时再画一张"该平台暂无可用安装包"的灰卡片,
+	// 客户会以为是我们漏打包,而真相是这个渠道不提供该平台。
+	platforms := make([]portal.Platform, 0, 3)
+	// 有平台因来源不安全而失去内置入口(且管理员没配自有地址)→ 说明原因。
+	needsOriginNote := false
+	for _, card := range []struct{ token, name, meta, assetKey string }{
+		{"win", "Windows", "x64 · .exe 安装程序", "win-x64"},
 		// macOS 只出 Apple 芯片(arm64)包(见 desktop package.json 的 build.mac.arch):
 		// 文案必须写明,否则 Intel Mac 用户会下到一个装不上的包。
-		item("macOS", "Apple 芯片 (M 系列) · .dmg 磁盘映像", settings["portal.client_download_mac"], "mac-universal"),
-		item("Linux", "x64 · .AppImage / .deb", settings["portal.client_download_linux"], "linux-x64"),
+		{"mac", "macOS", "Apple 芯片 (M 系列) · .dmg 磁盘映像", "mac-universal"},
+		{"linux", "Linux", "x64 · .AppImage / .deb", "linux-x64"},
+	} {
+		if !channel.SupportsClientPlatform(card.token) {
+			continue
+		}
+		configured := settings["portal.client_download_"+card.token]
+		if !origin.OK() && pick(configured) == "" {
+			needsOriginNote = true
+		}
+		platforms = append(platforms, item(card.name, card.meta, configured, card.assetKey))
 	}
 
-	// 有平台因来源不安全而失去内置入口(且管理员没配自有地址)→ 说明原因。
 	note := ""
-	if !origin.OK() && (pick(settings["portal.client_download_win"]) == "" ||
-		pick(settings["portal.client_download_mac"]) == "" ||
-		pick(settings["portal.client_download_linux"]) == "") {
+	if needsOriginNote {
 		note = "本服务端当前无法提供安全(https)的安装包地址:" + origin.Reason + "。"
 	}
 	return platforms, note

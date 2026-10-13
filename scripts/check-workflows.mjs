@@ -5373,7 +5373,10 @@ const REGISTERED_RELEASE_STEPS = [
     require: ['scripts/ci-channels.sh'],
     // argv 白名单（FF-B 残留 R1 的**现场形态**）：这一步必须做**全量取包**；
     // 换成 `ci-channels.sh --resolve-only`（只解析 pin、不落盘渠道包）此前两条接线判据全绿。
-    argv: [{ script: 'scripts/ci-channels.sh', allow: [[]] }],
+    // 2026-10-13 起还要求带 `--require-template`：官方渠道是新增渠道的模板，逐键显式的判据
+    // 只在带这个旗标时跑（合成夹具不带 ⇒ 夹具不必构造完整模板；"判据形态 = 生产形态"由这条
+    // 登记钉住 —— 把旗标摘掉当场红）。
+    argv: [{ script: 'scripts/ci-channels.sh', allow: [['--require-template']] }],
     why: '渠道发现:发布面按渠道逐个构建,跳过后官方之外的渠道零交付',
   },
   {

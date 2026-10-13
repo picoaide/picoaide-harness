@@ -150,7 +150,7 @@ platform_table() {
     import(require("node:url").pathToFileURL(process.argv[1]).href).then((mod) => {
       const assets = mod.CLIENT_PLATFORM_ASSETS
       if (!Array.isArray(assets) || assets.length === 0) throw new Error("CLIENT_PLATFORM_ASSETS 为空")
-      for (const asset of assets) process.stdout.write(`${asset.key}\t${asset.glob}\t${asset.label}\n`)
+      for (const asset of assets) process.stdout.write(`${asset.key}\t${asset.glob}\t${asset.label}\t${asset.platform}\n`)
     }).catch((error) => {
       console.error(`platform_table: ${error instanceof Error ? error.message : String(error)}`)
       process.exit(1)
@@ -159,9 +159,34 @@ platform_table() {
 }
 if ! PLATFORM_TABLE="$(platform_table)" || [ -z "$PLATFORM_TABLE" ]; then
   echo "::error::读不到客户端平台清单(packages/host/desktop/scripts/channel-constants.ts 的 CLIENT_PLATFORM_ASSETS)" >&2
-  echo "::error::中转的「三平台齐全」判据靠它派生,读不到就不能假装产物齐全" >&2
+  echo "::error::中转的「平台齐全」判据靠它派生,读不到就不能假装产物齐全" >&2
   exit 1
 fi
+# 平台 token 列表与"本渠道声明了哪些平台"的读取器(2026-10-13 渠道平台配置)。
+#
+# 渠道配置 `desktop.platforms` 决定交付面,缺省 = 三端全交付。中转两侧都按它收窄:
+#   · push:非声明平台的产物**不上传**(桶是公开读的,少一份对象就少一份暴露面);
+#   · pull:齐全判据只要求**声明过的**平台(否则声明 win+mac 的渠道永远判"缺 Linux",
+#     而那条缺平台的红是假红 —— 它要求的平台本来就不该存在)。
+PLATFORM_TOKENS="$(printf '%s\n' "$PLATFORM_TABLE" | cut -f4 | tr '\n' ',' | sed 's/,$//')"
+channel_platforms() { # $1 = 渠道 id;输出一行一个 token(缺省=全部)
+  node -e '
+    const fs = require("node:fs")
+    const all = process.argv[2].split(",").filter(Boolean)
+    let declared = []
+    try {
+      const cfg = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
+      const raw = cfg && cfg.desktop ? cfg.desktop.platforms : undefined
+      if (Array.isArray(raw)) declared = raw.map(v => String(v).trim().toLowerCase())
+    } catch {
+      declared = []
+    }
+    const known = new Set(all)
+    const picked = [...new Set(declared.filter(v => known.has(v)))]
+    process.stdout.write((picked.length > 0 ? picked : all).join("\n"))
+  ' "channels/$1/channel.json" "$PLATFORM_TOKENS"
+}
+is_declared_platform() { printf '%s\n' "$2" | grep -qxF "$1"; }
 
 aws_checked() {  # 输出先捕获、经脱敏后再打印(公开日志里不得出现品牌)
   if ! brand_run_checked aws_cmd "$@"; then
@@ -195,6 +220,21 @@ for id in "${CHANNELS[@]}"; do
     push)
       [ -d "$STAGE/$id" ] || { echo "::error::渠道 ${INDEX}/${TOTAL} 没有可中转的产物目录" >&2; exit 1; }
       [ -n "$(ls -A "$STAGE/$id" 2>/dev/null)" ] || { echo "::error::渠道 ${INDEX}/${TOTAL} 的产物目录为空" >&2; exit 1; }
+      # 只中转本渠道**声明过**的平台(2026-10-13 渠道平台配置):三个平台 job 都会为
+      # 每个渠道产出产物,而声明 win+mac 的渠道没有理由把 Linux 包也推上公开读的桶。
+      declared_platforms="$(channel_platforms "$id")" || {
+        echo "::error::渠道 ${INDEX}/${TOTAL} 读不出平台声明(desktop.platforms)" >&2
+        exit 1
+      }
+      while IFS=$'\t' read -r _key glob _label platform; do
+        [ -n "$platform" ] || continue
+        if is_declared_platform "$platform" "$declared_platforms"; then continue; fi
+        rm -f "$STAGE/$id"/$glob
+      done <<< "$PLATFORM_TABLE"
+      [ -n "$(ls -A "$STAGE/$id" 2>/dev/null)" ] || {
+        echo "::error::渠道 ${INDEX}/${TOTAL} 的产物在按平台声明过滤后为空(声明与实际产物不一致)" >&2
+        exit 1
+      }
       # --only-show-errors:aws 默认会回显每个对象的 key(含品牌文件名)。
       # 路径形态一律用**规范写法**:本地目录源不带 `/.`,S3 侧统一尾斜杠前缀。
       # 反例是 `s3://bucket/prefix/.` —— 真实 aws CLI 把它当字面前缀列出、匹配不到
@@ -214,9 +254,18 @@ for id in "${CHANNELS[@]}"; do
       # /updates/client/<安装包名> 404,而流水线全绿。平台清单与镜像装配同源
       # (见上面的 PLATFORM_TABLE),缺任一即 fail-loud 并点名平台。
       # 报错只报平台标签与序号,不回显渠道 id / 文件名(公开日志纪律)。
+      # 2026-10-13:判据面收窄到**渠道声明的平台**(desktop.platforms,缺省三端)。
+      # 不收窄的话,声明 win+mac 的渠道会恒红在"缺 Linux"—— 而那个平台本来就不该
+      # 存在,是假红;假红会逼出"把判据删掉"这种更坏的处置。
+      # 报错只报平台标签与序号,不回显渠道 id / 文件名(公开日志纪律)。
+      declared_platforms="$(channel_platforms "$id")" || {
+        echo "::error::渠道 ${INDEX}/${TOTAL} 读不出平台声明(desktop.platforms)" >&2
+        exit 1
+      }
       missing_platforms=""
-      while IFS=$'\t' read -r key glob label; do
+      while IFS=$'\t' read -r key glob label platform; do
         [ -n "$key" ] || continue
+        if ! is_declared_platform "$platform" "$declared_platforms"; then continue; fi
         found=0
         for candidate in "$TO/$id"/$glob; do
           [ -f "$candidate" ] && found=1 && break
@@ -225,8 +274,8 @@ for id in "${CHANNELS[@]}"; do
       done <<< "$PLATFORM_TABLE"
       if [ -n "$missing_platforms" ]; then
         echo "::error::渠道 ${INDEX}/${TOTAL} 的中转产物缺少平台:${missing_platforms}" >&2
-        echo "::error::客户端交付面是三平台各一份安装包;少平台的包装到客户机上就是「没有对应平台的安装包」," >&2
-        echo "::error::而镜像清单/门户/更新清单只会静默少一个入口。请核对该渠道三平台 job 是否都产出了产物。" >&2
+        echo "::error::渠道声明的每个平台都应有一份安装包;少平台的包装到客户机上就是「没有对应平台的安装包」," >&2
+        echo "::error::而镜像清单/门户/更新清单只会静默少一个入口。请核对该渠道各平台 job 是否都产出了产物。" >&2
         exit 1
       fi
       ;;

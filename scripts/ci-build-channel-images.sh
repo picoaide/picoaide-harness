@@ -67,7 +67,7 @@ platform_table() {
     import(require("node:url").pathToFileURL(process.argv[1]).href).then((mod) => {
       const assets = mod.CLIENT_PLATFORM_ASSETS
       if (!Array.isArray(assets) || assets.length === 0) throw new Error("CLIENT_PLATFORM_ASSETS 为空")
-      for (const asset of assets) process.stdout.write(`${asset.key}\t${asset.glob}\t${asset.label}\n`)
+      for (const asset of assets) process.stdout.write(`${asset.key}\t${asset.glob}\t${asset.label}\t${asset.platform}\n`)
     }).catch((error) => {
       console.error(`platform_table: ${error instanceof Error ? error.message : String(error)}`)
       process.exit(1)
@@ -81,6 +81,33 @@ if ! PLATFORM_TABLE="$(platform_table)" || [ -z "$PLATFORM_TABLE" ]; then
 fi
 # 供镜像内断言用:键列表(空格分隔),作为 sh -c 的位置参数传进去,内层脚本零插值。
 PLATFORM_KEYS="$(printf '%s\n' "$PLATFORM_TABLE" | cut -f1 | tr '\n' ' ')"
+# 平台 token 列表(逗号分隔)与"本渠道声明了哪些平台"的读取器。
+#
+# 渠道配置 `desktop.platforms` 决定**这个渠道交付哪些平台**(2026-10-13):缺省 =
+# 三端全交付(既有渠道行为不变)。镜像装配按它收窄 —— 非声明平台的安装包一律不进
+# 镜像,声明了却没产物的平台 fail-loud(把"少一个平台"从静默变红,沿袭 2026-09-26
+# 审计 Z3-2 的口径)。
+PLATFORM_TOKENS="$(printf '%s\n' "$PLATFORM_TABLE" | cut -f4 | tr '\n' ',' | sed 's/,$//')"
+channel_platforms() { # $1 = 渠道 id;输出一行一个 token(缺省=全部)
+  node -e '
+    const fs = require("node:fs")
+    const all = process.argv[2].split(",").filter(Boolean)
+    let declared = []
+    try {
+      const cfg = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
+      const raw = cfg && cfg.desktop ? cfg.desktop.platforms : undefined
+      if (Array.isArray(raw)) declared = raw.map(v => String(v).trim().toLowerCase())
+    } catch {
+      declared = []
+    }
+    const known = new Set(all)
+    const picked = [...new Set(declared.filter(v => known.has(v)))]
+    process.stdout.write((picked.length > 0 ? picked : all).join("\n"))
+  ' "channels/$1/channel.json" "$PLATFORM_TOKENS"
+}
+is_declared_platform() { # $1 = token,$2 = 已解析的声明列表(换行分隔)
+  printf '%s\n' "$2" | grep -qxF "$1"
+}
 
 INDEX=0
 for channel in "${CHANNELS[@]}"; do
@@ -93,17 +120,31 @@ for channel in "${CHANNELS[@]}"; do
   #    **Linux 只放 AppImage,不放 .deb**(2026-09-10 定案):两者是同一个应用的两种
   #    打包,员工装一个就够;deb 常年没人下载,却给每个渠道的镜像白加 ~115MB。
   #    CI 仍会把 deb 作为构建产物上传(开发者本地/PR 可用),只是不进镜像。
+  if ! DECLARED_PLATFORMS="$(channel_platforms "$channel")" || [ -z "$DECLARED_PLATFORMS" ]; then
+    echo "::error::渠道 ${INDEX}/${TOTAL} 读不出平台声明(desktop.platforms):配置缺失/不可读时不允许猜交付面" >&2
+    exit 1
+  fi
+
   rm -rf client-assets
   mkdir -p client-assets/client
   if [ -d "$ARTIFACTS/$channel" ]; then
     cp -a "$ARTIFACTS/$channel/." client-assets/client/
     rm -f client-assets/client/*.deb
   fi
+  # 非声明平台的安装包**不进镜像**（2026-10-13 渠道平台配置）。上游三个平台 job 仍会
+  # 为每个渠道产出全部平台（打包跳过是另一层优化），这里是"交付面 = 渠道声明"的收口点：
+  # 不删就等于把没声明的平台也发出去（镜像变大，且门户/更新清单少一层控制）。
+  while IFS=$'\t' read -r _key glob _label platform; do
+    [ -n "$platform" ] || continue
+    if is_declared_platform "$platform" "$DECLARED_PLATFORMS"; then continue; fi
+    rm -f client-assets/client/$glob
+  done <<< "$PLATFORM_TABLE"
   if [ -z "$(ls -A client-assets/client)" ]; then
     # 只报序号,不回显渠道 id 与路径 —— 不依赖 ::add-mask:: 兜底(掩码是"从发出
     # 那一刻起"生效的,消息里少写一个 id 就少一层依赖)。
-    echo "::error::渠道 ${INDEX}/${TOTAL} 没有任何客户端安装包(该渠道的 artifacts 目录为空)" >&2
+    echo "::error::渠道 ${INDEX}/${TOTAL} 没有任何客户端安装包(该渠道的 artifacts 目录为空,或产物全是未声明平台)" >&2
     echo "::error::客户端随镜像分发是单包交付的核心;缺客户端说明桌面 job 没有产出" >&2
+    echo "::error::若产物都被平台声明过滤掉了:请核对渠道配置 desktop.platforms 与三个平台 job 的产物" >&2
     exit 1
   fi
 
@@ -135,8 +176,19 @@ for channel in "${CHANNELS[@]}"; do
         "$(sha256sum "client-assets/client/$2" | cut -d' ' -f1)" \
         "$(stat -c%s "client-assets/client/$2")"
     }
-    while IFS=$'\t' read -r key glob label; do
+    while IFS=$'\t' read -r key glob label platform; do
       [ -n "$key" ] || continue
+      if ! is_declared_platform "$platform" "$DECLARED_PLATFORMS"; then
+        # 没声明的平台不该有产物(上面已经删过一轮,这里再判一次即"删除失败也不能出厂")。
+        for candidate in client-assets/client/$glob; do
+          if [ -f "$candidate" ]; then
+            echo "::error::渠道 ${INDEX}/${TOTAL} 带了未声明平台(${label})的安装包 —— 渠道配置没声明它,镜像里就不该有它。" >&2
+            echo "::error::请在渠道配置 desktop.platforms 里声明该平台,或核对该平台的产物为何被归集到本渠道" >&2
+            exit 1
+          fi
+        done
+        continue
+      fi
       # 通配在**目录不存在**时会原样返回模式串,所以先判 -f(而不是判字符串非空)。
       platform_file=""
       for candidate in client-assets/client/$glob; do
@@ -145,8 +197,8 @@ for channel in "${CHANNELS[@]}"; do
       if [ -z "$platform_file" ]; then
         # 报错只报序号 + 平台标签 + 通配,不回显渠道 id 与文件名(公开日志纪律)。
         echo "::error::渠道 ${INDEX}/${TOTAL} 缺少 ${label} 的客户端安装包(通配 ${glob})。" >&2
-        echo "::error::客户端交付面是三平台各一份安装包;缺平台的清单会让更新面/门户静默少一个平台," >&2
-        echo "::error::必须核对三个 desktop job 的产物是否都归集到了本渠道的 artifacts 目录。" >&2
+        echo "::error::该平台在渠道配置 desktop.platforms 里声明了,却没有产物 —— 更新面/门户会静默少一个平台。" >&2
+        echo "::error::请核对该平台的 desktop job 是否把产物归集到了本渠道的 artifacts 目录。" >&2
         exit 1
       fi
       add "$key" "$platform_file"

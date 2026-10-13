@@ -1157,7 +1157,7 @@ jobs:
           # 渠道仓 revision:由 gate 解析一次,四处调用点共用同一个 commit
           # (2026-09-23 第五轮审计 R5-C-2:同一次 tag 的包内客户端与镜像内渠道内容必须同源)。
           CI_CHANNELS_PIN: ${{ needs.gate.outputs.channels_rev }}
-        run: bash scripts/ci-channels.sh
+        run: bash scripts/ci-channels.sh --require-template
       # --official-last:官方最后构建,于是 dist/ 留下的是**官方**产物 ——
       # 紧随其后的 E2E 与人工排查都对着官方那一份(渠道产物已归集到 client-assets/)。
       - name: Package client installers for every selected channel
@@ -1344,7 +1344,7 @@ jobs:
           # 渠道仓 revision:由 gate 解析一次,四处调用点共用同一个 commit
           # (2026-09-23 第五轮审计 R5-C-2:同一次 tag 的包内客户端与镜像内渠道内容必须同源)。
           CI_CHANNELS_PIN: ${{ needs.gate.outputs.channels_rev }}
-        run: bash scripts/ci-channels.sh
+        run: bash scripts/ci-channels.sh --require-template
       - name: Package client installers for every selected channel
         if: ${{ !github.event.pull_request.head.repo.fork }}
         shell: bash
@@ -1619,7 +1619,7 @@ jobs:
           # 渠道仓 revision:由 gate 解析一次,四处调用点共用同一个 commit
           # (2026-09-23 第五轮审计 R5-C-2:同一次 tag 的包内客户端与镜像内渠道内容必须同源)。
           CI_CHANNELS_PIN: ${{ needs.gate.outputs.channels_rev }}
-        run: bash scripts/ci-channels.sh
+        run: bash scripts/ci-channels.sh --require-template
       - name: Stage the official DMG for the release image
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         run: |
@@ -1791,7 +1791,7 @@ jobs:
           # 渠道仓 revision:由 gate 解析一次,四处调用点共用同一个 commit
           # (2026-09-23 第五轮审计 R5-C-2:同一次 tag 的包内客户端与镜像内渠道内容必须同源)。
           CI_CHANNELS_PIN: ${{ needs.gate.outputs.channels_rev }}
-        run: bash scripts/ci-channels.sh
+        run: bash scripts/ci-channels.sh --require-template
 
       # 品牌渠道的客户端产物走 R2 中转(见 desktop-linux job 的说明),这里取回。
       # 前缀由 run id + HMAC(R2 密钥)派生,渠道名从不出现在任何键或日志里。

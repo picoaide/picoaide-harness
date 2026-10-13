@@ -504,3 +504,64 @@ func TestReservedAppOriginSchemeContract(t *testing.T) {
 		}
 	}
 }
+
+func TestClientPlatformsFollowsChannel(t *testing.T) {
+	// 渠道可以只交付自己实际用到的平台；顺序按配置保留（门户另有自己的渲染顺序）。
+	withDir(t, map[string]string{"channel.json": `{
+      "schema": 1, "channel_id": "acme",
+      "identity": {"display_name": "Acme AI"},
+      "desktop": {"platforms": ["win", "mac"]}
+    }`})
+	if got := strings.Join(ClientPlatforms(), ","); got != "win,mac" {
+		t.Fatalf("ClientPlatforms() = %q, want win,mac", got)
+	}
+	if !SupportsClientPlatform("win") || !SupportsClientPlatform("mac") {
+		t.Fatal("声明过的平台必须被判为支持")
+	}
+	if SupportsClientPlatform("linux") {
+		t.Fatal("未声明的平台不得被判为支持（门户会因此少渲染一块）")
+	}
+}
+
+func TestClientPlatformsDefaultToAllThree(t *testing.T) {
+	// 缺省 = 三端全交付（既有渠道不写这个键，行为必须逐字节不变）。
+	for _, dir := range []map[string]string{
+		{"channel.json": officialJSON},
+		{"channel.json": `{"schema":1,"channel_id":"acme","identity":{"display_name":"Acme AI"}}`},
+		nil, // 连渠道目录都没有（本地开发）
+	} {
+		withDir(t, dir)
+		if got := strings.Join(ClientPlatforms(), ","); got != "mac,win,linux" {
+			t.Fatalf("缺省交付面 = %q, want mac,win,linux", got)
+		}
+		for _, token := range []string{"mac", "win", "linux"} {
+			if !SupportsClientPlatform(token) {
+				t.Fatalf("缺省时必须支持 %s", token)
+			}
+		}
+	}
+}
+
+func TestClientPlatformsToleratesJunkAtRuntime(t *testing.T) {
+	// 形状/取值的权威判据在构建期（ci-channels.sh --require-template 与 platforms 校验）。
+	// 运行期只做容错：未知 token 丢弃、去重、大小写与前缀空格归一；
+	// **全部不可识别时收敛到三端全交付**（收敛到空会让门户下载区与更新面同时消失，
+	// 而那是不可自愈的）。
+	withDir(t, map[string]string{"channel.json": `{
+      "schema": 1, "channel_id": "acme",
+      "identity": {"display_name": "Acme AI"},
+      "desktop": {"platforms": [" Win ", "win", "", "solaris", "MAC"]}
+    }`})
+	if got := strings.Join(ClientPlatforms(), ","); got != "win,mac" {
+		t.Fatalf("容错解析后 = %q, want win,mac", got)
+	}
+
+	withDir(t, map[string]string{"channel.json": `{
+      "schema": 1, "channel_id": "acme",
+      "identity": {"display_name": "Acme AI"},
+      "desktop": {"platforms": ["solaris", "plan9"]}
+    }`})
+	if got := strings.Join(ClientPlatforms(), ","); got != "mac,win,linux" {
+		t.Fatalf("全是未知 token 时应收敛到三端全交付，实际 %q", got)
+	}
+}

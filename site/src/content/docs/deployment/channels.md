@@ -79,6 +79,30 @@ description: PicoAide Harness 的渠道机制：渠道内容为什么随镜像�
 缺字段 / 非法 / 与深链 scheme 同值 / 跨渠道重复 ⇒ **构建期中止，该渠道本次没有产物**（不静默回落）。
 品牌渠道的 logo 与 app icon 同样是**必需**素材：缺了会被打包期检查拦下，而不是产出"带厂商图标"的包。
 
+### 渠道交付哪些平台（`desktop.platforms`）
+
+渠道包默认交付**三端**（Windows / macOS / Linux）。如果这个渠道的员工只用其中一部分，
+在渠道配置里显式声明交付面即可：
+
+```json
+"desktop": { "platforms": ["win", "mac"] }
+```
+
+- 取值只有三个：`win` / `mac` / `linux`；**不写这个键 = 三端全交付**（既有渠道行为不变）；
+- 声明之后**四处一起收窄**：平台 job 的打包跳过未声明平台 → R2 私密中转只搬声明的平台 →
+  镜像装配只装声明的平台（声明了却没有产物 ⇒ **构建期红**，不静默少一个入口）→
+  门户下载区与 `GET /api/client/v2/updates/manifest` 都不再出现未声明的平台；
+- 未声明的平台在门户上是**整块不出现**（不是"该平台暂无可用安装包"的灰卡片 —— 那会让人
+  以为是我们漏打包）；
+- 少带一个平台直接省下一份安装包（Linux 约 350 MiB/版本，macOS 约 380 MiB，Windows 约 430 MiB），
+  而每个渠道在更新服务器上要留"最新 + 上一个"两版，所以省的是**两倍**。
+
+> **官方渠道是新增渠道的模板**：CI 取渠道包时会校验官方渠道的 `channel.json` **逐键显式**
+> （键表见 `packages/host/desktop/scripts/channel-constants.ts` 的 `CHANNEL_TEMPLATE_KEYS`），
+> 缺键即失败并点名键名。所以"新增一个渠道"= 拷贝 `channels/official/` → 改身份字段 →
+> 裁剪 `desktop.platforms`，不需要翻源码才知道有哪些键。三个 `desktop.speech_*` 键是
+> **覆盖型**（不写 = 用随包模型），刻意不进模板 —— 写进模板等于把路径钉死。
+
 ### 语音识别模型怎么进到客户网（`desktop.speech_*`）
 
 语音输入在本机识别，**默认模型权重随客户端分发**（`desktop.speech_bundle_model` 缺省 `true`）：
