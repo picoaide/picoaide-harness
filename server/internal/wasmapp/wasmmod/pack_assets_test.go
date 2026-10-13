@@ -18,7 +18,7 @@ import (
 // 本文件是 R1-e2e-6 的**自证门禁**：平台把 wasm 自定义段当一等静态资源载体
 // （段名 = 包内逻辑路径，发布期抽到宿主磁盘），但仓库里长期只有文档没有工具 ——
 // 作者得自己拼 LEB128 段长度（第一版几乎必踩"段长度要含名字长度前缀"，平台回
-// SECTION_MALFORMED）。现在官方脚本是 server/skills/app-builder/scripts/pack-assets.mjs。
+// SECTION_MALFORMED）。现在官方脚本是 server/demoapps/scripts/pack-assets.mjs。
 //
 // 这一组用例存在的理由：**脚本产出的模块必须能被平台自己的解析器接受**，
 // 而"能接受"不能靠脚本自说自话 —— 所以这里真编译一个 Go wasip1 产物、真跑脚本、
@@ -40,11 +40,17 @@ import (
 
 // packAssetsScriptRelPath 是官方打包脚本（相对 server/ 模块根）。
 //
-// 为什么放技能目录而不是 server/scripts/：脚本要能被**作者/AI 真的用到** ——
-// 技能整目录随服务端镜像分发（Dockerfile COPY skills/app-builder/ → /opt/picoaide/skills，
-// 客户端能力中心按需安装到 <dshHome>/skills），而 server/scripts/ 不进镜像。
-// 同目录先例 = examples/go/preview.mjs（作者侧零依赖 Node 工具）。
-const packAssetsScriptRelPath = "skills/app-builder/scripts/pack-assets.mjs"
+// 为什么放**中性位置**（`server/demoapps/scripts/`）而不是技能目录：脚本要同时给
+// **演示应用**（Dockerfile 的 demoassets 阶段）与**随技能分发的作者工具**用 ——
+// 两边必须是同一份实现（两份会漂），所以源树里只有这一份：技能整目录随服务端镜像分发
+// （Dockerfile 的 COPY skills/app-builder/ → /opt/picoaide/skills，客户端能力中心按需
+// 安装到 <dshHome>/skills），镜像构建期再把这份中性源**注入**技能目录的 `scripts/`
+// （同一条链上的第二个落点，见 server/Dockerfile 的「内置技能随镜像分发」一节）。
+//
+// ⚠️ 别把这里指回 `skills/app-builder/scripts/pack-assets.mjs`：那条路径**只在镜像里**
+// 成立，仓库里没有它（判据 `skillseed.TestBuiltinSkillInventoryMatchesDiskDockerfileAndDigests`
+// 会核对中性源 + 两个落点 + 技能内容摘要三者一致）。
+const packAssetsScriptRelPath = "demoapps/scripts/pack-assets.mjs"
 
 // packAssetsGuestPkg 是夹具程序：与 imports_coverage_test.go 同款（真编译，不手工拼字节）。
 const packAssetsGuestPkg = "./internal/wasmapp/wasmmod/testdata/stdrender"

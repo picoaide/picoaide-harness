@@ -1,6 +1,8 @@
 package skillseed
 
 import (
+	"bytes"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -40,6 +42,33 @@ import (
 // 只想把某个目录留在仓库里而**不**随镜像下发 ⇒ 登记为 `{Shipped: false, Reason: "…"}`：
 // 豁免必须**逐条显式**并写理由，不接受通配/整目录豁免（那正是本条缺陷的形态）。
 //
+// 第四个维度（2026-09-26 起，第 ⑦ 项）：**技能目录里由中性源注入的文件**
+// （`skillFileInjections`）。技能的内容不只有 `server/skills/` 那一棵树 —— 有的文件
+// 唯一实现在中性位置（例如既给演示应用用、又随技能分发的打包器），构建镜像时由
+// Dockerfile 从**同一个源** COPY 到每个落点，技能源树里没有副本。判据据此能表达
+// 「该技能文件来自中性源路径」，并把「同源 + 两个 COPY 落点 + 同摘要」三者对上：
+//   - 中性源必须存在且**不在**技能源树里，技能源树里也不许有同名/同字节副本；
+//   - 该源的 COPY 落点数与登记一致、逐字同源，注入技能目录的那一条落点唯一且目标正确；
+//   - 注入的字节必须真的参与技能内容摘要（`skillContentDigestWithAdditions`），
+//     且含注入文件的摘要正是 `seededSkillDigests` 里登记的那一个。
+//
+// 没有这道对账时的形态：把"打包器解耦到中性位置"做成"顺手在技能目录里再放一份"，
+// 或者解耦后注入 COPY 被删掉而没人发现（技能目录少一个文件、员工装到的技能不完整）。
+//
+// 第 ⑦ 项的变异验证（2026-10-13 在隔离 worktree 里逐条实跑，每条都让本包红；
+// harness 与原始输出见 temp/p0/w4-decouple-demo-packer/mutations/run-mutations.sh 与
+// 同目录 logs/mutations2.log）：
+//   - 中性源路径写错（Source 指向不存在的文件）⇒ 红（读不到源 + Dockerfile 那条 COPY 变成"未登记的外来源"）；
+//   - demoassets 阶段改回从技能目录取 ⇒ 红（落点数 2 → 1，且"没有别的落点"）；
+//   - 删掉注入技能目录的那条 COPY ⇒ 红（注入落点 0 条）；
+//   - 技能源树里恢复一份**同名**副本 ⇒ 红（同名条目冲突）；
+//   - 技能源树里放一份**同字节换名**副本 ⇒ 红（同字节副本清单命中）；
+//   - 注入落点改名 ⇒ 红（落点不在登记表里 / 目标不逐字相等）；
+//   - 改中性源内容却不提技能版本 ⇒ 红（注入字节确实进技能内容摘要）；
+//   - 未登记的外来源 COPY 进 seed 目录 ⇒ 红（Fatal，与解耦前同判）；
+//   - 登记的落点数与 Dockerfile 不符 ⇒ 红（登记表自检）；
+//   - 中性源登记成技能源树里的路径 ⇒ 红（登记表自检：中性源必须在技能源树之外）。
+//
 // 变异验证（实跑过，原始输出见 temp/r13/GF/sub-skills/FINDINGS.md）：
 //   - 新增 `server/skills/<新技能>/SKILL.md`、三处都不动 ⇒ 本用例红（修前是整包 `ok`）；
 //   - 登记了却把磁盘目录删掉 ⇒ 红；登记了却没写 Dockerfile COPY 行 ⇒ 红；
@@ -58,6 +87,9 @@ import (
 const (
 	repoSkillsRoot     = "../../../../server/skills"
 	repoDockerfilePath = "../../../../server/Dockerfile"
+	// repoServerRoot 是 Dockerfile 的**构建上下文**（`docker buildx build … server`）——
+	// COPY 的源路径都相对它解析，判据要按同一口径把源路径映射回磁盘。
+	repoServerRoot = "../../../../server"
 	// imageSkillSeedDir 是 Dockerfile 里 `PICOAI_SKILL_SEED_DIR` 的取值，也是
 	// `skillseed.Dir` 的缺省 —— COPY 的目标必须落在它下面，否则服务端一个技能都扫不到。
 	imageSkillSeedDir = "/opt/picoaide/skills"
@@ -90,12 +122,138 @@ var builtinSkillRegistry = []builtinSkillEntry{
 // repoSkillDirFor 返回某个技能目录相对本包目录的路径（与 `repoSkillDir` 同口径）。
 func repoSkillDirFor(dir string) string { return repoSkillsRoot + "/" + dir }
 
+// skillFileInjection 描述「技能目录里、但**不由 `server/skills/` 提供**的文件」：
+// 唯一实现放在中性位置（不属于任何一侧），构建镜像时由 Dockerfile 从**同一个源**
+// COPY 到每个落点，技能源树里**没有**副本。
+//
+// 为什么需要这种形态（也是为什么判据不能只是"删掉那条断言"）：
+// 演示应用的资产打包器与随技能分发的打包器**必须是同一份实现**（两份会漂，而"规则
+// 不会漂"正是这条链存在的理由），但它又不该由技能源码目录拥有 —— 于是源树里只留一份
+// **中性**实现，镜像内的技能布局靠"注入"复原：`<seed>/<技能>/<Dest>` 仍然存在，
+// 技能文档里的相对路径照旧可用。
+//
+// 这个结构就是判据的**表达力**所在：它把"该技能文件来自中性源路径"从一个说不出口的
+// 事实变成可对账的登记项 —— 判据据此核对「同源（逐字同一个源路径）⇒ 同字节 ⇒ 同摘要」
+// 与「两个落点」；没登记的"外来源 COPY 进 seed 目录"仍然当场 Fatal。
+type skillFileInjection struct {
+	// Skill 是技能目录名（必须是 builtinSkillRegistry 里 Shipped=true 的技能）。
+	Skill string
+	// Dest 是技能目录内的相对路径（POSIX）；镜像落点 = imageSkillSeedDir/Skill/Dest。
+	Dest string
+	// Source 是构建上下文里的**中性源**路径（仓库相对、POSIX）——唯一实现所在，
+	// 必须落在技能源树之外（否则就不是解耦，技能目录里会同时存在第二份）。
+	Source string
+	// Landings 是这个源在 Dockerfile 里被 COPY 到的落点**数**（含注入技能目录的那一条）。
+	// 逐条显式：多了/少了都红 —— 落点集合变化必须有人复核（"不接受通配/静默新增"）。
+	Landings int
+	// Reason 写清这个文件为什么不在技能源树里。
+	Reason string
+}
+
+func (inj skillFileInjection) key() string { return inj.Skill + "/" + inj.Dest }
+
+// skillFileInjections 是「由中性源注入技能目录的文件」登记表 —— 全量、显式。
+//
+// ⚠️ 改动这里要同步三处：中性源文件本身（磁盘）/ `server/Dockerfile` 里**每一个**
+// 落点的 COPY 行 / `seededSkillDigests` 里该技能的新摘要（注入文件进技能内容摘要）。
+// 漏任何一处都会被下方第 ⑦ 项打红。
+var skillFileInjections = []skillFileInjection{
+	{
+		Skill:    "app-builder",
+		Dest:     "scripts/pack-assets.mjs",
+		Source:   "demoapps/scripts/pack-assets.mjs",
+		Landings: 2,
+		Reason: "演示应用的资产打包器与随技能分发的打包器**必须是同一份实现**（打出来的段格式、拒绝清单、" +
+			"总量预算口径都要求两边逐字一致；各自留一份必然漂）。唯一实现在中性的 server/demoapps/scripts/ 下，" +
+			"Dockerfile 从这同一个源 COPY 到两个落点：演示应用打包阶段（/demo/pack-assets.mjs）与技能目录" +
+			"（/opt/picoaide/skills/app-builder/scripts/pack-assets.mjs）。技能源树里不再留副本。",
+	},
+}
+
+// registeredSkillInjections 读注入登记表并自检（形态、唯一性、中性性、落点数、理由）。
+func registeredSkillInjections(t *testing.T) (byKey map[string]skillFileInjection, bySource map[string]skillFileInjection) {
+	t.Helper()
+	byKey = map[string]skillFileInjection{}
+	bySource = map[string]skillFileInjection{}
+	for _, inj := range skillFileInjections {
+		if inj.Skill == "" || inj.Skill != strings.TrimSpace(inj.Skill) || strings.Contains(inj.Skill, "/") {
+			t.Fatalf("skillFileInjections 的 Skill %q 非法：必须是 server/skills/ 下的单段目录名", inj.Skill)
+		}
+		cleanDest := path.Clean(inj.Dest)
+		if inj.Dest == "" || cleanDest != inj.Dest || cleanDest == "." ||
+			strings.HasPrefix(cleanDest, "../") || strings.HasPrefix(cleanDest, "/") {
+			t.Fatalf("skillFileInjections 的 %s 的 Dest %q 非法：必须是技能目录内的 POSIX 相对路径（不许 .. / 绝对路径）", inj.Skill, inj.Dest)
+		}
+		cleanSource := path.Clean(inj.Source)
+		if inj.Source == "" || cleanSource != inj.Source || strings.HasPrefix(cleanSource, "/") {
+			t.Fatalf("skillFileInjections 的 %s 的 Source %q 非法：必须是构建上下文里的 POSIX 相对路径", inj.Skill, inj.Source)
+		}
+		if cleanSource == "skills" || strings.HasPrefix(cleanSource, "skills/") {
+			t.Fatalf("skillFileInjections 的 %s 的 Source %q 落在**技能源树**里 —— 那就不叫解耦："+
+				"技能目录里会同时留着第二份实现（两份会漂）。中性源必须放到技能源树之外。", inj.Skill, inj.Source)
+		}
+		if inj.Landings < 2 {
+			t.Fatalf("skillFileInjections 的 %s 声明落点数 = %d：除了注入技能目录，至少还要有一个落点"+
+				"（演示应用打包阶段）—— 只有一个落点的话这个文件根本没有解耦到中性位置的必要", inj.Skill, inj.Landings)
+		}
+		if strings.TrimSpace(inj.Reason) == "" {
+			t.Fatalf("skillFileInjections 的 %s 没写 Reason —— 为什么这个文件不在技能源树里必须逐条写明", inj.Skill)
+		}
+		if prev, dup := byKey[inj.key()]; dup {
+			t.Fatalf("skillFileInjections 重复登记 %s（已有 Source %q）", inj.key(), prev.Source)
+		}
+		if prev, dup := bySource[inj.Source]; dup {
+			t.Fatalf("skillFileInjections 里中性源 %q 被登记了两次（%s 与 %s）—— 一个源只对应一个注入落点",
+				inj.Source, prev.key(), inj.key())
+		}
+		byKey[inj.key()] = inj
+		bySource[inj.Source] = inj
+	}
+	return byKey, bySource
+}
+
+// sortedInjections 返回按 key 升序的登记项（遍历顺序与报错信息都要确定性）。
+func sortedInjections(byKey map[string]skillFileInjection) []skillFileInjection {
+	out := make([]skillFileInjection, 0, len(byKey))
+	for _, inj := range byKey {
+		out = append(out, inj)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].key() < out[j].key() })
+	return out
+}
+
+// skillInjectionsOf 读出某个技能的全部注入文件（逐字节内容取自中性源）。
+func skillInjectionsOf(t *testing.T, skill string, byKey map[string]skillFileInjection) []skillContentAddition {
+	t.Helper()
+	var out []skillContentAddition
+	for _, inj := range sortedInjections(byKey) {
+		if inj.Skill != skill {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(repoServerRoot, filepath.FromSlash(inj.Source)))
+		if err != nil {
+			t.Fatalf("读中性源 %s（技能 %s 的 %s）：%v", inj.Source, inj.Skill, inj.Dest, err)
+		}
+		out = append(out, skillContentAddition{Rel: inj.Dest, Content: raw})
+	}
+	return out
+}
+
+// effectiveSkillDigest 返回某个技能**在镜像里**的内容摘要（磁盘技能树 + 注入文件）与
+// 普通文件数 —— 与 `skill_version_test.go` 的登记表同一口径（两处必须一致，否则
+// "判据钉住的内容"与"员工装到的内容"分叉）。
+func effectiveSkillDigest(t *testing.T, skill string, byKey map[string]skillFileInjection) (string, int) {
+	t.Helper()
+	return skillContentDigestWithAdditions(t, repoSkillDirFor(skill), skillInjectionsOf(t, skill, byKey))
+}
+
 // TestBuiltinSkillInventoryMatchesDiskDockerfileAndDigests 是 R13-F-05 的判据本体。
 func TestBuiltinSkillInventoryMatchesDiskDockerfileAndDigests(t *testing.T) {
+	injectionsByKey, injectionsBySource := registeredSkillInjections(t)
 	shipped, exempt := registeredSkillDirs(t)
 	disk := diskSkillDirs(t)
 	dockerfileRaw := readRepoFile(t, repoDockerfilePath)
-	dockerfileShipped, dockerfileNested := dockerfileSkillCopies(t, dockerfileRaw)
+	dockerfileShipped, dockerfileNested, landings := dockerfileSkillCopies(t, dockerfileRaw, injectionsByKey, injectionsBySource)
 
 	digestGroups := make(map[string]bool, len(seededSkillDigests))
 	for dir := range seededSkillDigests {
@@ -157,8 +315,9 @@ func TestBuiltinSkillInventoryMatchesDiskDockerfileAndDigests(t *testing.T) {
 	}
 
 	// ⑤ 每个已下发技能：① 走运行期**同一条**校验路径（含「目录名 == frontmatter name」的
-	// identity 规则）；② 当前内容摘要已登记且版本一致。运行期 `loadSkill` 就是生产读资产的
-	// 入口，用它而不是另写一套检查，避免判据与运行期判据漂移。
+	// identity 规则）；② **镜像里那一棵树**的内容摘要（磁盘技能树 + 中性源注入的文件，与
+	// 第 ⑦ 项同一口径）已登记且版本一致。运行期 `loadSkill` 就是生产读资产的入口，用它
+	// 而不是另写一套检查，避免判据与运行期判据漂移。
 	for _, dir := range sortedKeys(shipped) {
 		root := repoSkillDirFor(dir)
 		if _, err := loadSkill(repoSkillsRoot, dir); err != nil {
@@ -167,7 +326,7 @@ func TestBuiltinSkillInventoryMatchesDiskDockerfileAndDigests(t *testing.T) {
 				"只在启动日志与管理端诊断里可见。", dir, err)
 			continue
 		}
-		digest, files := skillContentDigest(t, root)
+		digest, files := effectiveSkillDigest(t, dir, injectionsByKey)
 		version := skillFrontmatterVersion(t, filepath.Join(root, SkillFile))
 		if files == 0 {
 			t.Errorf("已下发技能 %s 一个普通文件都没摘要到（目录被搬走或变空？）", root)
@@ -199,6 +358,131 @@ func TestBuiltinSkillInventoryMatchesDiskDockerfileAndDigests(t *testing.T) {
 	if os.Getenv("PICOAI_SKILL_SEED_DIR") == "" && Dir != imageSkillSeedDir {
 		t.Errorf("skillseed.Dir = %q，而 Dockerfile 与判据都用 %q（两边必须同源）", Dir, imageSkillSeedDir)
 	}
+
+	// ⑦ 由**中性源注入**技能目录的文件（`skillFileInjections`）：镜像里的技能内容不是只有
+	// `server/skills/` 那一棵树 —— 技能目录 = 磁盘技能树 + 注入文件。这一节让判据能表达
+	// 「该技能文件来自中性源路径」，并证明「同源 + 两个 COPY 落点 + 同摘要」三者一致：
+	//
+	//	a. 中性源确实存在、且**不在**技能源树里（否则不是解耦）；技能源树里也不许留副本
+	//	   （同名或**同字节**换名都算 —— 副本会让规则漂）；
+	//	b. 该源在 Dockerfile 里被 COPY 到**登记的落点数**、每个落点**逐字同一个源**
+	//	   （同源 ⇒ 同字节 ⇒ 同摘要），其中注入技能目录的落点恰好一条、且目标逐字是
+	//	   `<seed>/<技能>/<Dest>`；
+	//	c. 注入的字节真的参与技能内容摘要（若把注入 COPY 删掉判据也不红，这条登记就是死代码），
+	//	   且"加上注入文件后的摘要"正是 `seededSkillDigests` 里登记的那一个。
+	for _, inj := range sortedInjections(injectionsByKey) {
+		if !shipped[inj.Skill] {
+			t.Errorf("skillFileInjections 往技能 %q 注入 %q，但该技能不在 builtinSkillRegistry 的已下发集合里 —— "+
+				"注入到一个不下发的目录是无效动作（要么登记它，要么删掉这条注入）。", inj.Skill, inj.Dest)
+			continue
+		}
+
+		// a. 中性源在磁盘上恰好一份实现，且不在技能源树里。
+		sourceRel := filepath.Join(repoServerRoot, filepath.FromSlash(inj.Source))
+		sourceBytes, readErr := os.ReadFile(sourceRel)
+		if readErr != nil {
+			t.Errorf("skillFileInjections 登记的中性源 %q 读不到（%s）：%v —— 注入的源必须真实存在",
+				inj.Source, sourceRel, readErr)
+			continue
+		}
+		destRel := filepath.Join(repoSkillDirFor(inj.Skill), filepath.FromSlash(inj.Dest))
+		if _, statErr := os.Lstat(destRel); statErr == nil {
+			t.Errorf("技能源树里同时存在 %s —— 解耦后这个文件**只能**来自中性源 %q；"+
+				"技能目录里留副本就是「两份会漂的实现」（本判据存在的理由）。", destRel, inj.Source)
+		}
+		if dupes := filesWithSameBytes(t, repoSkillsRoot, sourceBytes); len(dupes) > 0 {
+			t.Errorf("技能源树里出现了中性源 %q 的**同字节副本**：%v —— 换名复制同样会让规则漂；"+
+				"源树里只允许有一份实现（改中性源的那一份）。", inj.Source, dupes)
+		}
+
+		// b. 落点对账：数量逐条显式、逐字同源、注入落点唯一且目标正确。
+		srcLandings := landings[inj.Source]
+		if len(srcLandings) != inj.Landings {
+			t.Errorf("中性源 %q 在 server/Dockerfile 里有 %d 条 COPY 落点，而 skillFileInjections 登记的是 %d —— "+
+				"落点集合变化必须有人复核（多了可能意味着又冒出一份副本，少了意味着某个落点被删）。",
+				inj.Source, len(srcLandings), inj.Landings)
+		}
+		seedLandings, otherLandings := 0, 0
+		wantSeedDest := path.Join(imageSkillSeedDir, inj.Skill, inj.Dest)
+		for _, l := range srcLandings {
+			if l.Source != inj.Source {
+				t.Errorf("server/Dockerfile:%d 从 %q 取文件，而登记的中性源是 %q —— 两个落点必须逐字同源"+
+					"（不同源就可能不同字节，同摘要的前提就没了）。", l.Line, l.Source, inj.Source)
+			}
+			if l.InSeed {
+				seedLandings++
+				if l.Dest != wantSeedDest {
+					t.Errorf("server/Dockerfile:%d 把中性源 %q 注入到 %q，而不是 %q（注入落点必须逐字等于 "+
+						"`<PICOAI_SKILL_SEED_DIR>/<技能>/<Dest>`，否则镜像里技能文档引用的相对路径失效）。",
+						l.Line, inj.Source, l.Dest, wantSeedDest)
+				}
+			} else {
+				otherLandings++
+			}
+		}
+		if seedLandings != 1 {
+			t.Errorf("中性源 %q 注入技能目录的落点有 %d 条（必须恰好 1 条）：0 条 ⇒ 镜像里技能目录缺这个文件"+
+				"（员工装到的技能不完整、技能文档引用的路径不存在）；多条 ⇒ 落点可能漂。", inj.Source, seedLandings)
+		}
+		if otherLandings < 1 {
+			t.Errorf("中性源 %q 除了注入技能目录，没有别的落点（%d 条）—— 那这个文件就没有解耦到中性位置的必要，"+
+				"应当留在技能目录里。", inj.Source, otherLandings)
+		}
+
+		// c. 同摘要：注入的字节确实算进技能内容摘要，且登记表认得这个摘要。
+		withInjection, files := effectiveSkillDigest(t, inj.Skill, injectionsByKey)
+		withoutInjection, _ := skillContentDigest(t, repoSkillDirFor(inj.Skill))
+		if withInjection == withoutInjection {
+			t.Errorf("把 %q 注入技能 %s 对内容摘要没有任何影响 —— 这条登记是死代码（删掉 Dockerfile 里那条注入 "+
+				"COPY，判据也不会红，正是本项要防的形态）。", inj.Source, inj.Skill)
+		}
+		if _, ok := seededSkillDigests[inj.Skill][withInjection]; !ok {
+			t.Errorf("技能 %s **含注入文件**的内容摘要 %s（%d 个文件）不在 seededSkillDigests[%q] 里（R1-pm-8）：\n"+
+				"  注入：%s → %s\n"+
+				"  → 提 SKILL.md 的 version 并把 %q 加进 seededSkillDigests[%q]（登记表描述的是**下发给员工的"+
+				"那棵树**：磁盘技能树 + 注入文件）。",
+				inj.Skill, withInjection, files, inj.Skill, inj.Source, wantSeedDest, withInjection, inj.Skill)
+		}
+	}
+}
+
+// filesWithSameBytes 返回 root 下**内容与 want 逐字节相同**的文件（相对 root 的 POSIX 路径，升序）。
+//
+// 用途：证明"源树里只有一份实现"不是靠文件名判的 —— 换名复制（`pack-assets-v2.mjs` 之类）
+// 同样会让规则漂，所以按字节找副本。先按文件大小筛一遍（不同大小不可能同字节），
+// 于是这个全树扫描在判据里是廉价的。
+func filesWithSameBytes(t *testing.T, root string, want []byte) []string {
+	t.Helper()
+	var out []string
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		info, ierr := d.Info()
+		if ierr != nil {
+			return ierr
+		}
+		if info.Size() != int64(len(want)) {
+			return nil
+		}
+		got, rerr := os.ReadFile(p)
+		if rerr != nil {
+			return rerr
+		}
+		if bytes.Equal(got, want) {
+			rel, _ := filepath.Rel(root, p)
+			out = append(out, filepath.ToSlash(rel))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("遍历 %s: %v", root, err)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // registeredSkillDirs 读登记表并自检（目录名形态、不重复、豁免必须写理由）。
@@ -334,19 +618,37 @@ func dockerfileFields(line string) []string {
 	return fields
 }
 
+// dockerfileLanding 是一条 COPY 把某个**中性源**（`skillFileInjections` 登记的源）送到的
+// 落点。同一个源的多条落点必须**逐字同源** ⇒ 同字节 ⇒ 同摘要。
+type dockerfileLanding struct {
+	Line   int
+	Source string // 构建上下文里的源（逐字等于登记的中性源）
+	Dest   string // 目标（path.Clean 后）
+	InSeed bool   // 目标是否落在 imageSkillSeedDir 下（= 注入技能目录的那一条）
+}
+
 // dockerfileSkillCopies 从 Dockerfile 里抽出「一行一个技能」的 COPY 清单。
 //
-// 返回：shipped = 技能目录 → COPY 行号；nested = 被引用内部文件的技能目录 → 行号列表。
+// 返回：shipped = 技能目录 → COPY 行号；nested = 被引用内部文件的技能目录 → 行号列表；
+// landings = 中性源 → 它被 COPY 到的落点列表（含注入技能目录的那一条）。
 //
 // 不可静态判定的写法一律 Fatal（"读不出清单"不等于"清单是空的"）：
 //   - 源是整个 `skills/` 根或用通配/变量（判据读不出具体技能）；
 //   - 一条 COPY 带多个技能目录源（清单必须一行一个技能，判据才能逐行对拍）；
 //   - `COPY --from=<另一阶段> skills/…`（判据读不到那个阶段的真实内容）；
-//   - 把技能目录**内部**的路径 COPY 进 seed 目录（下发的是残包，不是整技能）。
-func dockerfileSkillCopies(t *testing.T, raw string) (shipped map[string]int, nested map[string][]int) {
+//   - 把技能目录**内部**的路径 COPY 进 seed 目录（下发的是残包，不是整技能）；
+//   - 把**没登记**的外来源 COPY 进 seed 目录（谁在下发什么必须逐条可查 —— 登记通道
+//     是 `skillFileInjections`，它同时表达"这个技能文件来自中性源路径"）。
+func dockerfileSkillCopies(
+	t *testing.T,
+	raw string,
+	injectionsByKey map[string]skillFileInjection,
+	injectionsBySource map[string]skillFileInjection,
+) (shipped map[string]int, nested map[string][]int, landings map[string][]dockerfileLanding) {
 	t.Helper()
 	shipped = map[string]int{}
 	nested = map[string][]int{}
+	landings = map[string][]dockerfileLanding{}
 	for _, ins := range dockerfileInstructions(raw) {
 		if ins.Op != "COPY" && ins.Op != "ADD" {
 			continue
@@ -365,6 +667,58 @@ func dockerfileSkillCopies(t *testing.T, raw string) (shipped map[string]int, ne
 		srcs, dest := args[:len(args)-1], args[len(args)-1]
 		destClean := path.Clean(dest)
 		destIsSeed := destClean == imageSkillSeedDir || strings.HasPrefix(destClean, imageSkillSeedDir+"/")
+
+		// 中性源：技能目录里的某个文件唯一实现在别处（登记在 skillFileInjections），
+		// 构建期从这同一个源注入。与「skills/ 下的源」分开处理：前者是注入，后者是下发。
+		var neutralSrcs []string
+		for _, s := range srcs {
+			if s == "" || strings.Contains(s, "$") || strings.HasPrefix(s, "/") {
+				continue
+			}
+			if _, ok := injectionsBySource[path.Clean(strings.TrimPrefix(s, "./"))]; ok {
+				neutralSrcs = append(neutralSrcs, path.Clean(strings.TrimPrefix(s, "./")))
+			}
+		}
+		if len(neutralSrcs) > 0 {
+			if len(srcs) != 1 || len(neutralSrcs) != 1 {
+				t.Fatalf("server/Dockerfile:%d 的一条 %s 从登记的中性源取文件，却带了多个源（源：%v）—— "+
+					"中性源注入必须一条 COPY 一个源，判据才能逐条对账落点（登记表：skillFileInjections）。",
+					ins.Line, ins.Op, srcs)
+			}
+			if fromStage != "" {
+				t.Fatalf("server/Dockerfile:%d 的 %s --from=%s 从另一个构建阶段取中性源 %q —— "+
+					"判据读不到那个阶段的真实内容，无法保证两个落点同源（skillFileInjections）。",
+					ins.Line, ins.Op, fromStage, neutralSrcs[0])
+			}
+			src := neutralSrcs[0]
+			if destIsSeed {
+				rel, ok := strings.CutPrefix(destClean, imageSkillSeedDir+"/")
+				if !ok || rel == "" {
+					t.Fatalf("server/Dockerfile:%d 把中性源 %q COPY 到 %q —— 目标在 %s 下但不是一个技能目录内的文件；"+
+						"登记表只接受 `<seed>/<技能>/<相对路径>` 的落点。",
+						ins.Line, src, destClean, imageSkillSeedDir)
+				}
+				inj, ok := injectionsByKey[rel]
+				if !ok {
+					t.Fatalf("server/Dockerfile:%d 把中性源 %q COPY 到 %q —— 但 %q（技能 %q 的 %q）不在 "+
+						"skillFileInjections 里。把文件注入技能目录**必须逐条登记**（技能 / 目录内落点 / 中性源 / 落点数），"+
+						"否则判据读不出「镜像里这个技能文件是谁下发的」。",
+						ins.Line, src, destClean, rel, path.Dir(rel), path.Base(rel))
+				}
+				if inj.Source != src {
+					t.Fatalf("server/Dockerfile:%d 把 %q 注入到 %q，而 skillFileInjections 登记的中性源是 %q —— "+
+						"两个落点必须逐字同源（同源 ⇒ 同字节 ⇒ 同摘要）。",
+						ins.Line, src, destClean, inj.Source)
+				}
+			}
+			landings[src] = append(landings[src], dockerfileLanding{
+				Line:   ins.Line,
+				Source: src,
+				Dest:   destClean,
+				InSeed: destIsSeed,
+			})
+			continue
+		}
 
 		type skillRef struct {
 			dir    string
@@ -387,8 +741,9 @@ func dockerfileSkillCopies(t *testing.T, raw string) (shipped map[string]int, ne
 
 		if len(refs) == 0 {
 			if destIsSeed {
-				t.Fatalf("server/Dockerfile:%d 有东西被 COPY 进 %s，但源不是 `skills/<name>/` 的形态（源：%v）—— "+
-					"内置技能必须一行一个技能地从构建上下文的 server/skills/ 取，判据才能对拍清单（R13-F-05）。",
+				t.Fatalf("server/Dockerfile:%d 有东西被 COPY 进 %s，但源不是 `skills/<name>/` 的形态、也不是 "+
+					"skillFileInjections 登记的中性源（源：%v）—— 内置技能必须一行一个技能地从构建上下文的 "+
+					"server/skills/ 取（或按登记表从**中性源**注入），判据才能对拍清单（R13-F-05）。",
 					ins.Line, imageSkillSeedDir, srcs)
 			}
 			continue
@@ -425,7 +780,7 @@ func dockerfileSkillCopies(t *testing.T, raw string) (shipped map[string]int, ne
 		}
 		shipped[ref.dir] = ins.Line
 	}
-	return shipped, nested
+	return shipped, nested, landings
 }
 
 // skillsRelativePath 判断一个 COPY 源是不是构建上下文里 `server/skills/` 下的路径，

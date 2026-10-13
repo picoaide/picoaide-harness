@@ -24,7 +24,7 @@ picoaide.app.json    随包配置（access/whitelist/owner…）：平台侧由 
                      本目录这份只给本地预览读（见 demoapps/README.md）
 ```
 
-前端资源由 `server/skills/app-builder/scripts/pack-assets.mjs` 打进 wasm 的自定义段：
+前端资源由 `server/demoapps/scripts/pack-assets.mjs`（中性位置；技能目录里的那一份与它同源）打进 wasm 的自定义段：
 `web/index.html → index.html`、`web/app.css → static/app.css`、`web/app.js → static/app.js`。
 
 ## 数据模型
