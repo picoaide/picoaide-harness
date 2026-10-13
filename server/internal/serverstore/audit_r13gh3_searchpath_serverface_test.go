@@ -203,13 +203,16 @@ var searchPathGuardPackages = map[string]searchPathPkgClass{
 	"internal/archiveutil":          searchPathPkgNoFamilySQL,
 	"internal/auditretention":       searchPathPkgNoFamilySQL,
 	// R16C-03：审计链周期校验器（只经 serverstore 的池上入口读，自己不持有族内 SQL）。
-	"internal/auditchain":          searchPathPkgNoFamilySQL,
-	"internal/balance":             searchPathPkgNoFamilySQL,
-	"internal/bootstrap":           searchPathPkgNoFamilySQL,
-	"internal/capabilities":        searchPathPkgNoFamilySQL,
-	"internal/channel":             searchPathPkgNoFamilySQL,
-	"internal/clientrelease":       searchPathPkgNoFamilySQL,
-	"internal/connectors":          searchPathPkgNoFamilySQL,
+	"internal/auditchain":    searchPathPkgNoFamilySQL,
+	"internal/balance":       searchPathPkgNoFamilySQL,
+	"internal/bootstrap":     searchPathPkgNoFamilySQL,
+	"internal/capabilities":  searchPathPkgNoFamilySQL,
+	"internal/channel":       searchPathPkgNoFamilySQL,
+	"internal/clientrelease": searchPathPkgNoFamilySQL,
+	"internal/connectors":    searchPathPkgNoFamilySQL,
+	// P1 第一片（2026-10-14）：可选模块的编译期开关包（`-tags` 面）。它**只有常量与
+	// 纯函数**（模块名 / Enabled / Has），不碰数据库，因此 no-family-sql。
+	"internal/features":            searchPathPkgNoFamilySQL,
 	"internal/llmgateway/channels": searchPathPkgNoFamilySQL,
 	"internal/marketplace":         searchPathPkgNoFamilySQL,
 	"internal/portal":              searchPathPkgNoFamilySQL,

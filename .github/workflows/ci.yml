@@ -968,6 +968,14 @@ jobs:
             echo "::error::gofmt 未通过: $FILES"
             exit 1
           fi
+      # ⚠️ 这一步**刻意不带 `-tags`**（2026-10-14，P1 第一片）：`go` 的 flag 解析在第一个
+      # 非 flag 词处停止 ⇒ tags 只能写在**包面之前**（`go vet -tags=… ./...`），而本步的
+      # 包面被 `scripts/check-workflows.mjs` 的 `ci-go-vet` 策略钉成 argv[1] 逐字 `./...`
+      # ⇒ 两种写法必有一红（`go vet ./... -tags=…` 会被 Go 当成包模式，报
+      # `malformed import path "-tags=…"`）。**不要**为它注册 `GOFLAGS` 之类的环境键
+      # （那会同时给出 `-toolexec` 通道），也不要为此改守卫口径 ——
+      # 缺的这半由 `make -C server check-tags`（变体矩阵判据：对每个组合各跑一次
+      # build + vet）补上，见 docs/decisions/2026-10-14-server-build-tags.md §3。
       - run: go vet ./...
       # -p 1 串行跑测试包:多个包并行时总连接数仍可能挤压 service 的
       # max_connections(500),串行换取确定性。实测全量 wall ≈ 26 min
@@ -1002,7 +1010,7 @@ jobs:
           # 报告**不进 CI 日志**:上千个用例的 JSON 会把 job log 刷爆,而 GitHub 会截断
           # 中段(本仓踩过"失败用例名被自己人挤出日志")⇒ 重定向落盘,失败时另存 artifact。
           GO_TEST_STATUS=0
-          go test ./... -count=1 -p 1 -timeout 15m -json > go-test.json || GO_TEST_STATUS=$?
+          go test -tags=skills,apps,connectors ./... -count=1 -p 1 -timeout 15m -json > go-test.json || GO_TEST_STATUS=$?
           CHECK_STATUS=0
           node ../scripts/wasm/check-go-test-json.mjs go-test.json \
             --scope internal/wasmapp,internal/router,internal/marketplace,internal/agentshare \
