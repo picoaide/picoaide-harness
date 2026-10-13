@@ -27,7 +27,7 @@ import type { HostLocale } from './locale.ts'
 import type { Session } from '@picoaide/dsh-gateway-client/config'
 import { createAiRowsConsentStore, defaultAiRowsConsentPath } from './wasm-apps-ai-rows-consent.ts'
 import { createWasmAppsRoute } from './wasm-apps.ts'
-import { registerWasmAppTools } from './wasm-app-tools.ts'
+import { registerWasmAppTools, WASM_APP_TOOL_NAMES } from './wasm-app-tools.ts'
 
 /**
  * 本机路由共用的**围栏与出口**：由 `@picoaide/dsh-enterprise/auth-gate` 的
@@ -140,6 +140,25 @@ export function registerAppRoutes(ctx: Context, fence: HostLocalRouteFence): () 
   // 回调在服务出现时才跑；它返回的 disposer 由 Cordis 收进这个子 fiber，`tools` 消失
   // 或插件卸载时自动回收（`registerWasmAppTools` 要求的"从插件 fiber 里调用并回收"
   // 仍然成立，且不会与下面那句重复回收）。
+  //
+  // **组装期观测（2026-10-14 对抗审计 · 乙-P2）**：`inject` 化之后，
+  // `registerWasmAppTools` 里那句「tools 服务缺席 ⇒ 明确报错」在**真缺 `tools`** 的宿主里
+  // **永远到不了**（回调根本不跑）；该宿主于是**静默**地少掉 6 个 `wasm_app_*` 工具，
+  // 日志里一条线索都没有 —— 这正是 2026-10-13 那次修复想消除的形态，却被同一处改动
+  // 挡在了后面。所以这里补一句**组装期**观测（`logger.warn`，与 `src/index.ts` 既有的
+  // 告警通道同款），把"缺席"重新变成可检索的一行。
+  //
+  // 为什么这里同步读 `ctx.get('tools')` 不会误报：本插件的插件行
+  // （`src/index.ts` 的 `inject = ['picoSession', 'webServer', 'picoLocalRoutes']`）不含
+  // `tools`，而桌面组合里 `tools` 行在 base bundle、早于本行就位 ⇒ 在场时不会打这条。
+  // 真到了"缺席"那一档，它就是事实：工具不会注册，除非 `tools` 之后才出现（那时
+  // `inject` 的回调会补跑 —— 这条提示说的是"组装那一刻缺席"）。
+  if (ctx.get('tools') === undefined) {
+    ctx.logger?.warn?.(
+      `pico: tools service is absent at composition time — ${WASM_APP_TOOL_NAMES.join('/')}`
+      + ' were NOT registered (they will be registered if the tools service appears later)',
+    )
+  }
   ctx.inject(['tools'], toolsCtx =>
     registerWasmAppTools(toolsCtx, { locale: () => hostLocale(), aiRowsConsent }))
   return disposeRoute

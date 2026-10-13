@@ -125,6 +125,20 @@ interface Harness {
   outbound: Outbound[]
   cleared: number
   loggedErrors: string[]
+  /**
+   * `ctx.logger.warn` 收到的行（组装期观测走这条通道 —— 应用宿主在 `tools` 缺席时
+   * 打的那句提示）。
+   */
+  loggedWarnings: string[]
+  /**
+   * 装组合时**注册那一刻缺**的服务名（`applyFullComposition` 的返回面）。
+   *
+   * 这是"服务不齐 ⇒ 回调不跑"的**直接**读面：此前只有
+   * `expect(h.loggedErrors).toEqual([])` 这种间接代理。
+   */
+  skippedInjections: string[]
+  /** 真正跑过的注入回调的依赖名（每次回调一项）—— 直接回答"回调到底跑没跑"。 */
+  ranInjections: string[][]
   /** 走本机路由（HTTP 形态，与 wasm-apps.spec.ts 同款假 req/res）。 */
   call: (url: string, method?: string, body?: string) => Promise<Captured>
   /** 走宿主工具（模型形态，经 `defineTool` 的真实参数校验）。 */
@@ -153,6 +167,7 @@ function harness(
   const routes: Route[] = []
   const outbound: Outbound[] = []
   const loggedErrors: string[] = []
+  const loggedWarnings: string[] = []
   const state = { cleared: 0 }
   const ctx = {
     effect: (fn: () => unknown) => { fn() },
@@ -169,7 +184,7 @@ function harness(
     },
     logger: {
       info: vi.fn(),
-      warn: vi.fn(),
+      warn: (message: string) => { loggedWarnings.push(message) },
       error: (message: string) => { loggedErrors.push(message) },
     },
     picoSession: {
@@ -200,13 +215,16 @@ function harness(
     outbound.push({ method: init?.method ?? 'GET', url: String(url), body, contentType })
     return await respond(init?.method ?? 'GET', String(url), { body, contentType })
   }))
-  apply(ctx as never, {} as AuthGateConfig)
+  const composition = apply(ctx as never, {} as AuthGateConfig)
   const route = routes.find(entry => entry.kind === 'prefix' && entry.path === WASM_APPS_PREFIX)
   if (route === undefined) throw new Error('wasm apps route not registered')
   return {
     tools,
     outbound,
     loggedErrors,
+    loggedWarnings,
+    skippedInjections: composition.skippedInjections,
+    ranInjections: composition.ranInjections,
     get cleared() { return state.cleared },
     call: async (url, method = 'GET', body) => {
       const host = '127.0.0.1:3080'
@@ -335,6 +353,12 @@ describe('装配：inject、注册、预算序关系', () => {
     // 这个方法，本文件连同另外二十多个 spec 一起红在 `TypeError: ctx.inject is not a
     // function` 上 —— 判据失去输入，不是产品行为）。
     expect(h.tools).toHaveLength(0)
+    // ①′ **直接**判据（2026-10-14 对抗审计 · 乙-2）：此前"回调没跑"只能靠
+    // "日志里没有多出一条错误"这种**间接代理**，而同一用例里的 `h.tools` 长度断言在
+    // 闸门被拆掉时**照样绿**（`registerWasmAppTools` 自己也会在 `tools` 缺席时早退）。
+    // 现在夹具把闸门结果显式交出来 —— 拆掉闸门这两条会当场红。
+    expect(h.skippedInjections).toEqual(['tools'])
+    expect(h.ranInjections).toEqual([])
     // ② "缺席要明确报错、不得静默"这条判据**一条没删**，只是改从真实调用点取：
     // `registerWasmAppTools` 是导出的产品函数，最小组合/无头嵌入直接调它 —— 早退分支
     // 就在 `tools` 判空那一行，`options` 还没被读过。
@@ -345,8 +369,23 @@ describe('装配：inject、注册、预算序关系', () => {
     )
     expect(logged.join('\n')).toContain('tools service is absent')
     expect(logged.join('\n')).toContain('wasm_app_publish')
-    // ③ `h.loggedErrors` 口径仍然对账：本环境没有别的错误被吞掉。
+    // ③ **组装期观测**（2026-10-14 对抗审计 · 乙-P2）：`inject` 化之后，上面那句
+    // `registerWasmAppTools` 的报错在**真缺 `tools`** 的宿主里**永远到不了**（回调不跑）
+    // ⇒ 该宿主静默少掉 6 个工具。应用宿主因此在组装期自己打一行提示（app-routes.ts），
+    // 这里把它判成**必须出现**（删掉那句观测 ⇒ 本断言红）。
+    expect(h.loggedWarnings.join('\n')).toContain('tools service is absent at composition time')
+    expect(h.loggedWarnings.join('\n')).toContain('wasm_app_publish')
+    // ③′ `h.loggedErrors` 口径仍然对账：本环境没有别的错误被吞掉。
     expect(h.loggedErrors).toEqual([])
+  })
+
+  it('tools 在场时回调真的跑（`inject` 闸门的正向对照）', () => {
+    // 负向对照的反面：没有这一条的话，`skippedInjections`/`ranInjections` 两个读面
+    // 都可能在"闸门恒不跑"的实现下绿（那正是审计说的"观察力薄"）。
+    const h = harness(() => json(200, {}))
+    expect(h.skippedInjections).toEqual([])
+    expect(h.ranInjections).toEqual([['tools']])
+    expect(h.loggedWarnings).toEqual([])
   })
 })
 

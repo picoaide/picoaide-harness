@@ -42,9 +42,9 @@
   ],
   "scripts": {
     "build": "tsdown && tsc -p tsconfig.json --emitDeclarationOnly && tsc -p tsconfig.client.json --emitDeclarationOnly",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.tests.json --noEmit",
     "test": "vitest run",
-    "check": "yarn run build && yarn run test"
+    "check": "yarn run build && tsc -p tsconfig.tests.json --noEmit && yarn run test"
   },
   "dependencies": {
     "@picoaide/dsh-enterprise": "workspace:*"

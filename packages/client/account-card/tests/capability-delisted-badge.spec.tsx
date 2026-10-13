@@ -37,9 +37,31 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   CapabilityCenterPanel,
-  type CapabilityItem,
+  installEndpoint,
 } from '../../../host/capability-center/src/client/CapabilityCenterPanel.tsx'
 import { setActiveLocale, t } from '../../../host/capability-center/src/client/locales.ts'
+
+/**
+ * 宿主 `?source=local` 下发的**本机行线形状**。
+ *
+ * 类型从**消费它的导出函数**取（`installEndpoint(item: CapabilityItem, …)`），这样夹具
+ * 与产品形状同源、不会手抄一份慢慢漂移。此前这里写的是
+ * `type CapabilityItem` 直接 import 面板的内部接口 —— 那是一条**死的** import：
+ * vitest 走 esbuild 剥类型不报错，只有 `tsc` 报 TS2459（`declares 'CapabilityItem'
+ * locally, but it is not exported`）。本包 2026-10-14 接上 `tsconfig.tests.json`
+ * 之后这条当场被抓住。
+ *
+ * 为什么 `installed` 在这里是**可选**：面板把 `CapabilityItem.installed` 声明成必填，
+ * 但宿主的本机行**根本不下发这个字段**（`capability-center/src/host/skill-routes.ts`
+ * 的 `localRows` 逐字如此）；"有本机行 ⇒ 已安装"是**归并层**算出来的
+ * （`mergeItems`：`rows.some(row => row.installed === true || row.source === 'local')`）。
+ * 夹具要模拟的是"宿主发什么"，所以这一格按线形状放宽。
+ * ⚠️ 这个差异本身是一条**未修**的类型契约问题（面板的必填声明比线形状强），
+ * 已登记在本轮回报里 —— 不在这里顺手改产品类型。
+ */
+type CapabilityItem = Omit<Parameters<typeof installEndpoint>[0], 'installed'> & {
+  installed?: boolean | undefined
+}
 
 ;(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 

@@ -1,0 +1,47 @@
+{
+  // 测试工程（`tsc -p tsconfig.tests.json --noEmit`；接在本包 `check` 与 `typecheck` 里）。
+  //
+  // ## 为什么需要它（2026-10-14 对抗审计 · 甲-P2）
+  //
+  // 本包的 `tests/**` 此前**不在任何 tsconfig 的 include 面内**：`tsconfig.json` 只看
+  // `src/*.ts`，`tsconfig.client.json` 只看 `src/client/**`，而 `check` 只有 `build && test`。
+  // 于是「`typecheck` EXIT=0」对 `tests/**` 里的 import 路径**没有观察力** —— 审计实测把
+  // `tests/capability-delisted-badge.spec.tsx` 的 import 改成指向不存在的目录后，
+  // `yarn workspace @picoaide/dsh-account-card typecheck` 仍然 **EXIT=0**，只有 vitest
+  // 才报 `Failed to resolve import`。跨包源码 import（`../../../host/capability-center/…`、
+  // `../../../host/enterprise/src/client/channel-store.ts`）正是最容易悄悄写坏的那一类，
+  // 所以这条路径必须有编译期判据，而不是只靠跑起来才发现。
+  //
+  // ## 口径（与包内既有 tsconfig 对齐，不另起一套）
+  //
+  // `extends ./tsconfig.json` 继承 `strict` / `exactOptionalPropertyTypes` /
+  // `noUncheckedIndexedAccess` / `noUnused*` / `verbatimModuleSyntax` / `module: NodeNext`
+  // 等全部既有取值；这里只补三处测试工程**必需**的差异：
+  //
+  //  - `rootDir: "../.."`（= `packages/`）：用例里有**跨包读源码**的对拍（`../../../host/…`
+  //    的真实 `CapabilityCenterPanel.tsx` / `channel-store.ts`），`rootDir: src` 会把它们判成
+  //    TS6059（文件不在 rootDir 下）而让整包 typecheck 变红。放宽后这些被引用的源码**照样
+  //    进类型检查**（覆盖面只增不减）。与 `packages/host/desktop/tsconfig.tests.json` 同款写法。
+  //  - `jsx: "react-jsx"` + DOM lib：用例是 `.tsx`（jsdom + `createRoot(...).render(...)`），
+  //    与 `tsconfig.client.json` 的取值一致。
+  //  - `noEmit` / `emitDeclarationOnly: false`：这是**判据**不是构建面，不产任何文件
+  //    （`allowImportingTsExtensions` 也要求有 `noEmit`）。
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "../..",
+    "jsx": "react-jsx",
+    "lib": [
+      "ES2024",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "noEmit": true,
+    "emitDeclarationOnly": false
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "tests/**/*.ts",
+    "tests/**/*.tsx"
+  ]
+}
