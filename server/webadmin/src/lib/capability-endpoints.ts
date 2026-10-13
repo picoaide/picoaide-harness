@@ -25,7 +25,10 @@
  * 3. `null` = 该渠道**没有**这个端点(如组织库没有 规范化 / 元数据编辑 / 上传新版)。
  *    调用方必须**不渲染或禁用**该入口并给出明确文案,不得留必然 404 的入口。
  *
- * 路径与动词的**唯一真源**是 `server/internal/router/router.go` 的路由声明;
+ * 路径与动词的**唯一真源**是 `server/internal/router/` 的路由声明 —— `router.go`
+ * 的基础面 **加上**按 build tag 分片的 `optional_<module>_on.go`（skills / apps /
+ * connectors 三个可选模块的路由在 2026-10-14 从 `router.go` 搬进分片，只读
+ * `router.go` 会让 87 条管理面路由静默掉出对拍面）；
  * 本模块的每一条都被 `capability-endpoints.spec.ts` **读服务端源码**逐条对拍
  * (路径不存在 / 动词不符 / 命名空间拿错 ⇒ 红)。
  */

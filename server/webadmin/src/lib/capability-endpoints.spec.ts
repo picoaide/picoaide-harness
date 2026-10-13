@@ -30,8 +30,8 @@
  * （组织行的 URL 前缀与所属 channel 不符，且 `/skills/<org 名>` 这类 URL 的动词/
  * 路径组合与组织端点对不上）。把 `org: () => null` 改成回落到市场端点 ⇒ 第 5 条必红。
  */
-import { existsSync, readFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { basename, join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { ADMIN_API } from './api-paths'
 import {
@@ -129,10 +129,43 @@ function requireMatch(routes: Route[], method: string, url: string, where: strin
 }
 
 // ---------------------------------------------------------------------------
-// 生产路由表：internal/router/router.go（逐级推导前缀，任何一环断链即抛错）
+// 生产路由表：`internal/router/router.go` + `optional_<module>_on.go`
+// （逐级推导前缀，任何一环断链即抛错）
+//
+// **为什么不是一个文件**（2026-10-14 P1 第二片起）：可选模块（skills / apps /
+// connectors）的路由声明被搬进按 build tag 分片的 `optional_<module>_on.go`，
+// 关闭态由同名 `_off.go` 提供空实现。只读 `router.go` 会让这 87 条管理面路由
+// **静默从对拍面消失**：实测（合并 p1b 之后、默认 features）本文件 5 条锚点红，
+// 报"生产路由表缺少锚点 PUT /api/server/admin/shared-skills/:name/enabled" ——
+// 那不是真源缺失，是**解析面缩水**。对拍口径 = 发布态（全开）声明集。
 // ---------------------------------------------------------------------------
 
 const ROUTER = readFileSync(ROUTER_GO, 'utf8')
+
+/** 可选模块的**开启态**路由分片（相对 `internal/router/`）。 */
+const MODULE_ROUTE_FILES = [
+  'optional_skills_on.go',
+  'optional_apps_on.go',
+  'optional_connectors_on.go',
+].map((name) => join(SERVER_DIR, 'internal', 'router', name))
+
+// 棘轮：真源里新出现一个 `optional_*_on.go` 而没进上面这张表 ⇒ 抛错。
+// 少了这条，"新模块的路由"会再次静默落到判据面之外（判据的判据）。
+{
+  const discovered = readdirSync(join(SERVER_DIR, 'internal', 'router'))
+    .filter((name) => /^optional_.+_on\.go$/.test(name))
+    .sort()
+  const declared = MODULE_ROUTE_FILES.map((file) => basename(file)).sort()
+  if (discovered.join('\u0000') !== declared.join('\u0000')) {
+    throw new Error(
+      `可选模块路由分片与对拍面不一致：真源 ${JSON.stringify(discovered)} vs 登记 ${JSON.stringify(declared)}`
+        + '（新增/改名的 optional_*_on.go 必须同时进本文件的 MODULE_ROUTE_FILES）',
+    )
+  }
+}
+
+/** 生产路由**声明集**：基础面 + 各可选模块开启态分片（顺序无关，取并集）。 */
+const ROUTE_SOURCES: readonly string[] = [ROUTER, ...MODULE_ROUTE_FILES.map((file) => readFileSync(file, 'utf8'))]
 
 function must(pattern: RegExp, what: string): string {
   const m = pattern.exec(ROUTER)
@@ -152,13 +185,15 @@ const ADMIN_GROUP_VAR = must(
   'authed := sg.Group("")（会话内管理面的组变量）',
 )
 
-/** 生产路由树里的管理面路由（`AdminRoute(authed, …)` 全部声明）。 */
+/** 生产路由树里的管理面路由（`AdminRoute(authed, …)` 全部声明，含可选模块分片）。 */
 const PROD_ROUTES: Route[] = (() => {
   const routes: Route[] = []
   const re = /AdminRoute\(\s*(\w+)\s*,\s*"([A-Z]+)"\s*,\s*"([^"]*)"/g
-  for (const m of ROUTER.matchAll(re)) {
-    if (m[1] !== ADMIN_GROUP_VAR) continue
-    routes.push({ method: m[2]!, path: ADMIN_BASE + m[3]! })
+  for (const source of ROUTE_SOURCES) {
+    for (const m of source.matchAll(re)) {
+      if (m[1] !== ADMIN_GROUP_VAR) continue
+      routes.push({ method: m[2]!, path: ADMIN_BASE + m[3]! })
+    }
   }
   return routes
 })()

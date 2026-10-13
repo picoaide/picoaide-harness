@@ -145,6 +145,42 @@
 4. **两条基线红清零**是"全绿"的硬前提：`check-workspaces` 若仍有 `enterprise` / `account-card` 红，CI 不可能绿。
 5. 转正：PR #181 去掉 draft（**只在 1–4 全绿后**）。push 由人确认；不自动 push。
 
+## 2.1 已验证记录（2026-10-14 06:2x–07:0x，集成线 `feat/p0-integration`）
+
+前置：集成 worktree 的依赖与子模块需先补齐（两处都是**环境**而非代码问题，新会话照做即可）：
+
+```bash
+# 1) node_modules：worktree 自带的 ../.yarn/cache 只有 185 个包（不全）⇒ 需先播种完整离线镜像
+cp -al /data/picoaide-harness/.yarn/cache/. <worktree>/.yarn/cache/      # 同盘硬链接，不占空间
+# 2) yarn 的全局目录在 /root 下不可写 ⇒ 必须给一个可写的 HOME
+cd <worktree> && HOME=/data/picoaide-harness/.yarn-home corepack yarn install --immutable   # exit 0
+# 3) 子模块：worktree 默认未 init，且**不能**从 GitHub 拉 ⇒ 用本地检出克隆（并把 origin 改回权威 URL）
+GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=submodule.deepseek-harness.url \
+  GIT_CONFIG_VALUE_0=/data/picoaide-harness/deepseek-harness \
+  git -c protocol.file.allow=always submodule update --init --recursive
+git -C deepseek-harness remote set-url origin https://github.com/deepseek-ai/deepseek-harness.git
+```
+
+> 第 3 步的 `set-url` **不是可选项**：本地克隆会让 `origin` 变成 `/data/...` 路径，`verify-layout` 会红在
+> `deepseek-harness origin differs from upstream.json`（`check:layout` 与 `check:wasm-client-only` 因此双红，
+> 与代码无关）。改回权威 URL 后 17 条根守卫全绿。
+
+| 项 | 判据（命令） | 结果 |
+|---|---|---|
+| D-01a | `yarn workspace @picoaide/dsh-wasm-apps-host test` | ✅ exit 0，30 files / **394 passed** |
+| D-01b | `yarn workspace @picoaide/dsh-wasm-apps test` | ✅ exit 0，27 files / **456 passed** |
+| D-02 | `yarn workspace @picoaide/dsh-account-card check` | ✅ exit 0，14 files / **87 passed**（build 也过） |
+| D-03/D-06 | `yarn workspace @picoaide/dsh-enterprise test` | ✅ exit 0，105 passed + 1 skipped / **1145 passed，0 failed**（222 条 ctx.inject 夹具红已消失） |
+| D-01 反证 | 把 `appcfg-contract.ts:302` 的 `LIMITS_GO_REPO_PATH` 改回旧家 `server/internal/wasmapp/limits/limits.go` | ✅ **exit 1**（5 条 FAIL：limits.go 读不到 / app_id 形态 / 版本号形态 / 白名单上限 / .wasm 体积上限）；恢复后 exit 0（23 passed） |
+| 根守卫 | `node scripts/check-root-guards.mjs` | ✅ **17/17 PASS**（修好子模块 origin 之后） |
+| 域守卫 | `node scripts/check-no-real-domains.mjs` | ✅ exit 0（含 `origin/master..HEAD` 40 条提交信息零命中） |
+| 合并预演 | `git merge-tree --write-tree feat/p0-integration <branch>` ×4 | ✅ **四路全部零冲突** |
+| 路径常量普查 | `grep` 出全部 `'server/**'` 字面量逐个 `-e` 判断存在性 | ✅ 无第二个搬迁残留（3 个"不存在"的路径是 spec 里的合成负例夹具，如 `zz-lookalike.ts`） |
+
+仍未在本机跑的（**留给 CI，不当作缺口**）：Go 侧 `make -C server check-tags` 变体矩阵（8 组合）与
+`go test ./cmd/server` —— p1b 自家那一轮已给过 88 vs 209 命名空间、关闭态二进制可启动等证据，且
+`.github/workflows/ci.yml:1007` 这一步现在就在 CI 里跑。
+
 ## 3. 已确认**不需要动**的项（避免下一会话重复劳动）
 
 - p1b 的 `COMBOS` 矩阵已从 `packages/host/desktop/scripts/channel-constants.ts` **派生**（8 组合，`server/scripts/check-go-build-tags.mjs:153-174`），旧审计的"矩阵只有 5/8"已失效。
