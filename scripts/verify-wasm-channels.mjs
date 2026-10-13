@@ -49,6 +49,10 @@ import { fileURLToPath } from 'node:url'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const CHANNELS_SCRIPT = join(ROOT, 'scripts', 'ci-channels.sh')
+/** channel.json 逐字段校验器（2026-10-13 从 ci-channels.sh 抽出，规避 Windows 命令行超长）。
+ *  冻结 scheme 正则与保留名单现在住在这里，扫描面必须跟着走 —— 否则本门禁会
+ *  "找不到符号"而静默失去意义（组 7 的红就是它）。 */
+const CHANNEL_VALIDATOR = join(ROOT, 'scripts', 'lib', 'check-channel-json.mjs')
 const DESIGN_DOC = join(ROOT, 'docs', 'planning', '2026-09-19-wasm-client-only-design.md')
 const UPSTREAM_JSON = join(ROOT, 'upstream.json')
 
@@ -216,12 +220,16 @@ section('1. 冻结 scheme 正则：设计总纲 §8.3 ↔ ci-channels.sh（逐�
     `设计总纲 §8.3 冻结正则 ${FROZEN_SCHEME_REGEX}（${DESIGN_DOC.replace(`${ROOT}/`, '')}:${docLines.join(',') || '未命中'}）`)
 
   const script = readLines(CHANNELS_SCRIPT)
-  const scriptLines = lineNumbersOf(script.text, FROZEN_SCHEME_REGEX)
+  const validator = readLines(CHANNEL_VALIDATOR)
+  // scheme 校验的两处现在住在抽出来的校验器里（ci-channels.sh 只保留调用点），
+  // 所以按"两个文件的并集"判 —— 断言本身不变（仍要求 ≥2 处且无无上界残留）。
+  const scriptText = `${script.text}\n${validator.text}`
+  const scriptLines = lineNumbersOf(scriptText, FROZEN_SCHEME_REGEX)
   // 两处：deep_link_scheme 与 app_origin_scheme。只出现一次 ⇒ 必有一处用了别的正则。
   check(scriptLines.length >= 2,
     `ci-channels.sh 两处 scheme 校验都用冻结正则（scripts/ci-channels.sh:${scriptLines.join(',') || '未命中'}；期望 ≥2 处）`)
 
-  const loose = lineNumbersOf(script.text, '^[a-z][a-z0-9+.-]*$')
+  const loose = lineNumbersOf(scriptText, '^[a-z][a-z0-9+.-]*$')
   check(loose.length === 0,
     `ci-channels.sh 不得残留无上界正则 ^[a-z][a-z0-9+.-]*$（scripts/ci-channels.sh:${loose.join(',') || '—'}）`)
 }
@@ -391,11 +399,11 @@ section('5. 保留 scheme 契约对拍（设计总纲 §10 六项 = 真源；额
   }
 
   // ---- 2) 三处实现各自的符号（解析不到 ⇒ FAIL 并点名文件 + 符号） ----
-  const ciText = readFileSync(CHANNELS_SCRIPT, 'utf8')
+  const ciText = readFileSync(CHANNEL_VALIDATOR, 'utf8')
   const targets = [
     {
-      label: 'CI',
-      file: CHANNELS_SCRIPT,
+      label: 'CI（channel.json 校验器）',
+      file: CHANNEL_VALIDATOR,
       symbol: 'RESERVED_APP_ORIGIN_SCHEMES',
       start: 'RESERVED_APP_ORIGIN_SCHEMES = new Set(',
       end: '])',
