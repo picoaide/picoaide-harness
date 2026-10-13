@@ -61,9 +61,9 @@ GO_PACKAGES := $(addprefix ./,$(addsuffix /...,$(GO_DIRS)))
 #     ① 取值**逗号分隔、不加空格**（Go 的 `-tags` 语法；带空格会被拆成包面参数）。
 #     ② `$(GO_TAG_FLAG)` **必须写在包面之前**：`go` 自带 flag 解析在第一个非 flag 词处
 #        停止，`go vet ./... -tags=x` 会被当成包模式，报 `malformed import path "-tags=x"`。
-#        （`.github/workflows/ci.yml` 的 `go vet` 那一步因此**不能**带 tag：那条命令的
-#        包面由 `scripts/check-workflows.mjs` 的 `ci-go-vet` 策略钉成 argv[1] 逐字 `./...`，
-#        而 tags 只能写在 argv[1] 之前 —— 见决策记录 §3。）
+#        （`.github/workflows/ci.yml` 的 `go vet` 因此写成 `go vet -tags=… ./...`；那条命令
+#        对应的 `ci-go-vet` 载荷口径于 2026-10-14 从"argv[1] 逐字 ./..."改成"第一个不以
+#        `-` 开头的词逐字 ./..." —— 缩面照样红，见决策记录 §3。）
 # ---------------------------------------------------------------------------
 GO_TAGS ?= skills,apps,connectors
 GO_TAG_FLAG := -tags=$(GO_TAGS)

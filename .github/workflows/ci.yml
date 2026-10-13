@@ -968,15 +968,22 @@ jobs:
             echo "::error::gofmt 未通过: $FILES"
             exit 1
           fi
-      # ⚠️ 这一步**刻意不带 `-tags`**（2026-10-14，P1 第一片）：`go` 的 flag 解析在第一个
-      # 非 flag 词处停止 ⇒ tags 只能写在**包面之前**（`go vet -tags=… ./...`），而本步的
-      # 包面被 `scripts/check-workflows.mjs` 的 `ci-go-vet` 策略钉成 argv[1] 逐字 `./...`
-      # ⇒ 两种写法必有一红（`go vet ./... -tags=…` 会被 Go 当成包模式，报
-      # `malformed import path "-tags=…"`）。**不要**为它注册 `GOFLAGS` 之类的环境键
-      # （那会同时给出 `-toolexec` 通道），也不要为此改守卫口径 ——
-      # 缺的这半由 `make -C server check-tags`（变体矩阵判据：对每个组合各跑一次
-      # build + vet）补上，见 docs/decisions/2026-10-14-server-build-tags.md §3。
-      - run: go vet ./...
+      # 2026-10-14（P1 第一片）：vet 也带上服务端可选模块的构建变体，与 `go test` 那一步
+      # 同值（发布态 = 全开）——要钉的是"CI 的静态分析面对的是发布出去的那套组合"。
+      #   · `GO_TAGS` 的缺省值与 `server/Makefile` 的 `GO_TAGS ?= skills,apps,connectors`
+      #     **逐字相同**；本文件刻意自持这一份字面量而不是去读 Makefile 的变量：
+      #     CI 的判据面不该随构建脚本的变量漂移（与本文件 `go test` 的 `-timeout 15m`
+      #     同一口径 —— Makefile 注释里明说 CI 那一份是写死的）。改这里就要同时改
+      #     `go test` 那一步，两处必须同值。
+      #   · **`-tags` 必须在包面之前**：`go` 的 flag 解析在第一个非 flag 词处停止，
+      #     `go vet ./... -tags=…` 会被当成包模式（`malformed import path "-tags=…"`，退出码 1）。
+      #     `scripts/check-workflows.mjs` 的 `ci-go-vet` 载荷因此判"**第一个不以 `-` 开头的词**
+      #     逐字 `./...`"（2026-10-14 由 argv[1] 改口径，意图不变：缩面照样红）。
+      #   · **不要**改用 `GOFLAGS` 之类的环境键来传（那会同时给出 `-toolexec` 通道）；也**不要**
+      #     改成 `env: GO_TAGS:` + `-tags=$GO_TAGS` 的变量形态 —— 被钉步骤上的 env 键是白名单制
+      #     （`PINNED_ENV_ALLOWED_KEYS`），实测会被 `[SK-17]` 当场判红，注册它等于多开一条
+      #     "判据步骤的构建变体由环境决定"的通道。这里保持**字面量**，与 `go test` 那一步同值。
+      - run: go vet -tags=skills,apps,connectors ./...
       # -p 1 串行跑测试包:多个包并行时总连接数仍可能挤压 service 的
       # max_connections(500),串行换取确定性。实测全量 wall ≈ 26 min
       # (2026-09-19,4 vCPU 与 runner 同规格,51 包全绿;最慢单包

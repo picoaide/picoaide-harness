@@ -3387,10 +3387,27 @@ const PINNED_STEP_POLICIES = [
     ifPolicy: 'never',
     // 载荷 = 包面必须逐字 `./...`：`go vet ./cmd` 仍然"运行期通过"，但把 `internal/**`、
     // `demoapps/**`、`webadmin/**`、`scripts/**` 整片静态分析面静默丢掉（E-03 实测两守卫 EXIT=0）。
+    //
+    // 2026-10-14（P1 第一片）：**包面 = 第一个不以 `-` 开头的词**，不再是逐字 `argv[1]`。
+    //
+    // 现场（为什么必须改）：这条策略要钉的意图是"**包面不许缩到子集**"，而 `argv[1]` 把
+    // "包面之前允不允许有 flag"这件与该意图无关的事一起钉死了。`go` 的 flag 解析在
+    // **第一个非 flag 词处停止** ⇒ `-tags=…` 只能写在包面**之前**（`go vet -tags=… ./...`）；
+    // 写成 `go vet ./... -tags=…` 会被 Go 当成包模式并直接失败
+    // （`malformed import path "-tags=…": leading dash`，退出码 1）。两者相撞的结果是
+    // "给 vet 加上构建变体"结构上不可能 —— 而构建变体（服务端可选模块的 `-tags`，见
+    // docs/decisions/2026-10-14-server-build-tags.md）并不比 `go vet ./cmd` 更危险。
+    //
+    // 判据面**没有变小**：缩面形态照样红 —— `go vet ./cmd` 与 `go vet -tags=x ./cmd` 的
+    // 第一个非 flag 词都不是 `./...`。
+    //
+    // 已知边界（认账）：`-flag 值` 的**分离写法**（Go 允许 `-tags x`）会让那个"值"成为第一个
+    // 非 `-` 词 ⇒ 判据把它读成包面并**判红**。这是刻意的：判据不替调用方猜"哪个词是 flag 的
+    // 值"（那要自带一份 flag 语法表 = 第二份派生逻辑），写法归一到 `-flag=值` 即可。
     payload: script => {
       const vet = executedCommands(script).find(entry => entry.command === 'go' && (entry.argv[0] ?? '') === 'vet')
       if (vet === undefined) return '命令位上找不到 `go vet`'
-      const face = vet.argv[1] ?? ''
+      const face = vet.argv.slice(1).find(word => !word.startsWith('-')) ?? ''
       return face === './...' ? null : `它的包面是 \`${face === '' ? '(缺)' : face}\` 而不是逐字 \`./...\``
         + '（缩到子集 = 被缩掉的包整片失去静态分析，而 CI 照旧通过）'
     },
