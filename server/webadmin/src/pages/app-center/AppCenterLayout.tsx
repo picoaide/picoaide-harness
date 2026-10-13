@@ -34,9 +34,19 @@ const TABS: AppCenterTab[] = [
   { to: '/app-center/limits', label: '限制项', icon: SlidersHorizontal },
 ]
 
+/**
+ * 应用中心的**变体哨兵串**（P3；命名 = `picoaide.feature.<模块>.v1`，模块名 `apps`
+ * 与 Go 侧 `-tags`、渠道配置 `features` 逐字一致）。
+ *
+ * 落点选在**分区布局**而不是某个子页：它是 `/app-center/*` 任何一条子路由都会渲染的那一层，
+ * 于是"应用面在不在产物里"与"这个串在不在"是同一件事。双侧判据与两条纪律见
+ * `pages/CapabilityCenter.tsx` 的同名常量（`scripts/check-feature-chunks.mjs`）。
+ */
+export const FEATURE_SENTINEL = 'picoaide.feature.apps.v1'
+
 export default function AppCenterLayout() {
   return (
-    <div className="space-y-4">
+    <div className="space-y-4" data-feature-sentinel={FEATURE_SENTINEL}>
       <div className="flex flex-wrap items-center gap-1 rounded-lg border border-border bg-muted/40 p-1">
         {TABS.map((t) => (
           <NavLink

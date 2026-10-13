@@ -1,4 +1,4 @@
-import { Component, Suspense, lazy, useEffect, useState, type ReactNode } from 'react'
+import { Component, Suspense, lazy, useEffect, useState, type ComponentType, type ReactNode } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, NavLink, Link } from 'react-router-dom'
 import { LogOut, Globe, ShieldCheck, KeyRound, ChevronRight, SearchX, Menu, X, Lock, Eye } from 'lucide-react'
 import { me, logout, request, setOnUnauthorized, ADMIN_API } from './api'
@@ -23,19 +23,38 @@ const Auth = lazy(() => import('./pages/Auth'))
 const ErrorMonitoring = lazy(() => import('./pages/ErrorMonitoring'))
 const Audit = lazy(() => import('./pages/Audit'))
 const ServerInfo = lazy(() => import('./pages/ServerInfo'))
+
+// ---------------------------------------------------------------------------
+// 模块页(P3 变体,契约 docs/decisions/2026-10-14-webadmin-feature-variant.md)
+//
+// 三条模块页(能力中心 / 应用中心 / 连接器)整体受编译期开关约束:**关闭时页面代码
+// 不进 dist**(不是"藏起来"—— chunk 根本不产出)。两条硬约束:
+//
+//   ① 守卫必须直接写 `__FEATURE_<MODULE>__` **全局**(define 注入的布尔字面量),
+//      不能走 `isFeatureEnabled('x')`:后者是函数调用,打包器折不掉分支,chunk 照样产出;
+//   ② 被守卫的 `import()` 与 `<Route>` 必须**同时**在 `__FEATURE_X__` 的三元/&& 里
+//      —— 只守一处会留下"路由在、页面不在"(白屏)或"页面在、路由不在"(死 chunk)。
+//
+// 关闭分支的占位符 `DisabledPage` 只为让 JSX 的类型面保持"永远是一个组件"
+// (TS 会检查两个分支,即使死分支也一样);折叠后它与死分支一起消失。
+// 判据:`src/lib/features.test.ts`(守卫形态自证 + 变体期望)与
+// `scripts/check-feature-chunks.mjs`(产物双侧断言)。
+// ---------------------------------------------------------------------------
+const DisabledPage: ComponentType = () => null
+
 // 2026-09-02:「市场 · 技能」与「能力中心」合并为单入口(与客户端 IA 对齐)。
-const CapabilityCenter = lazy(() => import('./pages/CapabilityCenter'))
+const CapabilityCenter: ComponentType = __FEATURE_SKILLS__ ? lazy(() => import('./pages/CapabilityCenter')) : DisabledPage
 // 2026-09-18:应用中心(员工自建 WASM 应用的平台管理员面)。
 // 2026-09-19:原「应用平台」(`/app-platform`,并发/内存限制项)并入应用中心成为
 // 「限制项」子页;侧栏只留「应用中心」一个入口。
 // 2026-09-19(同日后半):WASM 应用改为**客户端专属**(`picoaide-app://<app_id>/`),
 // 服务端删除应用基域配置面 ⇒ 上半天新增的「设置」子页(应用域名/泛域名)整页删除,
 // 连同这里的分区路由与 AppCenterLayout 的子导航项一起去掉(契约 §4.4/§4.5)。
-const AppCenterLayout = lazy(() => import('./pages/app-center/AppCenterLayout'))
-const AppCenterApps = lazy(() => import('./pages/app-center/Apps'))
-const AppCenterOpens = lazy(() => import('./pages/app-center/OpensBoard'))
-const AppCenterLimits = lazy(() => import('./pages/app-center/Limits'))
-const Connectors = lazy(() => import('./pages/Connectors'))
+const AppCenterLayout: ComponentType = __FEATURE_APPS__ ? lazy(() => import('./pages/app-center/AppCenterLayout')) : DisabledPage
+const AppCenterApps: ComponentType = __FEATURE_APPS__ ? lazy(() => import('./pages/app-center/Apps')) : DisabledPage
+const AppCenterOpens: ComponentType = __FEATURE_APPS__ ? lazy(() => import('./pages/app-center/OpensBoard')) : DisabledPage
+const AppCenterLimits: ComponentType = __FEATURE_APPS__ ? lazy(() => import('./pages/app-center/Limits')) : DisabledPage
+const Connectors: ComponentType = __FEATURE_CONNECTORS__ ? lazy(() => import('./pages/Connectors')) : DisabledPage
 
 // Usage 相关页含 VChart(约 2.6MB 未压缩),懒加载避免污染首屏(审计2026-E1)。
 // 用量中心(2026-09 重构):子导航布局 + 6 个二级页。
@@ -372,20 +391,34 @@ export default function App() {
                     <Route path="balance" element={<UsageBalance />} />
                     <Route path="reports" element={<UsageReports />} />
                   </Route>
-                  <Route path="/marketplace" element={<Navigate to="/capabilities?tab=market" replace />} />
-                  <Route path="/capabilities" element={<CapabilityCenter />} />
-                  <Route path="/app-center" element={<AppCenterLayout />}>
-                    <Route index element={<AppCenterApps />} />
-                    {/* 运营看板（F16，2026-09-19 W5）：打开次数 PV/UV/趋势/TOP N。 */}
-                    <Route path="opens" element={<AppCenterOpens />} />
-                    <Route path="limits" element={<AppCenterLimits />} />
-                  </Route>
-                  <Route path="/connectors" element={<Connectors />} />
+                  {/* 模块页(P3 变体):整块受 `__FEATURE_<MODULE>__` 约束 —— 关闭时
+                      路由与页面 chunk **一起**不产出。守卫形态必须是 define 注入的
+                      布尔字面量(见本文件顶部的模块页注释),否则打包器折不掉分支,
+                      `scripts/check-feature-chunks.mjs` 会红。 */}
+                  {__FEATURE_SKILLS__ && (
+                    <Route path="/marketplace" element={<Navigate to="/capabilities?tab=market" replace />} />
+                  )}
+                  {__FEATURE_SKILLS__ && (
+                    <Route path="/capabilities" element={<CapabilityCenter />} />
+                  )}
+                  {__FEATURE_APPS__ && (
+                    <Route path="/app-center" element={<AppCenterLayout />}>
+                      <Route index element={<AppCenterApps />} />
+                      {/* 运营看板（F16，2026-09-19 W5）：打开次数 PV/UV/趋势/TOP N。 */}
+                      <Route path="opens" element={<AppCenterOpens />} />
+                      <Route path="limits" element={<AppCenterLimits />} />
+                    </Route>
+                  )}
+                  {__FEATURE_CONNECTORS__ && (
+                    <Route path="/connectors" element={<Connectors />} />
+                  )}
                   {/* 老书签兼容(与 /marketplace 同口径):原「应用平台」页已并入
                       应用中心,这里只做重定向,不再保留独立页面。
                       目标是 limits —— 老书签原本看到的就是限制项,重定向必须落到内容
                       等价的那个子页(应用中心现在是「应用」「运营看板」「限制项」三页)。 */}
-                  <Route path="/app-platform" element={<Navigate to="/app-center/limits" replace />} />
+                  {__FEATURE_APPS__ && (
+                    <Route path="/app-platform" element={<Navigate to="/app-center/limits" replace />} />
+                  )}
                   <Route path="/audit" element={<Audit />} />
                   <Route path="/server-info" element={<ServerInfo />} />
                   <Route path="*" element={<NotFound />} />

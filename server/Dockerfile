@@ -35,6 +35,18 @@ WORKDIR /build
 # webadmin 不再编译期注入任何品牌素材:logo/名称全部来自渠道内容
 # (GET /api/client/v2/channel,镜像内 /opt/picoaide/channel/)。仓库里不留
 # 品牌描述,因此这里也不需要 root 构建上下文(2026-09-10 审计)。
+#
+# 功能模块变体（2026-10-14，P3 第二片）：**必须与 Stage 2 的 GO_TAGS 是同一个串**，
+# 否则会出现"服务端裁了接口、管理端还留着页面"（点进去全是 404）或反过来的半通状态。
+# 两种编码：webadmin 用显式 `none` 表示三个全关，Go 用空 tag 集。
+#   变体标识   skills,apps,connectors / apps,connectors / … / none
+#   不传这个 build-arg ⇒ 缺省全开（与本次改造之前的产物同源）。
+# 判据：webadmin 侧的产物双侧断言 = `server/webadmin/scripts/check-feature-chunks.mjs`
+#       （`make -C server webadmin-check-features`）；Go 侧 = `make -C server check-tags`。
+ARG FEATURES=skills,apps,connectors
+# 用 ENV 而不是把变量写进 RUN：`npm run build`（tsc -b && vite build）整条链路都要能读到
+# 同一个值（vite.config.ts 与 vitest.config.ts 都从环境读，真源解析在 webadmin/features.mjs）。
+ENV FEATURES=$FEATURES
 COPY webadmin/package.json webadmin/package-lock.json ./
 RUN npm ci
 COPY webadmin/ ./

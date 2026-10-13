@@ -20,6 +20,19 @@ import BuiltinSkills from './BuiltinSkills'
  */
 type TabKey = 'skill' | 'agent' | 'org' | 'builtin'
 
+/**
+ * 能力中心的**变体哨兵串**（P3；命名 = `picoaide.feature.<模块>.v1`，模块名 `skills`
+ * 与 Go 侧 `-tags`、渠道配置 `features` 逐字一致）。
+ *
+ * 用途：产物级判据 `scripts/check-feature-chunks.mjs` 在 dist 里按这个串做**双侧**存在性
+ * 断言 —— 开启变体里必须出现、关闭变体里必须不出现。两条纪律（与 P0 §6 同口径）：
+ *   1. 它必须落在**该页面真的会渲染**的那条路径上（这里作为根元素的 data 属性渲染出去），
+ *      不能只躺在一个常量模块里 —— 没被引用的字符串会被打包器一起丢掉，那样"产物里没有
+ *      这个串"就既可能是"模块被裁掉了"、也可能只是"串被优化掉了"，判据失去意义；
+ *   2. 判据必须**双侧**：只判"关闭变体里没有"是恒真的（一个空产物也满足）。
+ */
+export const FEATURE_SENTINEL = 'picoaide.feature.skills.v1'
+
 export default function CapabilityCenter() {
   const [params, setParams] = useSearchParams()
   const tab: TabKey = params.get('tab') === 'org'
@@ -31,7 +44,7 @@ export default function CapabilityCenter() {
         : 'skill'
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4" data-feature-sentinel={FEATURE_SENTINEL}>
       <PageHeader
         title="能力中心"
         desc="技能 / 智能体 / 审批 / 平台内置:官方蓝标、员工上传审批与授权、锁定管理"
