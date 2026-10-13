@@ -17,6 +17,20 @@
  * 假 ctx 因此必须支持 `provide`/`get` 这一对 —— 各 spec 里的 `const ctx = { … }` 都补了
  * 两行（`provide` 写进 `ctx['__svc_<name>']`，`get` 先查它）。
  *
+ * ## 还要支持 `inject`（2026-10-13；`ctx.inject is not a function` 的成因）
+ *
+ * 模块行的宿主面用 `ctx.inject(['tools'], cb)` 取可选服务
+ * （`wasm-apps-host/src/app-routes.ts`，理由写在那里：纯 Node 宿主里 `tools` 可能整行
+ * 缺席，写进行级 `inject` 会把"工具没注册"升格成"启动门禁红"）。手写的假 ctx 没有这个
+ * 方法，于是 `registerAppRoutes` 在**装组合的那一刻**就抛 `TypeError` —— 本文件下游
+ * 三十个 spec 全部红在夹具形状上（不是产品行为），`yarn check` 的 enterprise 环节因此
+ * 长期不可绿。
+ *
+ * {@link applyFullComposition} 按**真 Cordis 的语义**补上它：只有当**全部**被点名的服务
+ * 当下可解析时才用 `ctx` 调回调；否则回调**不跑**（服务以后也不会出现 —— 这就是"纯 Node
+ * 宿主里那一行缺席"的真实形态，不是把断言绕开）。这不是"测试替身"：三个 `apply` 与
+ * `registerAppRoutes` 都是产品代码本身。
+ *
  * **这不是"测试替身"**：装的三个 `apply` 都是产品代码本身，围栏、网关客户端、语言解析
  * 都还是那一份实现。这个文件只负责按真实顺序把它们串起来。
  *
@@ -49,6 +63,7 @@ export function applyFullComposition(ctx: Context, config: Config = {} as Config
   const mutable = ctx as unknown as {
     get: (name: string) => unknown
     provide?: (name: string, value: unknown) => unknown
+    inject?: (names: string | string[], callback: (scope: Context) => unknown) => unknown
   }
   // 有的 spec 的假 ctx **没有** `get`（只装登录页那几个，从不查服务）—— 兜一个
   // 恒 undefined 的读面，而不是让 `bind` 抛在夹具形状上。
@@ -78,6 +93,20 @@ export function applyFullComposition(ctx: Context, config: Config = {} as Config
   mutable.provide = (name: string, value: unknown) => {
     provided.set(name, value)
     return rawProvide?.(name, value)
+  }
+  /**
+   * `ctx.inject(deps, cb)` 的本仓形态：**服务齐了才跑回调**（真 Cordis 语义）。
+   *
+   * 保留各 spec 自己写的 `inject`（如果它摆了）：本函数的职责只是"假 ctx 缺这个方法时
+   * 不要炸在产品代码里"。手写对象字面量没有这个方法，于是这里兜一个。
+   */
+  const rawInject = mutable.inject?.bind(ctx)
+  mutable.inject = (names: string | string[], callback: (scope: Context) => unknown) => {
+    if (rawInject !== undefined) return rawInject(names, callback)
+    const deps = Array.isArray(names) ? names : [names]
+    // 读面用**包装后**的 `get`（它认 `provide` 写的表、也认 spec 摆的属性）。
+    if (!deps.every(name => mutable.get(name) !== undefined)) return () => {}
+    return callback(ctx) ?? (() => {})
   }
   applyAuthGate(ctx, config)
   applyCapabilityCenter(ctx)
