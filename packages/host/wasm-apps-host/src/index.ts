@@ -55,6 +55,21 @@ import {
 export const name = 'pico-wasm-apps-host'
 
 /**
+ * 渠道功能模块 `apps` 的**端到端哨兵串**（契约见
+ * `docs/decisions/2026-10-13-channel-feature-modules.md`）。
+ *
+ * 为什么定义在这里、而不是只放在某个常量模块里：哨兵只有在**本模块真正被装配**的
+ * 那条路径上才有意义 —— 没被引用的字符串会被打包器/链接器一起丢掉，"产物里没有这个
+ * 串"于是既可能是"模块被裁掉了"、也可能只是"串被优化掉了"。所以它由 `apply()`
+ * 写进一行装配日志。
+ *
+ * **它只是副证**（不要把它当承重判据）：承重的是依赖图/文件清单（模块是否真的没被
+ * 打进去），而且哨兵判据必须**双侧** —— 开启变体里必须也存在，这个量具才算数。
+ * 串的命名规则唯一真源是 `channel-constants.ts` 的 `featureSentinel()`。
+ */
+export const WASM_APPS_FEATURE_SENTINEL = 'picoaide.feature.apps.v1'
+
+/**
  * 本插件需要的服务：员工会话（enterprise 提供）与本机 webServer（本机路由）。
  *
  * 适配器**不进 inject**：它是桌面壳 `provide` 进来的普通值，且允许缺席（纯 Node
@@ -226,6 +241,9 @@ function parseJsonBody(body: Uint8Array): unknown {
  * @param config - scheme / 产品名 / 分区覆盖 / 出站预算。
  */
 export function apply(ctx: Context, config: Config = {}): void {
+  // 渠道功能模块 `apps` 的装配哨兵（见 WASM_APPS_FEATURE_SENTINEL 的说明）：
+  // 一行 info 日志，让"这个模块在这次装配里真的到位了"在端到端产物里有一条可查的痕迹。
+  ctx.logger?.info?.(`pico-wasm-apps-host: registered (${WASM_APPS_FEATURE_SENTINEL})`)
   const warn = (message: string): void => { ctx.logger?.warn?.(message) }
   const service = (): PicoSessionLike | undefined => ctx.get('picoSession') as PicoSessionLike | undefined
   const currentSession = (): ReturnType<typeof readAppSession> => readAppSession(service())

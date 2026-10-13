@@ -70,6 +70,7 @@ description: PicoAide Harness 的渠道机制：渠道内容为什么随镜像�
 | 文案 | 登录页与客户端欢迎语、门户欢迎语 |
 | 素材 | 亮 / 暗两套 logo、favicon、主题色 |
 | 客户端 | 数据根目录、内置服务端地址、安装包名（slug）、应用 ID、深链 scheme、应用源 scheme |
+| 功能模块 | 技能 / WASM 应用 / 连接器各自的开关（`features`，缺省全开；见下） |
 | 可选 | 语音模型是否随包分发（`desktop.speech_bundle_model`，缺省开启；开启时安装包增大约 +140～250 MiB）、是否允许使用系统代理（`desktop.allow_system_proxy`） |
 
 这些内容同时作用于**客户端登录页、客户端界面、管理后台侧栏与门户页** —— 一处配置，全产品一致。
@@ -100,8 +101,33 @@ description: PicoAide Harness 的渠道机制：渠道内容为什么随镜像�
 > **官方渠道是新增渠道的模板**：CI 取渠道包时会校验官方渠道的 `channel.json` **逐键显式**
 > （键表见 `packages/host/desktop/scripts/channel-constants.ts` 的 `CHANNEL_TEMPLATE_KEYS`），
 > 缺键即失败并点名键名。所以"新增一个渠道"= 拷贝 `channels/official/` → 改身份字段 →
-> 裁剪 `desktop.platforms`，不需要翻源码才知道有哪些键。三个 `desktop.speech_*` 键是
-> **覆盖型**（不写 = 用随包模型），刻意不进模板 —— 写进模板等于把路径钉死。
+> 裁剪 `desktop.platforms` 与 `features`，不需要翻源码才知道有哪些键。三个 `desktop.speech_*`
+> 键是**覆盖型**（不写 = 用随包模型），刻意不进模板 —— 写进模板等于把路径钉死。
+
+### 渠道交付哪些功能模块（`features`）
+
+渠道包默认交付**全部功能模块**（技能 / WASM 应用 / 连接器）。如果这个渠道不需要其中某个模块，
+在渠道配置里显式关掉即可：
+
+```json
+"features": { "skills": true, "apps": true, "connectors": false }
+```
+
+- 键只有 `skills` / `apps` / `connectors`，取值必须是布尔；**不写这个键 = 全部开启**
+  （基础功能恒开，既有渠道行为不变）；
+- 缺省是**逐键**的：只写 `{"connectors": false}` 时其余模块保持开启，不需要把开关抄一遍；
+- 写错（未知模块名、取值不是布尔 —— 字符串 `"false"` 在客户端读起来是**真值**、`features`
+  不是对象）⇒ **构建期中止，该渠道本次没有产物**：报错点名字段与合法模块名，
+  但**不回显取值**（渠道包里的任意字符串会进公开日志）；
+- 官方渠道的模板里**逐模块**列出这三个键，所以"新增一个渠道"时一眼就能看到有哪几个模块可关。
+
+> **当前这条链路的边界**：声明会随包写进渠道配置的 `features`（规范化后的开关，三个键齐全）
+> 与 `features_variant`（稳定变体标识，如 `skills,apps`、`connectors`、`none`）。
+> 变体标识就是后续交给**服务端镜像的编译标签**（Go `-tags`）、**客户端组装**与
+> **管理后台构建参数**（`--build-arg FEATURES=<变体标识>`）的同一个串 —— 三处必须同源，
+> 否则会出现"镜像里有、客户端里没有"这种没有任何红灯的半通状态。
+> 在消费端接线之前，改 `features` **不会**改变产物内容。完整契约（含"怎么证明某个模块
+> 真的没被打进产物"）见仓库内 `docs/decisions/2026-10-13-channel-feature-modules.md`。
 
 ### 语音识别模型怎么进到客户网（`desktop.speech_*`）
 

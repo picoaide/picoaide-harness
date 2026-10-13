@@ -41,6 +41,22 @@ export const name = 'skill-telemetry'
 /** Services consumed: the session service (bearer token). */
 export const inject = ['picoSession', 'tools']
 
+/**
+ * 渠道功能模块 `skills` 的**端到端哨兵串**（契约见
+ * `docs/decisions/2026-10-13-channel-feature-modules.md`）。
+ *
+ * 为什么定义在这里、而不是只放在某个常量模块里：哨兵只有在**本模块真正被装配**的
+ * 那条路径上才有意义 —— 没被引用的字符串会被打包器/链接器一起丢掉，"产物里没有这个
+ * 串"于是既可能是"模块被裁掉了"、也可能只是"串被优化掉了"。所以它由 `apply()`
+ * 写进一行装配日志（这一行是技能模块自己的 loader 行 `picoaide-skill-telemetry`：
+ * 模块被裁掉时它不会被执行，串也就不会出现在产物里）。
+ *
+ * **它只是副证**（不要把它当承重判据）：承重的是依赖图/文件清单（模块是否真的没被
+ * 打进去），而且哨兵判据必须**双侧** —— 开启变体里必须也存在，这个量具才算数。
+ * 串的命名规则唯一真源是 `channel-constants.ts` 的 `featureSentinel()`。
+ */
+export const SKILLS_FEATURE_SENTINEL = 'picoaide.feature.skills.v1'
+
 // ---- 可靠性窗口:同一调用只报一次(键带账号+服务端作用域,集合有上界) ----
 
 /**
@@ -189,6 +205,9 @@ async function installedVersion(name: string): Promise<string | undefined> {
  * 令牌，逐次判定归属）、`memory-evolve` 的按 sessionId 分目录。
  */
 export function apply(ctx: Context): void {
+  // 渠道功能模块 `skills` 的装配哨兵（见 SKILLS_FEATURE_SENTINEL 的说明）：
+  // 一行 info 日志，让"这个模块在这次装配里真的到位了"在端到端产物里有一条可查的痕迹。
+  ctx.logger?.info?.(`picoaide-skill-telemetry: registered (${SKILLS_FEATURE_SENTINEL})`)
   ctx.on('tools/result', (exec: ToolExecution, result: ToolExecutionResult) => {
     if (exec.name !== 'skill') return
     if (result.isError) return

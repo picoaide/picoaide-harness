@@ -40,7 +40,7 @@ import { crc32, deflateSync } from 'node:zlib'
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import vm from 'node:vm'
 
 // 复用门禁自己的 run 块解析器:下面 1c 要**真跑** ci.yml 里的 shell 步骤(不是文本对拍)。
@@ -3636,6 +3636,294 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
     })
     check(reserved.status !== 0, `保留 scheme ${value} 必须失败`)
     check(reserved.stderr.includes('desktop.app_origin_scheme'), `保留 scheme ${value} 的失败信息应点名该字段`)
+  }
+}
+
+// ---- 3c. 渠道功能模块声明（`features`，2026-10-13）----
+//
+// 语义：`channel.json` 顶层的 `features: { skills?, apps?, connectors? }`，**缺省全开**
+// （基础功能恒开 —— 不写这个键的既有渠道行为逐字节不变）。契约（变体标识的消费面、
+// 哨兵串的两条硬约束）见 `docs/decisions/2026-10-13-channel-feature-modules.md`。
+//
+// 为什么这一节要三层判据（缺任何一层都留下一个已知的假绿形态）：
+//   ①**纯函数**（唯一真源，真跑常量模块）：缺省全开 / 显式关闭 / 未知键 / 非法类型 ——
+//     两个方向都判，于是两种典型变异当场红：「把缺省全开改成缺省全关」（正例红）、
+//     「把 features 解析改成静默丢字段」（负例红：坏声明不再被拒）；
+//   ②**校验层**（真跑 `ci-channels.sh`）：非法声明必须让**这个渠道没有产物**，
+//     且报错**不回显取值/未知键名**（它们可能是客户品牌，而这条输出进公开 Actions 日志）；
+//   ③**官方模板 + 哨兵串**：模板键表逐模块派生（"官方渠道是新增渠道的模板"这条语义
+//     必须真的能拦住"忘了声明 features"），哨兵串钉在各模块**自己的装配点**上
+//     （命名规则从 `FEATURE_MODULES` 派生，不是四处各写一份字面量）。
+{
+  const constantsPath = join(root, 'packages/host/desktop/scripts/channel-constants.ts')
+  // 真跑常量模块：它不是"文本里出现过某几个词"，而是**被执行**的那份实现。
+  // （`.ts` 直读依赖 Node 的类型剥离 —— 第 17 节已经在裸检出里实跑过同一件事。）
+  const constants = await import(pathToFileURL(constantsPath).href)
+  const MODULES = constants.FEATURE_MODULES
+  check(Array.isArray(MODULES) && MODULES.length > 0,
+    'channel-constants.ts 必须导出非空的 FEATURE_MODULES（features 的键集合唯一真源）')
+
+  // ---- ① 纯函数：两个方向都判（这就是"缺省全开 ⇒ 缺省全关"与"静默丢字段"两个变异体的判据）----
+  const NORMALIZED_DEFAULT = constants.normalizeChannelFeatures(undefined)
+  check(JSON.stringify(NORMALIZED_DEFAULT) === JSON.stringify(Object.fromEntries(MODULES.map(m => [m, true]))),
+    `不写 features 必须规范化成**全开**（实际 ${JSON.stringify(NORMALIZED_DEFAULT)}）—— `
+    + '这是"基础功能恒开"的唯一实现；改成缺省全关会让每个既有渠道静默少交付功能，且没有任何红灯')
+  check(constants.channelFeaturesVariant(NORMALIZED_DEFAULT) === MODULES.join(','),
+    `缺省全开时变体标识必须是全部模块（实际 ${String(constants.channelFeaturesVariant(NORMALIZED_DEFAULT))}）`)
+  const oneOff = constants.normalizeChannelFeatures({ [MODULES[0]]: false })
+  check(oneOff[MODULES[0]] === false && MODULES.slice(1).every(m => oneOff[m] === true),
+    '显式关闭一个模块时，其余模块必须保持开启（部分声明不得被当成"其余也关"）')
+  check(constants.channelFeaturesVariant(oneOff) === MODULES.slice(1).join(','),
+    `关掉 ${MODULES[0]} 后的变体标识应恰好是其余模块（实际 ${String(constants.channelFeaturesVariant(oneOff))}）`)
+  const allOff = constants.normalizeChannelFeatures(Object.fromEntries(MODULES.map(m => [m, false])))
+  check(constants.channelFeaturesVariant(allOff) === 'none',
+    '三个模块全关时变体标识必须是 none（空串在 shell/CI 里到处是"没设置"的歧义）')
+  check(constants.channelFeaturesVariantAssignment(allOff) === 'FEATURES=none',
+    '变体标识的赋值形态必须是 FEATURES=<变体>（Go -tags / docker --build-arg / 客户端组装共用同一个串）')
+
+  // 负例（"坏声明必须被拒"）：每一条都必须**抛错**。这就是"静默丢字段/静默忽略坏键"
+  // 那个变异体的判据 —— 一旦改成宽容处理，这几条立刻红。
+  const REJECT_MARKER_VALUE = 'off-marker-not-a-boolean'
+  const REJECT_MARKER_KEY = 'x-marker-unknown-module'
+  for (const [raw, why] of [
+    [{ [REJECT_MARKER_KEY]: true }, '未知模块名'],
+    [{ [MODULES[0]]: REJECT_MARKER_VALUE }, '取值不是布尔（字符串 "false" 在 JS 里是真值）'],
+    [{ [MODULES[0]]: 0 }, '取值是数字'],
+    [[MODULES[0]], '不是对象（数组）'],
+    [MODULES[0], '不是对象（字符串）'],
+    [null, '不是对象（null）'],
+  ]) {
+    let thrown
+    try {
+      constants.normalizeChannelFeatures(raw)
+    } catch (error) {
+      thrown = error
+    }
+    check(thrown !== undefined,
+      `features 声明为${why}时必须抛错（静默接受 = 按"没声明"处理 ⇒ 模块照样交付，而配置上完全看不出来）`)
+    if (thrown !== undefined) {
+      const text = String(thrown?.message ?? thrown)
+      check(!text.includes(REJECT_MARKER_VALUE) && !text.includes(REJECT_MARKER_KEY),
+        `features 的报错不得回显取值/未知键名（可能是客户品牌，而构建日志是公开的）：${text.slice(0, 120)}`)
+    }
+  }
+
+  // ---- ② 校验层：真跑 ci-channels.sh（合成夹具；官方渠道缺 features 不得因此变红）----
+  /**
+   * 合成渠道仓：official + 一个品牌渠道，`features` 片段逐例注入（其余字段给全，
+   * 保证每条用例只在被测的那条规则上失败 —— 本项目最贵的假绿形态）。
+   */
+  const featuresRepo = brandFeatures => {
+    const dir = tempDir('ci-channels-features-')
+    mkdirSync(join(dir, 'channels', 'official'), { recursive: true })
+    writeFileSync(join(dir, 'channels', 'official', 'channel.json'), JSON.stringify({
+      schema: 1,
+      channel_id: 'official',
+      identity: { display_name: 'Official', short_name: 'Official' },
+      desktop: { app_origin_scheme: 'picoaide-app' },
+    }))
+    mkdirSync(join(dir, 'channels', 'example-brand'), { recursive: true })
+    writeFileSync(join(dir, 'channels', 'example-brand', 'channel.json'), JSON.stringify({
+      schema: 1,
+      channel_id: 'example-brand',
+      identity: { display_name: 'Example', short_name: 'Example' },
+      assets: { logo: 'logo.svg' },
+      desktop: {
+        slug: 'Example-AI',
+        app_id: 'com.example.brand',
+        deep_link_scheme: 'examplebrand',
+        app_origin_scheme: 'examplebrand-app',
+        home_dir: '.example-harness',
+      },
+      ...(brandFeatures === undefined ? {} : { features: brandFeatures }),
+    }))
+    writeChannelAssetFiles(dir, 'example-brand')
+    padChannelRepo(dir)
+    return dir
+  }
+  const runFeatures = (brandFeatures, extra = {}) => runChannels({
+    source: featuresRepo(brandFeatures), refName: 'v9.9.9', dest: 'channels', list: 'feat.list', ...extra,
+  })
+
+  // 正例 1：**缺省全开** —— 四个渠道都没有 features 键（= 当前私有仓的状态）时必须全绿。
+  const defaultRun = runFeatures(undefined)
+  check(defaultRun.status === 0,
+    `没有任何渠道声明 features 时必须全绿（缺省 = 全开，基础功能恒开），实际退出 ${String(defaultRun.status)}：${defaultRun.stderr.slice(0, 300)}`)
+  check(!defaultRun.stderr.includes('features('),
+    `缺省路径不得把 features 报成问题（那会让每个既有渠道都红），实际：${defaultRun.stderr.slice(0, 200)}`)
+  check(!defaultRun.stderr.includes('::error::'),
+    `缺省路径不得有任何 ::error::，实际：${defaultRun.stderr.slice(0, 200)}`)
+
+  // 正例 2：显式写全 true = 与不写等价；显式关一个 = 合法。
+  for (const [value, why] of [
+    [Object.fromEntries(MODULES.map(m => [m, true])), '显式全开'],
+    [{ [MODULES[0]]: false }, '显式关掉一个模块'],
+  ]) {
+    const ok = runFeatures(value)
+    check(ok.status === 0, `${why}的 features 必须通过，实际退出 ${String(ok.status)}：${ok.stderr.slice(0, 300)}`)
+  }
+
+  // 负例 1：取值不是布尔 —— 这是最贵的一种（`"false"` 在 JS 里是真值 ⇒ "以为关了其实没关"）。
+  const badTypeRun = runFeatures({ [MODULES[0]]: REJECT_MARKER_VALUE })
+  check(badTypeRun.status !== 0, 'features 的取值不是布尔时必须让该渠道失败（静默按"开启"处理 = 客户拿到他明确关掉的模块）')
+  check(badTypeRun.stderr.includes(`features.${MODULES[0]}`),
+    `取值非布尔的失败信息应点名 features.${MODULES[0]}，实际：${badTypeRun.stderr.slice(0, 200)}`)
+  check(!`${badTypeRun.stdout}${badTypeRun.stderr}`.includes(REJECT_MARKER_VALUE),
+    '取值非布尔的失败信息不得回显取值（渠道包里的任意字符串会进公开日志）')
+
+  // 负例 2：未知模块名 —— 拼错的键（skill→skils）必须现形，而不是被当成"没声明"。
+  const unknownRun = runFeatures({ [REJECT_MARKER_KEY]: true })
+  check(unknownRun.status !== 0, 'features 里有未登记的模块名时必须让该渠道失败')
+  check(unknownRun.stderr.includes('features'),
+    `未知模块名的失败信息应指向 features 字段，实际：${unknownRun.stderr.slice(0, 200)}`)
+  check(!`${unknownRun.stdout}${unknownRun.stderr}`.includes(REJECT_MARKER_KEY),
+    '未知模块名的失败信息不得回显键名（键名本身可能是渠道/品牌标识，与素材键同一条纪律）')
+
+  // 负例 3：不是对象（数组/字符串/null）—— 整份声明没有意义。
+  for (const [raw, why] of [[[MODULES[0]], '数组'], [MODULES[0], '字符串'], [null, 'null']]) {
+    const run = runFeatures(raw)
+    check(run.status !== 0, `features 是${why}时必须让该渠道失败（不是对象 ⇒ 声明无效）`)
+    check(run.stderr.includes('features'), `features 是${why}的失败信息应指向 features 字段`)
+  }
+
+  // ---- ③ 官方模板：键表逐模块派生，而且**真的**拦得住缺键 ----
+  const templateKeys = constants.CHANNEL_TEMPLATE_KEYS
+  for (const module of MODULES) {
+    check(templateKeys.includes(`features.${module}`),
+      `官方渠道模板键表必须逐模块列出 features.${module}（官方渠道 = 新增渠道的模板：`
+      + '少这一行，拷贝模板的新渠道就看不到有哪几个模块可关 —— 那正是这张表要防的"藏在代码兜底值里"）')
+  }
+  /**
+   * 官方渠道夹具：**逐键**满足 `CHANNEL_TEMPLATE_KEYS`。
+   *
+   * 表里新增键时这个夹具会红（模板判据会点名缺的键）—— 那是有意的：夹具必须与
+   * "官方渠道是一份完整清单"这条语义同形，否则这一节会在模板演进后变成假绿。
+   */
+  const TEMPLATE_VALUES = {
+    'schema': 1,
+    'channel_id': 'official',
+    'meta.description': 'Official channel fixture',
+    'meta.updated': '2026-10-13',
+    'identity.display_name': 'Official',
+    'identity.short_name': 'Official',
+    'identity.tagline': 'Official harness',
+    'identity.title': 'Official',
+    'copy.login_display_name': 'Official',
+    'copy.login_tagline': 'Official harness',
+    'copy.login_welcome': 'Welcome',
+    'copy.client_display_name': 'Official',
+    'copy.client_tagline': 'Official harness',
+    'copy.portal_welcome': 'Welcome',
+    'assets.logo': 'logo.svg',
+    'assets.logo_dark': 'logo.svg',
+    'assets.favicon': 'logo.svg',
+    'assets.accent': '#123456',
+    'defaults.server_url': 'https://harness.example.com',
+    'defaults.telemetry_channel': 'official',
+    'desktop.product_name': 'Official',
+    'desktop.slug': 'Official',
+    'desktop.app_id': 'com.example.official',
+    'desktop.home_dir': '.picoaide-harness',
+    'desktop.deep_link_scheme': 'picoaide',
+    'desktop.app_origin_scheme': 'picoaide-app',
+    'desktop.platforms': ['win', 'mac', 'linux'],
+  }
+  for (const module of MODULES) TEMPLATE_VALUES[`features.${module}`] = true
+  /** 按点分路径写值（表的形状是点分路径，夹具必须与它同源）。 */
+  const setPath = (target, path, value) => {
+    const segments = path.split('.')
+    let cursor = target
+    for (const segment of segments.slice(0, -1)) {
+      cursor[segment] = cursor[segment] ?? {}
+      cursor = cursor[segment]
+    }
+    cursor[segments[segments.length - 1]] = value
+  }
+  /**
+   * 造一个 `--require-template` 用的渠道仓：官方渠道逐键显式（可选摘掉若干键）。
+   * @param dropped - 要从官方配置里摘掉的键（造"模板缺键"负例）。
+   */
+  const templateRepo = (dropped = []) => {
+    const dir = tempDir('ci-channels-template-')
+    const official = {}
+    for (const [path, value] of Object.entries(TEMPLATE_VALUES)) {
+      if (dropped.includes(path)) continue
+      setPath(official, path, value)
+    }
+    mkdirSync(join(dir, 'channels', 'official'), { recursive: true })
+    writeFileSync(join(dir, 'channels', 'official', 'channel.json'), JSON.stringify(official, null, 2))
+    for (const name of ['logo.svg']) {
+      copyFileSync(join(root, 'brands', 'official', name), join(dir, 'channels', 'official', name))
+    }
+    padChannelRepo(dir)
+    return dir
+  }
+  const templateKeysUncovered = templateKeys.filter(key => !(key in TEMPLATE_VALUES))
+  check(templateKeysUncovered.length === 0,
+    `官方模板夹具没有覆盖 ${templateKeysUncovered.length} 个模板键（新增键时夹具要跟着补，否则这一节会变成假绿）`)
+
+  const templateOk = runChannels({
+    source: templateRepo(), refName: 'v9.9.9', dest: 'channels', list: 'tpl.list', args: ['--require-template'],
+  })
+  check(templateOk.status === 0,
+    `逐键显式的官方渠道必须通过 --require-template（含 features 三个模块），实际退出 ${String(templateOk.status)}：${templateOk.stderr.slice(0, 300)}`)
+
+  const droppedModule = MODULES[MODULES.length - 1]
+  const templateMissing = runChannels({
+    source: templateRepo([`features.${droppedModule}`]),
+    refName: 'v9.9.9', dest: 'channels', list: 'tpl2.list', args: ['--require-template'],
+  })
+  check(templateMissing.status !== 0, '官方渠道漏写 features.<module> 时必须失败（模板 = 完整清单）')
+  check(templateMissing.stderr.includes(`features.${droppedModule}`),
+    `模板缺键的失败信息必须点名 features.${droppedModule}，实际：${templateMissing.stderr.slice(0, 300)}`)
+
+  // ---- ④ 哨兵串：命名规则从 FEATURE_MODULES 派生，落点在各模块自己的装配点 ----
+  //
+  // **判据的边界（写清楚，免得被当成端到端证明）**：下面是**静态代理** —— 它判的是
+  // "串在该模块的装配函数里被引用，因而不会被链接器整串丢掉"。真正的端到端判据是
+  // 依赖图/文件清单（模块有没有被打进产物），而哨兵只是**副证**；且哨兵判据必须
+  // **双侧**（关闭变体里"没有"是恒真的，必须有"开启变体里**存在**"的另一半）。
+  const SENTINEL_SITES = {
+    skills: 'packages/host/enterprise/src/skill-telemetry.ts',
+    apps: 'packages/host/wasm-apps-host/src/index.ts',
+    connectors: 'packages/host/connectors/src/index.ts',
+  }
+  for (const module of MODULES) {
+    const relative = SENTINEL_SITES[module]
+    check(typeof relative === 'string' && relative !== '',
+      `模块 ${module} 没有登记哨兵串的落点 —— 新增模块时必须在 SENTINEL_SITES 里写明它的装配点，`
+      + '否则"这个模块的哨兵在不在产物里"没有任何判据')
+    if (typeof relative !== 'string' || relative === '') continue
+    const file = join(root, relative)
+    if (!check(existsSync(file), `哨兵落点不存在：${relative}`)) continue
+    const source = readFileSync(file, 'utf8')
+    const sentinel = constants.featureSentinel(module)
+    const declaration = new RegExp(`export const ([A-Z0-9_]+) = '${sentinel.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}'`, 'u').exec(source)
+    check(declaration !== null,
+      `${relative} 必须把哨兵串 ${sentinel} 作为字面量声明（命名规则不许各写一份：`
+      + '它是从 channel-constants.ts 的 featureSentinel() 派生的）')
+    if (declaration === null) continue
+    const identifier = declaration[1]
+    const occurrences = [...source.matchAll(new RegExp(`\\b${identifier}\\b`, 'gu'))].length
+    check(occurrences >= 2,
+      `${relative} 的哨兵常量 ${identifier} 只出现在声明处（${occurrences} 次）—— 没被引用的字符串会被`
+      + '打包器/链接器一起丢掉，"产物里没有这个串"于是既可能是模块被裁掉了、也可能只是串被优化掉了')
+    const applyAt = source.indexOf('export function apply(')
+    check(applyAt >= 0, `${relative} 里找不到 export function apply( —— 哨兵必须写在该模块的装配点（模块注册/装配时写入日志或登记表的那一处）`)
+    check(applyAt >= 0 && source.slice(applyAt).includes(identifier),
+      `${relative} 的装配函数 apply() 没有引用哨兵常量 ${identifier}（只在模块顶层声明 = 与"这个模块被装配了"无关）`)
+  }
+
+  // 契约文档是本轮的交付物之一：它不在，变体标识的消费面与哨兵的两条硬约束就没有出处。
+  const contractDoc = join(root, 'docs', 'decisions', '2026-10-13-channel-feature-modules.md')
+  if (check(existsSync(contractDoc), '渠道功能模块契约文档必须存在（docs/decisions/2026-10-13-channel-feature-modules.md）')) {
+    const docText = readFileSync(contractDoc, 'utf8')
+    for (const module of MODULES) {
+      check(docText.includes(constants.featureSentinel(module)),
+        `契约文档必须列出 ${module} 的哨兵串（${constants.featureSentinel(module)}）—— 文档与模块清单一起漂移就没人能对账`)
+    }
+    check(docText.includes(`${constants.CHANNEL_FEATURES_VARIANT_KEY}=`),
+      '契约文档必须写明变体标识的赋值形态（FEATURES=<变体>）—— 那是给 Go -tags / build-arg 的消费契约')
   }
 }
 
@@ -7538,4 +7826,10 @@ process.stdout.write('verify-ci-scripts: OK — ref 形态判定唯一真源(tag
   + '阈值内的新鲜对象与**本次前缀**绝不删、预演不删、阈值 0 可补做存量、'
   + '非法阈值 fail-loud、列表失败只出 ::warning:: 不阻断发布;并钉住清扫日志不回显对象键)/'
   + '渠道交付平台收窄(desktop.platforms:镜像装配丢弃未声明平台 + 声明了却没有产物即 fail-loud 并点名;'
-  + 'R2 中转 push 不上传未声明平台、pull 的齐全判据只要求声明平台,并用三端对照组证明判据仍有牙)\n')
+  + 'R2 中转 push 不上传未声明平台、pull 的齐全判据只要求声明平台,并用三端对照组证明判据仍有牙)/'
+  + '渠道功能模块声明(features:唯一真源 channel-constants.ts **真跑**——缺省全开/显式关闭/未知键/非法类型两个方向都判,'
+  + '于是「缺省全开→缺省全关」与「解析改成静默丢字段」两种变异当场红;'
+  + 'ci-channels.sh 真跑四类坏声明(非布尔/未知模块/数组/字符串)各自红且不回显取值与未知键名;'
+  + '官方模板键表逐模块派生 + 漏写 features.<module> 的负例;'
+  + '哨兵串命名从 FEATURE_MODULES 派生、引用必须落在各模块自己的 apply() 里'
+  + '(静态代理:没被引用的串会被链接器一起丢掉) + 契约文档必须存在且列出三个哨兵串)\n')

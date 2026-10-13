@@ -358,7 +358,10 @@ describe('stageChannelProfile', () => {
     const context = resolveChannelBuildContext({ env: { [CHANNEL_ENV]: 'acme' }, repoRoot })
     const target = stageChannelProfile(context, buildDir)
     expect(target).toBe(join(buildDir, 'channel.json'))
-    // 原样复制：运行期解析器与构建期读的是**同一份**字节。
+    // 渠道**声明的**字段原样复制：运行期解析器与构建期读的是同一份字节。
+    // （就位时只追加**派生**键：`assets.*_inline`（logo 内联）与 `features` /
+    // `features_variant`（功能模块的规范化结果，见下面的 features 用例）——
+    // 私有仓原文一律不动。）
     expect(JSON.parse(readFileSync(join(buildDir, 'channel.json'), 'utf8'))).toMatchObject({
       channel_id: 'acme',
       defaults: { server_url: 'https://ai.acme.example.com' },
@@ -498,6 +501,83 @@ describe('stageChannelProfile', () => {
     // 副本。2026-09-10 实测:条目此前只在 npm 的 files 里(electron-builder 用
     // build.files,两者不是一回事),渠道包因此从未进包。
     expect(build.files).toContain('build/channel.json')
+  })
+})
+
+/**
+ * 渠道声明功能模块（`features`）—— 构建期取值与**输出点**（2026-10-13）。
+ *
+ * 契约见 `docs/decisions/2026-10-13-channel-feature-modules.md`：缺省全开、畸形声明
+ * fail-loud、变体标识由 `channelFeaturesVariant()` 唯一派生、随包 profile 里落
+ * `features` + `features_variant` 两个键。本轮**不接线**（改了 features 不改变任何
+ * 产物内容），所以这里判的就是"取值真的取到了、真的写下去了"。
+ */
+describe('channel feature modules (features)', () => {
+  function featureChannelDir(features: unknown): { repoRoot: string, buildDir: string, channelDir: string } {
+    const root = mkdtempSync(join(tmpdir(), 'channel-features-'))
+    const dir = join(root, 'channels', 'acme')
+    const buildDir = join(root, 'packages', 'host', 'desktop', 'build')
+    mkdirSync(dir, { recursive: true })
+    mkdirSync(buildDir, { recursive: true })
+    writeFileSync(join(dir, 'channel.json'), JSON.stringify({
+      channel_id: 'acme',
+      identity: { display_name: 'Acme AI' },
+      desktop: { deep_link_scheme: 'acmeai', app_origin_scheme: 'acmeai-app' },
+      ...(features === undefined ? {} : { features }),
+    }))
+    return { repoRoot: root, buildDir, channelDir: dir }
+  }
+  const staged = (buildDir: string): Record<string, unknown> =>
+    JSON.parse(readFileSync(join(buildDir, 'channel.json'), 'utf8')) as Record<string, unknown>
+
+  it('缺省全开：不写 features 时三个模块全开，变体标识是全部模块', () => {
+    const { repoRoot, buildDir } = featureChannelDir(undefined)
+    const context = resolveChannelBuildContext({ env: { [CHANNEL_ENV]: 'acme' }, repoRoot })
+    expect(context.features).toEqual({ skills: true, apps: true, connectors: true })
+    expect(context.featuresVariant).toBe('skills,apps,connectors')
+    stageChannelProfile(context, buildDir)
+    expect(staged(buildDir).features).toEqual({ skills: true, apps: true, connectors: true })
+    expect(staged(buildDir).features_variant).toBe('skills,apps,connectors')
+  })
+
+  it('显式关闭：只关掉声明的那个模块，其余保持开启', () => {
+    const { repoRoot, buildDir } = featureChannelDir({ connectors: false })
+    const context = resolveChannelBuildContext({ env: { [CHANNEL_ENV]: 'acme' }, repoRoot })
+    expect(context.features).toEqual({ skills: true, apps: true, connectors: false })
+    expect(context.featuresVariant).toBe('skills,apps')
+    stageChannelProfile(context, buildDir)
+    // 随包的那份是**规范化后**的三键对象：下游不必再实现一次"缺省全开"。
+    expect(staged(buildDir).features).toEqual({ skills: true, apps: true, connectors: false })
+    expect(staged(buildDir).features_variant).toBe('skills,apps')
+  })
+
+  it('全关时变体标识是 none（不是空串）', () => {
+    const { repoRoot } = featureChannelDir({ skills: false, apps: false, connectors: false })
+    const context = resolveChannelBuildContext({ env: { [CHANNEL_ENV]: 'acme' }, repoRoot })
+    expect(context.featuresVariant).toBe('none')
+  })
+
+  it('畸形声明 fail-loud（未知模块名 / 非布尔 / 不是对象）', () => {
+    for (const [features, why] of [
+      [{ skils: true }, '未知模块名（拼错的键必须现形，而不是被当成"没声明"）'],
+      [{ skills: 'false' }, '取值是字符串（"false" 在 JS 里是真值 ⇒ "以为关了其实没关"）'],
+      [[ 'skills' ], '不是对象（数组）'],
+      [null, '不是对象（null）'],
+    ] as const) {
+      const { repoRoot } = featureChannelDir(features)
+      expect(
+        () => resolveChannelBuildContext({ env: { [CHANNEL_ENV]: 'acme' }, repoRoot }),
+        why,
+      ).toThrow(/features/u)
+    }
+  })
+
+  it('私有仓原文不被改写（只改随包副本）', () => {
+    const { repoRoot, buildDir, channelDir: dir } = featureChannelDir({ apps: false })
+    const before = readFileSync(join(dir, 'channel.json'), 'utf8')
+    stageChannelProfile(resolveChannelBuildContext({ env: { [CHANNEL_ENV]: 'acme' }, repoRoot }), buildDir)
+    expect(readFileSync(join(dir, 'channel.json'), 'utf8')).toBe(before)
+    expect(JSON.parse(before)).not.toHaveProperty('features_variant')
   })
 })
 

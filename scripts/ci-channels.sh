@@ -655,21 +655,26 @@ if ! CHANNEL_ASSET_FILES="$(node -e '
     if (!files || typeof files.logo !== "string" || typeof files.appIcon !== "string") {
       throw new Error("CHANNEL_ASSET_FILES 形态不对")
     }
-    // 平台交付面与"官方模板键"同一处取(2026-10-13):本函数必须**恰好一处**
+    // 平台交付面、官方模板键与功能模块清单同一处取(2026-10-13):本函数必须**恰好一处**
     // `node -e … <常量模块>.ts` 取常量 —— 根守卫按这个形状抽调用并在"没有
     // node_modules 的检出"里实跑它（release job 的真实条件）。多一处就会只覆盖到
-    // 其中一个（守卫会当场红），所以四段一起输出、由 shell 拆。
+    // 其中一个（守卫会当场红），所以五段一起输出、由 shell 拆。
     const tokens = mod.CHANNEL_PLATFORMS
     const keys = mod.CHANNEL_TEMPLATE_KEYS
+    // 功能模块清单（2026-10-13）：`features` 的键集合与"官方模板必须逐键显式"的
+    // 判据都从这一份派生 —— 与平台 token / 模板键同一条纪律（**不**在 shell 里
+    // 再抄一份模块名：三处各写一遍就会漂移成"校验放行、构建却拒绝"的半通状态）。
+    const modules = mod.FEATURE_MODULES
     if (!Array.isArray(tokens) || tokens.length === 0) throw new Error("CHANNEL_PLATFORMS 为空")
     if (!Array.isArray(keys) || keys.length === 0) throw new Error("CHANNEL_TEMPLATE_KEYS 为空")
-    process.stdout.write(`${files.logo}\t${files.appIcon}\t${tokens.join(",")}\t${keys.join(",")}`)
+    if (!Array.isArray(modules) || modules.length === 0) throw new Error("FEATURE_MODULES 为空")
+    process.stdout.write(`${files.logo}\t${files.appIcon}\t${tokens.join(",")}\t${keys.join(",")}\t${modules.join(",")}`)
   }).catch((error) => {
     console.error(`channel-asset-files: ${error instanceof Error ? error.message : String(error)}`)
     process.exit(1)
   })
 ' "$REPO_ROOT/packages/host/desktop/scripts/channel-constants.ts")"; then
-  echo "::error::读不到渠道常量(素材文件名 / 平台 token / 官方模板键；packages/host/desktop/scripts/channel-constants.ts)" >&2
+  echo "::error::读不到渠道常量(素材文件名 / 平台 token / 官方模板键 / 功能模块清单；packages/host/desktop/scripts/channel-constants.ts)" >&2
   exit 1
 fi
 LOGO_FILE_NAME="${CHANNEL_ASSET_FILES%%$'\t'*}"
@@ -677,7 +682,9 @@ CHANNEL_ASSET_REST="${CHANNEL_ASSET_FILES#*$'\t'}"
 APP_ICON_FILE_NAME="${CHANNEL_ASSET_REST%%$'\t'*}"
 CHANNEL_ASSET_REST="${CHANNEL_ASSET_REST#*$'\t'}"
 CHANNEL_PLATFORM_TOKENS="${CHANNEL_ASSET_REST%%$'\t'*}"
-CHANNEL_TEMPLATE_KEY_LIST="${CHANNEL_ASSET_REST#*$'\t'}"
+CHANNEL_ASSET_REST="${CHANNEL_ASSET_REST#*$'\t'}"
+CHANNEL_TEMPLATE_KEY_LIST="${CHANNEL_ASSET_REST%%$'\t'*}"
+CHANNEL_FEATURE_MODULE_LIST="${CHANNEL_ASSET_REST#*$'\t'}"
 if [ -z "$LOGO_FILE_NAME" ] || [ -z "$APP_ICON_FILE_NAME" ] || [ "$LOGO_FILE_NAME" = "$APP_ICON_FILE_NAME" ]; then
   echo "::error::渠道素材文件名清单为空/同值 —— 逐渠道的素材必需集判据靠它派生,不能猜测" >&2
   exit 1
@@ -686,7 +693,11 @@ if [ -z "$CHANNEL_PLATFORM_TOKENS" ] || [ -z "$CHANNEL_TEMPLATE_KEY_LIST" ]; the
   echo "::error::平台 token / 模板键清单为空 —— desktop.platforms 的取值校验与官方模板判据都靠它们派生" >&2
   exit 1
 fi
-export CHANNEL_PLATFORM_TOKENS CHANNEL_TEMPLATE_KEY_LIST
+if [ -z "$CHANNEL_FEATURE_MODULE_LIST" ]; then
+  echo "::error::功能模块清单为空 —— features 的键集合校验与官方模板的逐模块判据都靠它派生(见 channel-constants.ts 的 FEATURE_MODULES)" >&2
+  exit 1
+fi
+export CHANNEL_PLATFORM_TOKENS CHANNEL_TEMPLATE_KEY_LIST CHANNEL_FEATURE_MODULE_LIST
 export CHANNEL_REQUIRE_TEMPLATE="$REQUIRE_TEMPLATE"
 export CHANNEL_REQUIRE_TEMPLATE="$REQUIRE_TEMPLATE"
 for id in "${SELECTED[@]}"; do
@@ -866,6 +877,42 @@ for id in "${SELECTED[@]}"; do
     if (speechBundleModel !== undefined && typeof speechBundleModel !== "boolean") {
       invalid.push("desktop.speech_bundle_model(须为布尔;缺省=true 随包,显式 false 关闭)")
     }
+    // ---- features:本渠道交付哪些功能模块(2026-10-13)----
+    //
+    // 语义(契约见 docs/decisions/2026-10-13-channel-feature-modules.md):
+    //   · **缺省全开** —— 不写 features = 三个模块都要(基础功能恒开,既有渠道行为
+    //     逐字节不变);
+    //   · 写了的键才可能关掉,取值必须是布尔。
+    // 写错的三种后果都**只在客户机器上**才暴露,且方向都是"多发":
+    //   · 未知模块名(拼错 skill→skils)⇒ 构建侧按"未声明"处理,那个模块照样交付;
+    //   · 取值是字符串 "false" ⇒ 它在 JS 里是真值,模块照样交付 —— 而写配置的人
+    //     以为自己关掉了("以为关了其实没关"是这一族里最贵的一种);
+    //   · 不是对象(数组/字符串)⇒ 整份声明没有意义。
+    // **取值刻意不回显**(可能是任意字符串),未知键名同样不回显(键名本身就可能是
+    // 渠道/品牌标识,与本脚本对素材键的纪律一致) —— 只报字段名、数量与合法集合。
+    const KNOWN_FEATURES = (process.env.CHANNEL_FEATURE_MODULE_LIST || "").split(",").filter(Boolean)
+    if (KNOWN_FEATURES.length === 0) {
+      // 清单为空 ⇒ 下面两条键集合校验会退化成"什么都不查"(未知键一个都认不出来)。
+      // 外层 shell 在取常量那一步已经拦过一次;这里拦的是**另一个**失败面:清单存在
+      // 但没被 export 到本进程(接线回退) —— 那时 shell 侧的判据看不见,只有这里看得见。
+      invalid.push("features(无法校验:功能模块清单没到校验器手里,见 packages/host/desktop/scripts/channel-constants.ts 的 FEATURE_MODULES)")
+    }
+    const rawFeatures = cfg?.features
+    if (rawFeatures !== undefined) {
+      if (typeof rawFeatures !== "object" || rawFeatures === null || Array.isArray(rawFeatures)) {
+        invalid.push("features(必须是对象,如 {\"skills\": false};不写这个键 = 全部开启)")
+      } else {
+        const declared = Object.keys(rawFeatures)
+        const unknown = declared.filter(key => !KNOWN_FEATURES.includes(key))
+        if (unknown.length > 0) {
+          invalid.push("features(有 " + unknown.length + " 个未登记的模块名;合法模块名见 packages/host/desktop/scripts/channel-constants.ts 的 FEATURE_MODULES,键名与取值都不回显)")
+        }
+        const badType = declared.filter(key => KNOWN_FEATURES.includes(key) && typeof rawFeatures[key] !== "boolean")
+        if (badType.length > 0) {
+          invalid.push("features." + badType.join(",features.") + "(取值必须是布尔 true/false;字符串 \"false\" 不是 false,取值不回显)")
+        }
+      }
+    }
     // ---- desktop.platforms:本渠道交付哪些客户端平台(2026-10-13)----
     //
     // 语义:缺省 = 三端全交付(向后兼容:既有渠道不写这个键,行为逐字节不变);
@@ -897,6 +944,9 @@ for id in "${SELECTED[@]}"; do
     // 才知道有哪些键存在。所以 CI 取渠道包时带 `--require-template`,对**官方**渠道逐键
     // 检查;键表在 channel-constants.ts 的 CHANNEL_TEMPLATE_KEYS(**故意不含**三个
     // speech_* 覆盖型键:它们是"不写=随包默认",写进模板等于把路径钉死)。
+    // 功能模块(2026-10-13)按**叶键**进表(features.skills / features.apps /
+    // features.connectors):只写裸 `features` 的话,`"features": {}` 也能过 ——
+    // 而拷贝模板的新渠道就看不到有哪几个模块可关,那正是这张表要防的形态。
     // 只对 official 生效:品牌渠道按自己的交付面裁剪,不要求与模板同形。
     const templateMissing = []
     if (id === "official" && process.env.CHANNEL_REQUIRE_TEMPLATE === "1") {
