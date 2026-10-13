@@ -416,6 +416,11 @@ export const EXECUTION_FACE_REGISTRY = [
  */
 export const CI_REFERENCED_EXECUTION_REGISTRY = [
   'scripts/check-frozen-launchers.mjs',
+  // `p1b-conditionalize` 新加的服务端构建变体矩阵步骤（`ci.yml` 的 server job，
+  // 该 job 的 `defaults.run.working-directory: server`）。**推导面用的是"命令位里
+  // 出现的仓内路径"这个规范名**，而真文件的家是 `server/scripts/check-go-build-tags.mjs`
+  // —— 不要因为根下没有同名文件就以为这条是死条目（改名/搬家时这条要一起改）。
+  'scripts/check-go-build-tags.mjs',
   'scripts/check-guard-parser-integrity.mjs',
   'scripts/check-install-integrity.mjs',
   'scripts/check-release-notes-migrations.mjs',
@@ -579,6 +584,9 @@ export const EXECUTION_POINT_REGISTRY = [
   //    按基名形态派生（`tsconfig.<面>.json` 自动进面），未登记即红。
   'packages/client/account-card/tsconfig.client.json',
   'packages/client/account-card/tsconfig.json',
+  // 2026-10-14（对抗审计 P2-甲）：account-card 的 `tests/**` 此前不在任何 tsconfig 里
+  // ⇒「typecheck EXIT=0」对测试期源码边没有观察力；新加这份并接进包的 `check`。
+  'packages/client/account-card/tsconfig.tests.json',
   'packages/client/account-card/tsdown.config.ts',
   'packages/client/account-card/vitest.config.ts',
   'packages/client/branding/tsconfig.client.json',

@@ -218,7 +218,10 @@ const REGISTERED_GUARD_ENTRIES = new Map([
   // 三条派生执行点（2026-10-13 P0-b）⇒ 该前置校验件内容变了，它在对方文件里的登记值也同步更新
   // ⇒ 本判据脚本自身的摘要随之变化，按同一套纪律在这里同步（`--print-digests` 复算，
   // 且必须取**工作树**=提交后 HEAD 那份）。
-  ['check:guard-parser-integrity', { script: 'node scripts/check-guard-parser-integrity.mjs', argvTail: [], digest: 'c20546e9eaf47b17e378b436527416fe95abb601a3c6e84e26de3e01336c0de7' }],
+  // 2026-10-14：`check-guard-parser-integrity.mjs` 的内容变了（它登记的
+  // `scripts/check-install-integrity.mjs` 摘要随两处新执行点更新）⇒ 本摘要同步进 diff
+  // （取值 = 提交后工作树那份：`sha256sum scripts/check-guard-parser-integrity.mjs`）。
+  ['check:guard-parser-integrity', { script: 'node scripts/check-guard-parser-integrity.mjs', argvTail: [], digest: '2e0888e2e6dd0e0669d4bda9a1db6109e9b044b9f41f1cf24404308ce26c2dbc' }],
 ])
 
 /**

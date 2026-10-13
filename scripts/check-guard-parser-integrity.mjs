@@ -369,7 +369,13 @@ const REGISTERED_INSTALL_INTEGRITY_BODIES = [
     // （能力中心 host + client 双面 / `server-connector` 实现落点，2026-10-13 P0-b）
     // ⇒ 本件内容变了，摘要同步进 diff
     // （取值 = `sha256sum scripts/check-install-integrity.mjs`，即提交后的 HEAD 那份）。
-    sha256: 'a817dc3a5a7bd124214b3450b2f265ee7a23bb82fa2efcb5318f100ea2230fd6',
+    //
+    // 2026-10-14：`EXECUTION_POINT_REGISTRY` 补登两处 —— `p1b-conditionalize` 新加的 CI
+    // 步骤执行体（`scripts/check-go-build-tags.mjs`，真文件在 `server/scripts/`，由 server job
+    // 的 `defaults.run.working-directory` 解析成规范名）与 account-card 新增的
+    // `tsconfig.tests.json`（对抗审计 P2-甲：测试期源码边此前没有任何 typecheck 观察力）
+    // ⇒ 本件内容变了，摘要同步进 diff（同一条 `sha256sum` 口径）。
+    sha256: '719638b7935d40be9f77da4f806b927abf32b05772dae9d983de595d0fe226ec',
     methods: [
       'judge-body-bytes-equal-head',
       'yarnrc-forbidden-keys',
