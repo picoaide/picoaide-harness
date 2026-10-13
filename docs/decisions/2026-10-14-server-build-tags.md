@@ -41,7 +41,7 @@ P0 §5 的硬约束是"三处只能读同一个串，不得各自按三个布尔
 **为什么是"四个互斥且穷尽 + 一对正交"而不是八个**：`connectors` 与 `skills`/`apps` 正交
 （任一 skills/apps 组合下它都可以开或关），拆成正交的两对之后，skills/apps 面四个文件里
 恰好有一个参与编译 —— **少一个文件就是"常量未定义"的编译失败**，不会静默取零值。
-`features.go` 刻意**不带任何 tag**：四种/六种组合编译的是同一份声明与同一份查询 API
+`features.go` 刻意**不带任何 tag**：八种组合（三个独立开关的全部子集）编译的是同一份声明与同一份查询 API
 （判据 `features_test.go` 也不带 tag，因此它在每一种组合下都被执行）。
 
 ## 3. 四个组合与构建入口接线
@@ -163,7 +163,7 @@ node server/scripts/check-go-build-tags.mjs --self-test     # 只自证判据引
 成为事实，并把矩阵判据里那条一直是 `⏳` 的裁剪断言翻成**拦门禁**。
 
 ```bash
-make -C server check-tags                    # 5 个组合 × (build + vet + 裁剪断言)，缺省 --expect-cut
+make -C server check-tags                    # 8 个组合 × (build + vet + 裁剪断言)，缺省 --expect-cut
 make -C server check-tags TAGS_ARGS=         # 只报账形态（显式传空才关掉断言）
 ```
 
@@ -212,7 +212,7 @@ make -C server check-tags TAGS_ARGS=         # 只报账形态（显式传空才
 | 内置演示应用 | 随启动播种 | 不播种（`seedDemoApps` 走关闭态的 no-op 实现） |
 | 内置技能 | 启动加载 + `/skills/builtin*` 下发 | 不加载、不下发 |
 
-`main()` 的装配**字面量形状在六种组合下逐字不变**（`seedDemoApps(wasmCtx, db, *dataDir)` 仍在
+`main()` 的装配**字面量形状在八种组合下逐字不变**（`seedDemoApps(wasmCtx, db, *dataDir)` 仍在
 静态可达路径上）—— 关闭态换的是被调函数的实现，不是删掉调用。因此
 `main_assembly_criteria_test.go` 那条判据**一个字都没有改**（这是刻意的：它防的是"装配被人
 悄悄删掉"，而"这个变体不含该模块"是另一件事，两者不该混在一个判据里）。
@@ -246,23 +246,38 @@ make -C server check-tags TAGS_ARGS=         # 只报账形态（显式传空才
 | 判据面 | 处理 | 理由 |
 | --- | --- | --- |
 | `cmd/server/routes_source_test.go` 的 `wasmGatedRoutes`（42 条） | 拆成 `routes_source_wasm_gated_test.go`（`//go:build apps`）/ `..._off_test.go`（`!apps`，空表 + 反向断言） | 声明表**语义上只服务 apps**；关闭态没有 wasm 路由可被门控，"表为空"是正确形态。空表被"清空即变绿"滥用的通道由 off 文件里的反向断言堵住（关闭态若出现可选路由即红） |
-| `main_assembly_criteria_test.go`（要求 `main()` 里**字面**保留 `seedDemoApps(...)`） | **未改**（一个字都没动） | 关闭态给 `seedDemoApps` 一个同名同签名的 no-op 实现，`main()` 的装配字面量因此六种组合逐字不变 |
+| `main_assembly_criteria_test.go`（要求 `main()` 里**字面**保留 `seedDemoApps(...)`） | **未改**（一个字都没动） | 关闭态给 `seedDemoApps` 一个同名同签名的 no-op 实现，`main()` 的装配字面量因此八种组合逐字不变 |
 | `audit_r13ge_permset_test.go`（权限点必须有入口） | `reservedPermissions` 改为按 `features.Has*()` 派生 | 保留权限点 + 登记（P0 规划 §5 第 2 条）：权限模型不随变体变，缺的只是本变体里的**入口**。`capability:read` 有 skills（`/skills/builtin`）与 apps（`/admin/wasm-apps/*`）**两个**入口面，只有两面都不在时才登记为保留 |
 | `scheduler_registry_reconcile_test.go` | **未改** | 它扫的是 `main()` 里的 `start*Scheduler` 接缝；六条 wasmapp 调度器住在 `setupWasmPlatform` 内（apps 文件整份条件编译），不在它的判据面内 |
 | `scripts/wasm/wasm-gate-inventory.json` | `packageInventory` 去掉 `limits` / `skillseed`（30 个包），`why` 里写明归位理由 | 包清单是**双向**断言（登记了但不在 ⇒ 红；在但没登记 ⇒ 红），包搬家必须同批登记 |
 | `scripts/wasm/check-go-test-json.mjs` | `OPT_IN_SKIPS` 的 owner 与 `ST_PKG.skillseed` 同步到 `internal/skillseed` | 同上：包搬家，登记面跟着搬 |
 | `cmd/server/api_sweep_test.go` 的例外登记表 | 技能面 15 条拆进 `api_sweep_module_surfaces_{on,off}_test.go`，判据改查**并集** | 例外表的判据是"登记了就必须被扫到 ⇒ 否则表在说谎"。表按变体拆开之后这条判据逐字不变地生效，而不是被放宽 |
-| `internal/router` 与 `cmd/server` 的若干用例文件 | 按**模块**加 build tag（skills / apps / connectors），基础面用例**不加** | 判据面必须与它断言的对象同变体：断"整张路由表"的用例属全开态；断"命名空间/限体/404/装配入口"的用例六种组合都跑（`TestNamespaces` 还因此**加强**了：模块关闭时反向断言那一片路由**不在**树上） |
+| `internal/router` 与 `cmd/server` 的若干用例文件 | 按**模块**加 build tag（skills / apps / connectors），基础面用例**不加** | 判据面必须与它断言的对象同变体：断"整张路由表"的用例属全开态；断"命名空间/限体/404/装配入口"的用例八种组合都跑（`TestNamespaces` 还因此**加强**了：模块关闭时反向断言那一片路由**不在**树上） |
 | `TestResolveStartupChannelDeepLinkScheme` | `wantErr` 由 `features.HasApps()` 派生 | §8 的"关闭态放宽"是设计决定，判据照实表达，而不是删掉那一条 |
 
 ## 11. 本片**没有**做的事（认账）
 
-1. **CI 里还没有这一步**：`scripts/check-go-build-tags.mjs` 仍然只在 `make -C server check-tags`
-   里跑（CI 的 `go vet`/`go test` 只覆盖发布态组合 `skills,apps,connectors`）。把它接进
-   `.github/workflows/ci.yml` 需要按 `check-workflows.mjs` 的步骤策略登记，属独立一片。
-2. **只有发布态组合跑测试**：其余四种组合目前只有 build + vet（矩阵判据），没有 `go test`。
+1. ~~**CI 里还没有这一步**~~ **已闭合（2026-10-14 P1 第三片）**：`scripts/check-go-build-tags.mjs`
+   此前只在 `make -C server check-tags` 里跑，而 `server/Makefile` 当时**自称**"CI 侧由
+   `.github/workflows/ci.yml` 的 server job 单列一步" —— 实测该文件对 `check-tags` 零命中，
+   于是"包树真被裁掉"这条判据不在任何自动化里（独立审计 P1-4 的现场：同一份材料里两处口径
+   相反，且 Makefile 那句是假的）。现在 CI 的 server job 在 `go vet` 之后多一步
+   `node scripts/check-go-build-tags.mjs --expect-cut`，并按 `check-workflows.mjs` 的步骤策略
+   完整登记：`CI_JUDGEMENT_ARGV_PREFIXES`（方向②"未登记的判据步骤"看得见它）、
+   `REQUIRED_CI_STEPS`（删步骤/挪 job 即红）、`PINNED_STEP_POLICIES` 的
+   `ci-check-go-build-tags`（`if: false` / 换命令 / **去掉 `--expect-cut` 让断言退化成
+   "只报告"** 三种形态都红）。成本实测：本机 4 vCPU 暖缓存 8 组合 build+vet ≈ 1m52s，
+   排在 `go test` 之前顺带预热发布态组合的编译缓存。
+   同批还改对了两处口径：矩阵从"手抄 5 行"改为从 `channelFeaturesVariant()` 的取值域穷尽
+   派生（独立审计 P1-2：漏掉的 3/8 组里恰好有一组 `connectors` 自己的判据是红的），
+   `server/Makefile` 的组合数与 CI 那句话同步改真。
+2. **只有发布态组合跑测试**：其余**七**种组合目前只有 build + vet（矩阵判据），没有 `go test`。
    P0 规划 §3.1 第 4 条点名的"减配变体的代码永不被测"因此只解决了一半 ——
    变体感知的用例（如 `TestNamespaces` 的双向断言）能在任何组合下跑，但**没人**在 CI 上跑它们。
+   （2026-10-14 P1 第三片补强了**关闭态**那一半：关闭态的"路由树上不存在"承诺现在有两层
+   与变体无关的判据 —— `cmd/server/routes_source_test.go` 的登记级命名空间反向断言（每个
+   变体都跑、覆盖全部 method）与 `internal/router/optional_*_off_registration_test.go` 的
+   位置级断言（关闭态的注册函数实跑后必须零新增路由）。两层都做过变异验证，见各自注释。）
 3. **没有产物级哨兵判据**：P0 §2.2 的 `picoaide.feature.<module>.v1` 哨兵串仍未接入；
    承重判据是依赖图（§7 的包树断言），哨兵是端到端副证，需要真实二进制与 `strings` 双侧比对。
 4. **没有变体 schema 对拍**：见 §9 末尾的"建议判据"。

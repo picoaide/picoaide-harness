@@ -303,12 +303,12 @@ afterEach(async () => {
  * 服务端上限真源（生成物）的 Key→Value 表。
  *
  * 与 `wasm-app-tools.spec.ts` 的 `readLimits()` 同一读法：平台侧的全部上限数值都从这份
- * 生成物来（`go generate ./internal/wasmapp/limits`），客户端只做对拍、不另立字面量。
+ * 生成物来（`go generate ./internal/limits`），客户端只做对拍、不另立字面量。
  * 文件必须在（缺失 ⇒ 抛，判据失败 —— 静默跳过等于把跨端对拍关掉）。
  */
 function readServerLimits(): Map<string, string> {
   const raw = readFileSync(
-    fileURLToPath(new URL('../../../../server/internal/wasmapp/limits/limits.json', import.meta.url)),
+    fileURLToPath(new URL('../../../../server/internal/limits/limits.json', import.meta.url)),
     'utf8',
   )
   const parsed = JSON.parse(raw) as { items?: Array<Record<string, string>> }
@@ -355,7 +355,7 @@ describe('客户端上限常量与设计基线同源（§4.2 / §10.5 第 58 项
    * ⇒ 员工/AI 先拿到笼统的网络错误，而平台其实正准备返回带 `code`/`hints` 的结构化错误。
    *
    * 判据的数值**全部来自真源**：服务端生成物
-   * `server/internal/wasmapp/limits/limits.json`（`publish_total_budget` = 编译 + 抽取 +
+   * `server/internal/limits/limits.json`（`publish_total_budget` = 编译 + 抽取 +
    * 干跑**共用**的那一个 deadline）+ 本包的客户端常量。任何一侧漂移都会红。
    *
    * 变异验证（实跑）：

@@ -10,11 +10,10 @@ package router
 // 而不是把断言删掉或改成恒真。
 //
 // ⚠️ 基础面那半（`TestLargeBodyRoutesExemptions` 的负例、`TestBodyLimitMiddleware*`）
-// 刻意留在不带 tag 的 `router_test.go` 里：它们六种组合都跑。
+// 刻意留在不带 tag 的 `router_test.go` 里：它们八种组合都跑。
 
 import "testing"
 
-// 豁免表必须对应真实注册的路由(防路径写错导致豁免失效 → 上传被 1MB 拦)。
 // 豁免表必须对应真实注册的路由(防路径写错导致豁免失效 → 上传被 1MB 拦)。
 func TestLargeBodyRoutesExist(t *testing.T) {
 	r := buildTestRouter(t)

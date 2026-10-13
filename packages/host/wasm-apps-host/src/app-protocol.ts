@@ -66,7 +66,7 @@ export function appSchemePrefix(scheme: string): string {
 export const APP_REQUEST_PATH = '/api/client/v2/apps/wasm'
 
 /**
- * `app_id` 规则，与 `server/internal/wasmapp/limits/limits.go` 的 `AppIDPattern`
+ * `app_id` 规则，与 `server/internal/limits/limits.go` 的 `AppIDPattern`
  * **同源**：小写、无连续/首尾连字符。客户端不能 import 服务端的 Go 包，因此
  * 两处各有一份 —— 改一处必须改两处（`src/app-protocol.spec.ts` 钉住形状）。
  */

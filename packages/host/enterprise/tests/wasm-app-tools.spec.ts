@@ -421,7 +421,7 @@ describe('参数契约：模型必须能读懂每个字段', () => {
 // ---------------------------------------------------------------------------
 
 const REPO_ROOT = fileURLToPath(new URL('../../../../', import.meta.url))
-const LIMITS_JSON = join(REPO_ROOT, 'server/internal/wasmapp/limits/limits.json')
+const LIMITS_JSON = join(REPO_ROOT, 'server/internal/limits/limits.json')
 const APPCFG_JSON = join(REPO_ROOT, 'server/internal/wasmapp/appcfg/appcfg.json')
 
 /** 读 `limits.json` 的 Key→Value 表（不存在 ⇒ 抛，调用方自行 skip）。 */

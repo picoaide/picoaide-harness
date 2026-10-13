@@ -327,6 +327,14 @@ var appBuilderSkillDigests = map[string]string{
 	// 都变了，随镜像下发给员工的手册因此换了一份。
 	// 为什么要提版本（R1-pm-8）：内容变就必须提 —— 已安装的客户端靠 version 判「有更新」。
 	"f54f18631323450dbea9a83848bfa1856c0ef40570da515ac66758403faee8a8": "2.13.0",
+
+	// 2.13.1 = **包搬迁后的路径锚点收口**（P1 第三片，2026-10-14 独立审计 P2-7）：
+	// 注入进技能树的 `demoapps/scripts/pack-assets.mjs` 头部把"规则真源"逐条点到了
+	// `server/internal/wasmapp/limits/limits.go`，而 `limits` 已搬到 `internal/limits`
+	// ⇒ 那份"官方实现"的注释指向了不存在的文件（作者按它去找真源会找不到）。同批把
+	// 本技能 `SKILL.md` 正文里同一处旧路径也改到 `internal/limits`。
+	// 注入文件的字节变了 ⇒ 内容摘要变 ⇒ 按 R1-pm-8 必须提版本（这正是本条登记的由来）。
+	"78aa1d1a26cd5e4bcea2b825ee470bc0203a2148962acc3caa14bcde63b0b4a6": "2.13.1",
 }
 
 // seededSkillDigests 是「**技能目录 → 内容摘要 → version**」的两级登记表：

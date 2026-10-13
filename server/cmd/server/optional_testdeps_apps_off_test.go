@@ -14,7 +14,12 @@ import (
 )
 
 // fillAppsProductionDeps 填 apps 面的 productionDeps 字段（关闭态只剩替身探针）。
-func fillAppsProductionDeps(t *testing.T, d *productionDeps, _ *sql.DB, _ string) {
+//
+// **必须把 db 透传进去**（P2-5）：替身探针现在也判 DB 可达性，空 db 会让
+// `productionReferenceTree`（它传 nil）走到"这一维没有判定"的分支 —— 那是给
+// "没接线"用的形态，不是给测试用的。测试里 db 是什么就传什么。
+func fillAppsProductionDeps(t *testing.T, d *productionDeps, db *sql.DB, _ string) {
 	t.Helper()
-	d.Ready = wasmCheckerOff{}.Handler()
+	checker := wasmCheckerOff{db: db}
+	d.Ready = checker.Handler()
 }

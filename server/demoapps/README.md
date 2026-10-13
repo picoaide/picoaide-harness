@@ -43,7 +43,7 @@ demoapps/<app>/{main.go, web/}                 源码（前端资源在 web/）
 与随技能分发的打包器**必须是同一份实现**，所以源树只有这一份、不属于任何一侧；镜像构建时
 Dockerfile 用两条 COPY 从这同一个源分别落到演示应用打包阶段与技能目录
 （`/opt/picoaide/skills/app-builder/scripts/pack-assets.mjs`，技能源码目录里**没有**副本）。
-注入关系登记在 `internal/wasmapp/skillseed` 的 `skillFileInjections`，由
+注入关系登记在 `internal/skillseed` 的 `skillFileInjections`，由
 `TestBuiltinSkillInventoryMatchesDiskDockerfileAndDigests` 核对"同源 + 两个落点 + 摘要一致"
 （落点必须在**最后一个构建阶段**、最终阶段的 RUN 不许碰技能目录），并由同文件的
 `TestBuiltinSkillReferencedFilesExistInImageTree` 核对"技能内容里引用的路径真的在镜像那一棵树里"。

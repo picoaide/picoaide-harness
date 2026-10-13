@@ -358,7 +358,7 @@ var sweepAuthGatedNonJSONSurfaces = map[string]string{
 //
 // 为什么要并集而不是各判各的：判据"登记了就必须真的被扫到"必须对**整张表**成立 ——
 // 分成两次循环会让"模块表里的条目在另一变体里 never 命中"重新变成静默事实。
-// 并集后这条判据在六种组合下逐字同一份实现。
+// 并集后这条判据在八种组合下逐字同一份实现。
 func sweepAllAuthGatedNonJSONSurfaces() map[string]string {
 	all := make(map[string]string, len(sweepAuthGatedNonJSONSurfaces)+len(sweepModuleAuthGatedNonJSONSurfaces))
 	for k, v := range sweepAuthGatedNonJSONSurfaces {

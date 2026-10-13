@@ -184,9 +184,12 @@ check-fast:
 	$(MAKE) test-server-fast
 	cd webadmin && npm test
 
-# 变体矩阵判据（P1 第二片起：**裁剪断言生效**）：4 个 skills/apps 组合 + 基线组合各
-# build（缺省再加 vet）一次，并断言"开着的模块包树在、关掉的模块包树不在"
-# （`go list -deps ./cmd/server`）。
+# 变体矩阵判据（P1 第二片起：**裁剪断言生效**）：三个可选开关的**每一个**子集（8 个组合）
+# 各 build（缺省再加 vet）一次，并断言"开着的模块包树在、关掉的模块包树不在"
+# （`go list -deps ./cmd/server`）。组合**不是手抄的表**：脚本从渠道契约的
+# `channelFeaturesVariant()` 取值域穷尽派生（`node scripts/check-go-build-tags.mjs --list`
+# 是矩阵的唯一真源）。2026-10-14 独立审计 P1-2 的现场：这里曾写"4 个 skills/apps 组合 +
+# 基线组合"，而漏掉的 3 组里恰好有一组（`connectors`）自己的判据是红的。
 #
 # ⚠️ **`--expect-cut` 是缺省值**（2026-10-14 P1 第二片翻转）：第一片时"包树消失"还不成立，
 # 只能按 PENDING 报告；第二片把三个模块的路由/装配全部接成构建期条件注册之后，
@@ -194,12 +197,15 @@ check-fast:
 # 想临时看"只报账"的形态：`make check-tags TAGS_ARGS=`（显式传空）。详见
 # docs/decisions/2026-10-14-server-build-tags.md §4 与脚本头部注释。
 #
-# 本目标**刻意不进 `check`/`check-fast`**：它跑 5 次全仓 build(+vet)，是分钟级的判据，
-# 不该塞进每个人的开发循环；CI 侧由 `.github/workflows/ci.yml` 的 server job 单列一步。
+# 本目标**刻意不进 `check`/`check-fast`**：它跑 8 次全仓 build(+vet)，是分钟级的判据，
+# 不该塞进每个人的开发循环；CI 侧由 `.github/workflows/ci.yml` 的 server job 单列一步
+# （`node scripts/check-go-build-tags.mjs --expect-cut`；2026-10-14 P1 第三片接入，
+# 登记的判据步骤见 `scripts/check-workflows.mjs` 的 `REQUIRED_CI_STEPS`）。
 #
 # 用法：
 #   make check-tags                            # 全部组合：build + vet + 裁剪断言（拦门禁）
 #   make check-tags TAGS_ARGS=--no-vet         # 只 build（快）
+#   make check-tags TAGS_ARGS=--list           # 只看矩阵（不跑 go）
 #   make check-tags TAGS_ARGS=--expect-cut=apps  # 探针：对每个组合都要求"apps 被裁掉"（必红）
 TAGS_ARGS ?= --expect-cut
 check-tags:

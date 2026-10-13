@@ -43,7 +43,7 @@ export type BuiltinAction = 'install' | 'update' | 'installed'
  * `hasUpdateFor` 同口径）。
  *
  * **判据为什么是 version 而不是 sha256**（R1-pm-8）：清单里的 `sha256` 是**打包后
- * tar.gz** 的摘要（`server/internal/wasmapp/skillseed` 的打包产物），而本机安装目录
+ * tar.gz** 的摘要（`server/internal/skillseed` 的打包产物），而本机安装目录
  * 上没有任何可与之对拍的归档摘要 —— provenance 里的 `archiveChecksum` 是
  * `computeSkillContentHash()` 算的**解包后的内容树**哈希（该函数自己的注释写明
  * 「与安装时记录的归档校验和不同源」）。两者是不同对象，直接比大小只会把每一份

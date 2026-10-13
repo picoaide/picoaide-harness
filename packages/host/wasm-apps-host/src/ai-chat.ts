@@ -69,7 +69,7 @@ export const AI_HIDDEN_SESSION_PREFIX = 'app:'
 /** 隐藏会话 id 里"前缀之后"的**账号作用域**分隔符（契约 `scope_separator`）。 */
 export const AI_HIDDEN_SESSION_SCOPE_SEPARATOR = '#'
 
-/** app_id 形态镜像（契约 `app_id_pattern`；真源 = `wasmapp/limits` 的 `AppIDPattern`）。 */
+/** app_id 形态镜像（契约 `app_id_pattern`；真源 = `internal/limits` 的 `AppIDPattern`）。 */
 export const AI_APP_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u
 
 /** app_id 长度上限镜像（契约 `app_id_max_length` = DNS label 上限）。 */

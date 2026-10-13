@@ -17,11 +17,17 @@ import (
 	"github.com/picoaide/picoaide/internal/marketplace"
 	"github.com/picoaide/picoaide/internal/sharedskills"
 	"github.com/picoaide/picoaide/internal/skillseed"
-	wasmapi "github.com/picoaide/picoaide/internal/wasmapp/api"
 )
 
 // fillSkillsTestDeps 填技能面五个 handler（测试树必须与生产树同形 —— 否则
 // `largeBodyRoutes` 的"豁免必须对应真实路由"门禁测不出路径写错）。
+//
+// ⚠️ 本文件**不得** import `internal/wasmapp/**`（2026-10-14 独立审计 P2-6）：它属于
+// `//go:build skills` 面，而 `-tags=skills`（apps 关）时 apps 的包树必须从依赖图里消失
+// —— 此前这里有一行只为"被用掉"而存在的 `wasmapi "…/internal/wasmapp/api"` +
+// `_ = wasmapi.Options{}`，在**测试**依赖图里把整棵 wasmapp 又拖了回来（`go list -deps
+// ./cmd/server` 看不到测试依赖，所以 check-tags 测不出来）。apps 面的测试夹具在
+// `optional_testdeps_apps_test.go`，两个面各自守自己的 build tag。
 func fillSkillsTestDeps(t *testing.T, d *Deps) {
 	t.Helper()
 	d.Market = marketplace.NewHandlers(nil, "/tmp/nonexistent")
@@ -29,5 +35,4 @@ func fillSkillsTestDeps(t *testing.T, d *Deps) {
 	d.Shared = sharedskills.NewHandlers(nil, "/tmp/nonexistent")
 	d.Capability = capabilities.NewHandlers(nil, "/tmp/nonexistent")
 	d.SkillSeed = skillseed.NewHandlers(skillseed.New(t.TempDir()))
-	_ = wasmapi.Options{}
 }

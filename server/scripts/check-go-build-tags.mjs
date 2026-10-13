@@ -6,26 +6,34 @@
  *
  * 对**每一种可选模块组合**各跑一次全仓编译，让"关掉某个模块"这种构建形态至少存在一条
  * 可执行的判据。组合与包树边界（模块树定义见下面的 `MODULE_TREES`，与决策记录
- * `docs/decisions/2026-10-14-server-build-tags.md` §2 同一份口径）：
+ * `docs/decisions/2026-10-14-server-build-tags.md` §2 同一份口径）。
  *
- *   | 变体标识（= `features_variant`） | `-tags=`                 | 期望被裁掉的模块树 |
- *   |----------------------------------|--------------------------|--------------------|
- *   | `skills,apps,connectors`         | `skills,apps,connectors` | （基线：三个树都必须**在**） |
- *   | `none`                           | ``（空 = 一个都不开）    | skills / apps / connectors |
- *   | `skills`                         | `skills`                 | apps / connectors |
- *   | `apps`                           | `apps`                   | skills / connectors |
- *   | `skills,apps`                    | `skills,apps`            | connectors |
+ * 组合**不是手抄的一张表，而是从渠道契约的取值域穷尽派生的**（`COMBOS` 由
+ * `FEATURE_MODULES` 的全部 2ⁿ 个子集 × `channelFeaturesVariant()` 生成）：三个开关
+ * 彼此独立（`docs/decisions/2026-10-13-feature-split-build-time.md` 决策台账
+ * 「三个独立开关、任意组合」），所以**每一个子集都是可达的交付变体**，矩阵必须穷尽 ——
+ * 2026-10-14 独立审计 P1-2 实测：手抄的 5 行表漏了 `connectors` / `skills,connectors` /
+ * `apps,connectors` 三组，而漏掉的三组里恰好有一组（`connectors`）自己的 `go test` 是红的
+ * ⇒「矩阵自称穷尽」与「减配变体永不被测」同时成立，且没有任何入口会红。
  *
  * 变体标识**逐字取自渠道契约**（`packages/host/desktop/scripts/channel-constants.ts` 的
  * `channelFeaturesVariant()`：`skills,apps,connectors` / `apps` / `none`）—— 判据用的是
  * 与发布链同一个串，而不是这里另起一套组合名，见
  * docs/decisions/2026-10-13-channel-feature-modules.md §5「三处只能读同一个串」。
+ * 这里的 `MODULES` 也因此**不再自持一份字面量**：直接从那份 TS 常量模块读
+ * （Node 的类型剥离直读，与 `scripts/verify-ci-scripts.mjs` 第 17 节同一姿势）。
  *
  * 每一步都判两件事：
  *   ① **编译面**：`go build -tags=<组合> ./...`（缺省再加一次 `go vet …`）必须成功 ——
  *      每一种组合都得编得过，否则"支持变体"就是空话；
  *   ② **依赖面**：`go list -deps -tags=<组合> ./cmd/server` 里，**开着的**模块包树必须
  *      在，**关掉的**模块包树必须不在。
+ *
+ * 认账（**本判据不管什么**）：它只跑 build / vet / `go list -deps`，**不跑 `go test`**
+ * —— 变体的**运行期**行为（关闭态路由树上有什么、装配是否 fail-loud）由各包自己的用例
+ * 按 build tag 覆盖（如 `cmd/server/routes_source_test.go` 的登记级反向断言 +
+ * `internal/router/optional_*_off_registration_test.go` 的位置级断言），而 CI 的
+ * `go test` 只跑发布态组合。见决策记录 §11-2。
  *
  * ## ② 的"关掉的那一半"自 2026-10-14 起**生效**（P1 第二片）
  *
@@ -69,11 +77,36 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, resolve } from 'node:path'
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const SERVER_DIR = resolve(SCRIPT_DIR, '..')
+const REPO_DIR = resolve(SERVER_DIR, '..')
+
+/**
+ * 模块名与变体标识的**唯一真源** = 渠道契约常量模块（`.ts` 直读靠 Node 的类型剥离，
+ * 与 `scripts/verify-ci-scripts.mjs` 第 17 节、`scripts/ci-channels.sh` 同一姿势）。
+ *
+ * 为什么不在这里写一份字面量：判据用的必须是**发布链那一个串**。手抄一份的失效形态已经
+ * 实测过一次（2026-10-14 独立审计 P1-2）：矩阵漏了 3/8 个组合而脚本头自称"每一种组合"。
+ */
+let channelContract
+try {
+  channelContract = await import(
+    pathToFileURL(resolve(REPO_DIR, 'packages/host/desktop/scripts/channel-constants.ts')).href
+  )
+} catch (error) {
+  console.error('✗ 读不到渠道契约常量模块 packages/host/desktop/scripts/channel-constants.ts —— '
+    + '本判据的模块清单与变体标识都从它派生\n'
+    + '  （`.ts` 直读依赖 Node 的类型剥离；Node ≥22.19 缺省开启）\n'
+    + `  ${error instanceof Error ? error.message : String(error)}`)
+  process.exit(2)
+}
+const { FEATURE_MODULES, channelFeaturesVariant } = channelContract
+
+/** 模块名的规范顺序（与 `internal/features` 的 AllModules、`FEATURE_MODULES` 三者同序）。 */
+const MODULES = [...FEATURE_MODULES]
 
 /** 模块 → 该模块的包树（仓库内 `server/` 相对路径前缀）。与决策记录 §2 同源。 */
 const MODULE_TREES = {
@@ -94,21 +127,56 @@ const MODULE_TREES = {
   connectors: ['internal/connectors'],
 }
 
-/** 模块名的规范顺序（与 `internal/features` 的 AllModules 一致）。 */
-const MODULES = ['skills', 'apps', 'connectors']
+// 包树登记表必须与模块清单同源：少一个模块 ⇒ 那个模块的"应当被裁掉"永远判不到。
+// （新增可选模块时忘登记是最容易发生的形态，所以放在模块加载期 fail-loud 而不是等判据。）
+{
+  const trees = Object.keys(MODULE_TREES).sort()
+  const expected = [...MODULES].sort()
+  if (JSON.stringify(trees) !== JSON.stringify(expected)) {
+    console.error('✗ MODULE_TREES 与 FEATURE_MODULES 不是同一组模块：'
+      + `登记表 [${trees.join(', ')}] vs 契约 [${expected.join(', ')}]`)
+    process.exit(2)
+  }
+}
 
 /**
- * 变体矩阵。`variant` = 渠道契约里的 `features_variant` 字面量（同时就是 `--only=` 的取值），
+ * 变体矩阵 —— **从取值域穷尽派生**，不是手抄的一张表。
+ *
+ * `variant` = 渠道契约里的 `features_variant` 字面量（同时就是 `--only=` 的取值），
  * `tags` = 传给 `-tags=` 的那串（`none` ⇒ 空串），`cut` = 该组合下**应当被裁掉**的模块。
- * 顺序即执行顺序：基线先跑，后面才有"基线成立"的参照。
+ *
+ * 为什么穷尽 2ⁿ 个子集：三个开关彼此独立（决策台账「三个独立开关、任意组合」），
+ * `channelFeaturesVariant()` 能产出**任意**子集 ⇒ 每一个子集都是可达的交付变体。
+ * 顺序即执行顺序：基线（全开）先跑，后面才有"基线成立"的参照；其余按"关掉的模块数"
+ * **升序**（差异小 → 大），同数量按变体名稳定排序 —— 诊断时先看与基线差异最小的那一组。
  */
-const COMBOS = [
-  { variant: 'skills,apps,connectors', tags: 'skills,apps,connectors', cut: [], baseline: true },
-  { variant: 'none', tags: '', cut: ['skills', 'apps', 'connectors'] },
-  { variant: 'skills', tags: 'skills', cut: ['apps', 'connectors'] },
-  { variant: 'apps', tags: 'apps', cut: ['skills', 'connectors'] },
-  { variant: 'skills,apps', tags: 'skills,apps', cut: ['connectors'] },
-]
+const COMBOS = (() => {
+  const combos = []
+  for (let mask = 0; mask < (1 << MODULES.length); mask += 1) {
+    const features = Object.fromEntries(MODULES.map((name, index) => [name, (mask & (1 << index)) !== 0]))
+    const variant = channelFeaturesVariant(features)
+    combos.push({
+      variant,
+      tags: variant === 'none' ? '' : variant,
+      cut: MODULES.filter(name => !features[name]),
+      baseline: variant === MODULES.join(','),
+    })
+  }
+  // 基线最先；其余按"关掉的模块数"升序（差异小 → 大），同数量按变体名稳定排序。
+  combos.sort((a, b) => {
+    if (a.baseline !== b.baseline) return a.baseline ? -1 : 1
+    if (a.cut.length !== b.cut.length) return a.cut.length - b.cut.length
+    return a.variant < b.variant ? -1 : a.variant > b.variant ? 1 : 0
+  })
+  // 自证：变体标识不得重复（重复 ⇒ 某个组合被静默丢掉）且正好 2ⁿ 个。
+  const variants = new Set(combos.map(combo => combo.variant))
+  if (combos.length !== (1 << MODULES.length) || variants.size !== combos.length) {
+    console.error(`✗ COMBOS 派生失败：期望 ${1 << MODULES.length} 个互不相同的变体，`
+      + `实得 ${combos.length} 个（去重后 ${variants.size} 个）`)
+    process.exit(2)
+  }
+  return combos
+})()
 
 /** 模块前缀（`go.mod` 的 module 行）——`go list` 输出的是完整 import path。 */
 const MODULE_PATH = 'github.com/picoaide/picoaide'

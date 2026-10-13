@@ -10,7 +10,7 @@ package router
 // 请求期 panic→500（既不是 404，也躲开路由声明表的视线）—— 本形态从根上排除了它。
 //
 // 为什么还需要"提前 return"：`registerWasm` 保留与打开态**同名同签名**的空实现，
-// 调用点（`Register`）因此不需要任何 build tag —— 一处装配代码在六种组合下都成立。
+// 调用点（`Register`）因此不需要任何 build tag —— 一处装配代码在八种组合下都成立。
 
 import "github.com/gin-gonic/gin"
 

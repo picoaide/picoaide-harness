@@ -190,7 +190,7 @@ ENV PICOAI_CLIENT_RELEASE_DIR=/opt/picoaide/client
 # "被跳过的坏资产"，把真正的告警淹掉。
 #
 # **新增一个平台内置技能 = 三处一起改**（缺一处就红）：判据是
-# server/internal/wasmapp/skillseed/builtin_skills_test.go 的
+# server/internal/skillseed/builtin_skills_test.go 的
 # TestBuiltinSkillInventoryMatchesDiskDockerfileAndDigests —— 它把
 # 「磁盘上的 server/skills/*/」「本节的 COPY 清单」「builtinSkillRegistry +
 # seededSkillDigests 的技能集合」三方**双向**对拍（真解析本文件的 COPY 指令；

@@ -13,7 +13,7 @@ import (
 // 本文件是从 api_sweep_test.go 原样搬来的 SSE 举证（P1 第二片，2026-10-14）。
 //
 // **不带 build tag**：`POST /v1/chat/completions` 等四条流式端点是基础面（LLM 网关），
-// 六种组合下都在 —— 搬出来只是为了让上面那条技能面的举证能单独带 tag。
+// 八种组合下都在 —— 搬出来只是为了让上面那条技能面的举证能单独带 tag。
 
 func TestAPISweepExceptionEvidenceSSE(t *testing.T) {
 	db := requireRealDB(t)

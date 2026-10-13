@@ -14,7 +14,7 @@
  *  1. `appcfg-contract.spec.ts` 用 `node:fs` 读那份 JSON 并**逐项对拍**（两张表的
  *     字段集合做**全集合相等**，不是"某几个名字在不在"）；文件不存在、或两张表被
  *     改名/搬走 ⇒ **直接失败**（独立审计 2026-09-18 P1-1/P1-2：skip 会让门禁静默失效）；
- *  2. 同一文件里另有一条对拍 `server/internal/wasmapp/limits/limits.go` 的用例：
+ *  2. 同一文件里另有一条对拍 `server/internal/limits/limits.go` 的用例：
  *     `app_id` 形态 / 版本号形态 / 白名单上限三条规格在 Go 里已经有唯一真源，
  *     在字段表落地之前先靠它守。
  *
@@ -84,7 +84,7 @@ export const WHITELIST_MAX = 2000
  * 为什么这个数字必须出现在**客户端契约**里（P1-10）：发布表单在选文件时就要判它 ——
  * 32 MiB 的产物经 `arrayBuffer()` + base64 + `JSON.stringify` 会在渲染进程里产生
  * 3–4 倍峰值内存，等宿主回 `UPLOAD_TOO_LARGE` 时界面已经冻过一次了。这里的取值
- * 由 `appcfg-contract.spec.ts` 与 `server/internal/wasmapp/limits/limits.go` 对拍。
+ * 由 `appcfg-contract.spec.ts` 与 `server/internal/limits/limits.go` 对拍。
  */
 export const WASM_MAX_BYTES = 32 * 1024 * 1024
 
@@ -299,7 +299,7 @@ const REQUIRED_TABLES: ReadonlyArray<readonly [string, readonly string[]]> = [
 export const APPCFG_JSON_REPO_PATH = 'server/internal/wasmapp/appcfg/appcfg.json'
 
 /** `limits.go` 相对于仓库根的位置（app_id / 版本号 / 白名单上限的 Go 侧真源）。 */
-export const LIMITS_GO_REPO_PATH = 'server/internal/wasmapp/limits/limits.go'
+export const LIMITS_GO_REPO_PATH = 'server/internal/limits/limits.go'
 
 /**
  * `read.go` 相对于仓库根的位置（**应用中心目录行**的服务端真源）。

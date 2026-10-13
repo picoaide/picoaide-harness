@@ -1,6 +1,6 @@
 ---
 name: app-builder
-version: 2.13.0
+version: 2.13.1
 title: 应用构建（WASM 应用）
 description: 把业务同事的一句话想法做成应用平台上的 WASM 应用并发布（员工自建小工具）。分轮次访谈需求、多角色评审设计、写成静态前端 + wasm JSON API、一条命令链打包发布。当用户说"做个内部小工具/应用/登记表/页面"、"把这个流程做成应用"、"发布到应用中心"、"能不能在平台上加个功能"时用本技能。
 author: 平台内置
@@ -451,7 +451,7 @@ wasm_app_publish({appId:"shared-notes", version:"1.0.0", title:"共享便签",
 > **这几个数字的出处（改钳位常量前先读这一段）**：
 > - **默认值**来自 `references/limits.md` 的 `app_concurrency` / `user_per_app_running` /
 >   `user_per_app_queued` / `user_global_running` / `app_queue_depth` / `global_instances` 行 ——
->   那张表是 `go generate` 的生成物、与 `internal/wasmapp/limits` **逐字节对拍**；
+>   那张表是 `go generate` 的生成物、与 `internal/limits` **逐字节对拍**；
 > - **两个上界**（4096 = `MaxAppQueue`、256 = `MaxInstances`）**不在** limits 表里，来自控制台
 >   保存路径的钳位常量 `internal/wasmapp/applimits/applimits.go`；
 > - ⚠️ 构建期数值门禁只做「同量纲同值是否存在」的判定（并逐字节守生成物），**不覆盖本段这张

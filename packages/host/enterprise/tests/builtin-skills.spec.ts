@@ -2,7 +2,7 @@
  * 「平台内置技能」客户端链路（2026-09-18）。
  *
  * 用户要求：**skill 内置到服务端，客户端按需安装**。服务端那一半由
- * `server/internal/wasmapp/skillseed` 提供（清单 + tar.gz 包，带 sha256 头）；
+ * `server/internal/skillseed` 提供（清单 + tar.gz 包，带 sha256 头）；
  * 本用例钉住客户端这一半：
  *
  *  1. `GET /api/pico/skills/builtin` → 服务端清单 + 本机已装列表；
@@ -133,7 +133,7 @@ function harness(session: Session | null): { call: (url: string, method?: string
 /**
  * 把真实技能目录打成 tar.gz（与 Go 侧 PackDir 同口径：条目排序、gzip 收流）。
  * 这里只当**夹具**：被测的是客户端拿到归档之后做了什么，不是打包本身
- * （打包由 server/internal/wasmapp/skillseed 的 Go 用例钉住）。
+ * （打包由 server/internal/skillseed 的 Go 用例钉住）。
  */
 async function packSkillTarGz(sourceDir: string): Promise<Buffer> {
   const names: string[] = []

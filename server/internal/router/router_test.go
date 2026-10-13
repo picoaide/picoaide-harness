@@ -52,7 +52,7 @@ func testRouterDeps(t *testing.T) Deps {
 		Reports:       reports.NewHandlers(nil),
 	}
 	// 可选模块（skills / apps / connectors）的 handler 由**按模块拆的** build-tag
-	// 测试文件填 —— 判据因此在六种组合下都能编译，并且能表达"当前变体该有什么"。
+	// 测试文件填 —— 判据因此在八种组合下都能编译，并且能表达"当前变体该有什么"。
 	fillSkillsTestDeps(t, &d)
 	fillAppsTestDeps(t, &d)
 	fillConnectorsTestDeps(t, &d)

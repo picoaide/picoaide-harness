@@ -35,7 +35,7 @@ function serverSource(relative: string): string {
 
 describe('子框架放行的平台侧依赖（P2-3 认账的一半）', () => {
   it('平台强制给应用文档写 CSP：default-src \'none\' + frame-ancestors \'none\'', () => {
-    const source = serverSource('server/internal/wasmapp/limits/limits.go')
+    const source = serverSource('server/internal/limits/limits.go')
     const body = /func AppContentSecurityPolicy\(selfOrigin string\) string \{([\s\S]*?)\n\}/.exec(source)?.[1]
     expect(body, 'AppContentSecurityPolicy 必须还在（它没了 ⇒ 应用文档就没有 CSP 了）').toBeDefined()
     expect(body).toContain("default-src 'none'")
@@ -56,7 +56,7 @@ describe('子框架放行的平台侧依赖（P2-3 认账的一半）', () => {
   })
 
   it('认账记录：平台的响应头白名单不含 location（所以今天发不出 302 —— 但闸门不能指望它）', () => {
-    const limits = serverSource('server/internal/wasmapp/limits/limits.go')
+    const limits = serverSource('server/internal/limits/limits.go')
     const allowlist = /var AppResponseHeaderAllowlist = \[\]string\{([\s\S]*?)\n\}/.exec(limits)?.[1]
     expect(allowlist, 'AppResponseHeaderAllowlist 必须还在').toBeDefined()
     // 不含 location 属**平台侧**的偶然兜底；宿主的 will-redirect 闸门是另一道、
