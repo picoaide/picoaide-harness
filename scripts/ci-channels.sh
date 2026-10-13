@@ -722,7 +722,7 @@ for id in "${SELECTED[@]}"; do
   #     的 protocols 以及服务端 OIDC 回调三处联动);
   #   - assets 里声明的素材文件必须真的存在,且 app-icon.png 必须符合 mac 图标
   #     管线要求(1024×1024 RGBA16 + ICC):这两个在打包时才炸,而打包要跑三平台。
-  if ! CHANNEL_ID="$id" CHANNEL_LOGO_FILE="$LOGO_FILE_NAME" CHANNEL_APP_ICON_FILE="$APP_ICON_FILE_NAME" node "$REPO_ROOT/scripts/lib/check-channel-json.mjs" "$manifest"; then
+  if ! CHANNEL_ID="$id" CHANNEL_LOGO_FILE="$LOGO_FILE_NAME" CHANNEL_APP_ICON_FILE="$APP_ICON_FILE_NAME" node "$(dirname "$0")/lib/check-channel-json.mjs" "$manifest"; then
     exit 1
   fi
 done
