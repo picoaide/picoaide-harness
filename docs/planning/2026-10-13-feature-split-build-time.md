@@ -18,7 +18,7 @@
 
 1. **代码不进产物**：模块关闭时，其代码不得出现在 app.asar / 服务端二进制 / webadmin dist 里 —— 不是"运行期关"，而是编译期真裁剪。
 2. **数据库完全一致**：所有变体跑**同一套迁移**、得到**同一套 schema**（不允许任何 DDL 分叉）。
-3. **缺省全开**：渠道配置不写 `features` 时四块全开（既有渠道行为逐字节不变），与刚落地的 `desktop.platforms`（不写=三端全要）同口径。
+3. **缺省全开**：渠道配置不写 `features` 时**三个可选模块全开**（既有渠道行为逐字节不变），与刚落地的 `desktop.platforms`（不写=三端全要）同口径。上表的 `base` 是"基础功能恒开"的**说明性分组**，它**不是** `features` 的键 —— 开关只有 `skills` / `apps` / `connectors` 三个（写法见 §2.1；2026-10-13 实施时定案）。
 
 ## 2. 开关契约
 
@@ -30,13 +30,15 @@
 
 - 只允许出现 `skills` / `apps` / `connectors` 三个键（未知键 fail-loud，**不得**静默丢字段变成"全开"）；值为布尔；
 - 缺省（键缺失或整段缺失）= 全 `true`；
-- 官方渠道模板键表（`packages/host/desktop/scripts/channel-constants.ts` 的 `CHANNEL_TEMPLATE_KEYS`）必须含 `features`；
+- 官方渠道模板键表（`packages/host/desktop/scripts/channel-constants.ts` 的 `CHANNEL_TEMPLATE_KEYS`）必须**逐模块列叶键** `features.skills` / `features.apps` / `features.connectors`，**不写裸 `features`**：裸键只要那个对象存在就满足，`"features": {}` 也能通过 —— 而拷贝模板的新渠道从此看不到有哪几个模块可关，正是这张表要防的"藏在代码兜底值里"（2026-10-13 实施时定案，理由见决策记录 §4）；
 - 校验落在 `scripts/ci-channels.sh`，报错**不回显取值**（沿用 `desktop.platforms` 的形态）。
 
-**落地顺序（避免 CI 红窗；2026-10-13 实测更正）**：`features` 一旦进模板键表，`--require-template` 会让官方渠道缺该键即红 —— 而**这个校验在 PR 的打包 job 上就跑**（不只 tag 期）：PR #181 的 `Desktop (Linux)` 与 `Desktop (Windows installer)` 正是红在这里（macOS 那条路径不跑该步，所以它当时是绿的）。
-所以顺序必须是：**先补私有渠道仓 → 再合 harness 侧契约**（我最初写反了）。先补私有仓是安全的：现行校验器对**未知字段只告警、不拦发布**（`scripts/ci-channels.sh:851`），旧版看到 `features` 不会拒。
-补键口径：四个渠道逐键显式写 `"features": {"skills": true, "apps": true, "connectors": true}`（值 = 现行兜底值，显式化不改变行为）；理由与 `desktop.platforms` 同 —— 官方渠道是新增渠道的模板，缺键意味着行为藏在代码兜底里。
-另有一层：`features` 会被构建期消费，**私有仓补键前不得启用任何"按变体裁剪"的构建路径**（否则会出现"镜像按旧配置构建、客户端按新配置排包"的半通状态）。
+**落地顺序（避免 CI 红窗；2026-10-13 实测）**：`features.*` 一旦进模板键表，`--require-template` 会让官方渠道缺这些键即红 —— 而四个调用点里**三个是"非 tag"的打包 job**（`desktop-linux` / `desktop-windows` / `desktop-macos`：非 docs-only 的**每次 PR / push 都跑**），只有第四个是 tag 期的 `release`。所以"harness 先合并、私有仓随后补键"这段窗口里，**master 上每个 PR / push 都会红**（实测：PR #181 的 `Desktop (Linux)` 与 `Desktop (Windows installer)` 正红在这里，而 `Desktop (macOS)` 那条路径不跑该步、当时是绿的）。
+
+正确的顺序是**反过来**：**私有仓先补键（官方渠道逐模块显式，值 = 现行兜底值 `true`，显式化本身不改变行为）→ 再合并 harness 侧契约**。这样是零红窗的，而且补键动作对合并前的 harness **完全无害**：合并前那份 `scripts/ci-channels.sh` 里 `features` 零命中，未知顶层键不会被拒（只有 `assets` 的未知子键告警；同文件既有注释也写着"未知字段只告警、不拦发布"）。与上一批 `desktop.platforms` 的节奏相同；这次多一层：`features` 还会被构建期消费，私有仓补键前不得启用任何"按变体裁剪"的构建路径。
+
+> **落点以决策记录为准**：字段形态、唯一真源、输出点与消费契约见
+> `docs/decisions/2026-10-13-channel-feature-modules.md`（同日、已实施）。两份文本冲突时以它为准。
 
 ### 2.2 变体标识与哨兵串
 

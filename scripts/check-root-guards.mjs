@@ -164,7 +164,7 @@ const REGISTERED_GUARD_ENTRIES = new Map([
   // 由 `check-guard-parser-integrity.mjs` 与 `verify-check-workspaces.mjs` 各自独立复算对拍）。
   ['check:layout', { script: 'node scripts/verify-layout.mjs', argvTail: [], digest: '733757d29364f1ee3f90c58ce8576c660bfeafacdd5f8bc796ae85911401f979' }],
   ['check:workflows', { script: 'node scripts/check-workflows.mjs', argvTail: [], digest: '4752f083dafb3efa6658b7a7707c606ef814d6c014dac3804057b33a4246cd57' }],
-  ['check:ci-scripts', { script: 'node scripts/verify-ci-scripts.mjs', argvTail: [], digest: 'd1c5a26fdca7e6298df4348421b6f7b05bc4616c0ccc693b99fe38ffba6136f4' }],
+  ['check:ci-scripts', { script: 'node scripts/verify-ci-scripts.mjs', argvTail: [], digest: '61b64cc4991341ba9be8ccda99fd581c97fa0f12e7584908f83c4346c282949d' }],
   ['check:patch-resolutions', { script: 'node scripts/verify-patch-resolutions.mjs', argvTail: [], digest: '6dcde2281311235a57722608d91e6a1fa59734411ad65cda76ea2bdc43145c83' }],
   ['check:patch-pin', { script: 'node scripts/check-patch-pin.mjs', argvTail: [], digest: 'a8fe5b45df5dfadd7a87332b31f9e14c4a6722a41f21cf0f0d9afa6450a3ba84' }],
   ['check:patches', { script: 'node scripts/verify-patches.mjs', argvTail: [], digest: '22131d86472ff930f22687192b07216c5cf74ab594d0091a6766e661a2c24683' }],

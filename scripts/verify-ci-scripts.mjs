@@ -3778,6 +3778,16 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
     `未知模块名的失败信息应指向 features 字段，实际：${unknownRun.stderr.slice(0, 200)}`)
   check(!`${unknownRun.stdout}${unknownRun.stderr}`.includes(REJECT_MARKER_KEY),
     '未知模块名的失败信息不得回显键名（键名本身可能是渠道/品牌标识，与素材键同一条纪律）')
+  // 合法模块名必须**真的出现在报错里**：官网《渠道与品牌》页（中英两版）承诺"报错点名字段与
+  // 合法模块名"，而 2026-10-13 独立审计 P2 实测这里原本只有"见 channel-constants.ts 的
+  // FEATURE_MODULES" —— 读者得自己打开源码文件才拿到三个名字，承诺比实现对得宽一档。
+  // 模块名是公开仓里的常量（不是渠道身份），回显它不违反"不回显取值/未知键名"那条纪律；
+  // 这条判据钉住那句承诺：有人把清单换回"见某某文件"即红。
+  for (const module of MODULES) {
+    check(unknownRun.stderr.includes(module),
+      `未知模块名的失败信息必须列出合法模块名 ${module}（官网《渠道与品牌》页承诺"报错点名字段与合法模块名"；`
+      + '模块名是公开常量，列出它不泄露渠道身份 —— 取值与未知键名仍然不回显）')
+  }
 
   // 负例 3：不是对象（数组/字符串/null）—— 整份声明没有意义。
   for (const [raw, why] of [[[MODULES[0]], '数组'], [MODULES[0], '字符串'], [null, 'null']]) {
@@ -3880,9 +3890,232 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
   // ---- ④ 哨兵串：命名规则从 FEATURE_MODULES 派生，落点在各模块自己的装配点 ----
   //
   // **判据的边界（写清楚，免得被当成端到端证明）**：下面是**静态代理** —— 它判的是
-  // "串在该模块的装配函数里被引用，因而不会被链接器整串丢掉"。真正的端到端判据是
-  // 依赖图/文件清单（模块有没有被打进产物），而哨兵只是**副证**；且哨兵判据必须
+  // "串在该模块的装配函数里被**可执行地**引用，因而不会被链接器整串丢掉"。真正的端到端
+  // 判据是依赖图/文件清单（模块有没有被打进产物），而哨兵只是**副证**；且哨兵判据必须
   // **双侧**（关闭变体里"没有"是恒真的，必须有"开启变体里**存在**"的另一半）。
+  //
+  // 2026-10-13 独立审计 P1（第一版判据实测踩到的形态）：第一版判的是"标识符**文本**在
+  // `apply()` 之后出现过"，于是"**删掉 `apply()` 里唯一的可执行引用、只留一行提到它的
+  // 注释**"这个变异体**全绿**（实测：与未变异基线逐条 diff，哨兵相关的失败零条）。判
+  // "文本出现过"与判"可执行引用"的差别就是这条判据的全部内容 —— 所以下面先把注释与
+  // 字符串字面量排掉、用括号配对取出 `apply()` 的函数体、要求体内出现**值位置的读取**，
+  // 再用合成样本把判据自己钉住（⑤）。
+  /**
+   * 把一段 TS 源码扫成 **代码位置的 token 流**（注释、字符串字面量、模板字面量的**文本段**
+   * 里的名字一律不算 —— 它们同样会被打包器丢掉，判它们等于没判）。
+   *
+   * 为什么需要它（2026-10-13 独立审计 P1）：这条判据的第一版判的是"标识符文本在 `apply()`
+   * 之后出现过"，于是"**删掉 apply() 里唯一的可执行引用、只留一行提到它的注释**"这个变异体
+   * **全绿** —— 而那正是这条判据存在的唯一理由。判"文本出现过"与判"可执行引用"的差别就
+   * 在这里：先把注释/字符串排掉，剩下的才是会被链接器看见的东西。
+   *
+   * 形态：手写扫描器，认得注释、单/双引号字符串、模板字面量（`${}` 里的插值切回代码状态）、
+   * 正则字面量（按"前一个有效字符能否结束表达式"区分除号）与花括号深度（用于配对模板插值）。
+   * 它是**判据的判据**，刻意不引第三方 parser：这个脚本要在裸检出里跑（见本文件头部）。
+   * @param source - 模块源码。
+   * @returns token 列表（`kind: 'ident' | 'punct'`，`index` 为源码偏移）。
+   */
+  const scanCodeTokens = source => {
+    const tokens = []
+    const frames = [{ kind: 'code', depth: 0 }]
+    const isIdentStart = c => c !== undefined && /[A-Za-z_$]/u.test(c)
+    const isIdentPart = c => c !== undefined && /[A-Za-z0-9_$]/u.test(c)
+    /** 跳过一段引号字符串（未闭合/换行即停：绝不越界吞掉后面的代码）。 */
+    const skipQuoted = (start, quote) => {
+      let j = start + 1
+      while (j < source.length) {
+        const c = source[j]
+        if (c === '\\') { j += 2; continue }
+        if (c === quote) return j + 1
+        if (c === '\n') return j + 1
+        j += 1
+      }
+      return source.length
+    }
+    /** 跳过一段正则字面量；不是正则（跨行）时退回"当除号处理"。 */
+    const skipRegex = start => {
+      let j = start + 1
+      let inClass = false
+      while (j < source.length) {
+        const c = source[j]
+        if (c === '\\') { j += 2; continue }
+        if (c === '\n') return start + 1
+        if (inClass) { if (c === ']') inClass = false; j += 1; continue }
+        if (c === '[') { inClass = true; j += 1; continue }
+        if (c === '/') {
+          j += 1
+          while (j < source.length && /[a-z]/iu.test(source[j])) j += 1
+          return j
+        }
+        j += 1
+      }
+      return start + 1
+    }
+    let i = 0
+    while (i < source.length) {
+      const frame = frames[frames.length - 1]
+      const ch = source[i]
+      if (frame.kind === 'template') {
+        if (ch === '\\') { i += 2; continue }
+        if (ch === '`') { frames.pop(); i += 1; continue }
+        if (ch === '$' && source[i + 1] === '{') {
+          tokens.push({ value: '{', index: i + 1, end: i + 2, kind: 'punct' })
+          frames.push({ kind: 'code', depth: 0 })
+          i += 2
+          continue
+        }
+        i += 1
+        continue
+      }
+      if (ch === '/' && source[i + 1] === '/') {
+        const nl = source.indexOf('\n', i)
+        i = nl < 0 ? source.length : nl + 1
+        continue
+      }
+      if (ch === '/' && source[i + 1] === '*') {
+        const end = source.indexOf('*/', i + 2)
+        i = end < 0 ? source.length : end + 2
+        continue
+      }
+      if (ch === "'" || ch === '"') { i = skipQuoted(i, ch); continue }
+      if (ch === '`') { frames.push({ kind: 'template' }); i += 1; continue }
+      if (ch === '/') {
+        const prev = tokens[tokens.length - 1]
+        const prevChar = prev === undefined ? '' : (prev.kind === 'ident' ? 'x' : prev.value)
+        if (!/[A-Za-z0-9_$)\]]/u.test(prevChar)) { i = skipRegex(i); continue }
+        tokens.push({ value: '/', index: i, end: i + 1, kind: 'punct' })
+        i += 1
+        continue
+      }
+      if (ch === '{') {
+        frame.depth += 1
+        tokens.push({ value: '{', index: i, end: i + 1, kind: 'punct' })
+        i += 1
+        continue
+      }
+      if (ch === '}') {
+        if (frame.depth === 0 && frames.length > 1) {
+          tokens.push({ value: '}', index: i, end: i + 1, kind: 'punct' })
+          frames.pop()
+          i += 1
+          continue
+        }
+        frame.depth = Math.max(0, frame.depth - 1)
+        tokens.push({ value: '}', index: i, end: i + 1, kind: 'punct' })
+        i += 1
+        continue
+      }
+      if (isIdentStart(ch)) {
+        let j = i
+        while (j < source.length && isIdentPart(source[j])) j += 1
+        tokens.push({ value: source.slice(i, j), index: i, end: j, kind: 'ident' })
+        i = j
+        continue
+      }
+      // 空白不进 token 流：判据里的"前/后一个有效字符"必须真的是有效字符
+      // （第一版漏了这一步，于是 prev 永远是空格，判据把所有形态都判成"没有引用"）。
+      if (/\s/u.test(ch)) { i += 1; continue }
+      tokens.push({ value: ch, index: i, end: i + 1, kind: 'punct' })
+      i += 1
+    }
+    return tokens
+  }
+
+  /**
+   * 取出 `export function apply(...)` 的**函数体**字符区间（`{` 到配对的 `}`）。
+   *
+   * 为什么必须配对而不是 `indexOf('{')`：参数表里就可能有花括号
+   * （`apply(ctx, options = {})`，本仓三个落点里有两个是这样），`indexOf` 会把那个空对象
+   * 当成函数体 —— 于是"体内有没有引用"退化成"参数之后有没有这个名字"，判据当场失效。
+   * @param source - 模块源码。
+   * @returns `{ start, end }`（`end` 为配对 `}` 的下一字符）；找不到时 undefined。
+   */
+  const applyBodyRange = source => {
+    const tokens = scanCodeTokens(source)
+    const applyAt = source.indexOf('export function apply(')
+    if (applyAt < 0) return undefined
+    const open = tokens.find(token => token.value === '(' && token.index >= applyAt)
+    if (open === undefined) return undefined
+    let depth = 0
+    let close
+    for (const token of tokens) {
+      if (token.index < open.index) continue
+      if (token.value === '(') depth += 1
+      else if (token.value === ')') {
+        depth -= 1
+        if (depth === 0) { close = token; break }
+      }
+    }
+    if (close === undefined) return undefined
+    const brace = tokens.find(token => token.value === '{' && token.index > close.index)
+    if (brace === undefined) return undefined
+    depth = 0
+    for (const token of tokens) {
+      if (token.index < brace.index) continue
+      if (token.value === '{') depth += 1
+      else if (token.value === '}') {
+        depth -= 1
+        if (depth === 0) return { start: brace.index, end: token.index + 1 }
+      }
+    }
+    return undefined
+  }
+
+  /**
+   * 一处标识符出现是不是**值位置的读取**（不是赋值目标、不是属性键、不是别人的成员名）。
+   * @param tokens - {@link scanCodeTokens} 的结果。
+   * @param index - 该标识符在 token 列表里的下标。
+   * @returns 是值位置读取时为 true。
+   */
+  const isValueUse = (tokens, index) => {
+    const prev = tokens[index - 1]
+    const next = tokens[index + 1]
+    if (next === undefined) return false
+    if (next.value === '=' && tokens[index + 2]?.value !== '=') return false
+    if (next.value === ':') return false
+    if (prev === undefined) return false
+    if (prev.value === '.') return false
+    if (prev.kind === 'ident') return ['return', 'typeof', 'await', 'yield'].includes(prev.value)
+    return ['(', ',', '+', '{', '[', '=', '?', ':', '>'].includes(prev.value)
+  }
+
+  /**
+   * 哨兵引用判据（**纯函数**：合成样本必须用同一个判据正反两侧钉住，不许另写一份实现）。
+   *
+   * 判两件事：
+   *   1. 标识符在**代码位置**至少出现两次（声明处 + 至少一处引用）；
+   *   2. 其中至少一处落在 `apply()` 的**函数体**里、并且是**值位置的读取** —— 只写在注释、
+   *      字符串字面量、体内重声明（遮蔽）或属性键里都不算。
+   * @param source - 模块源码。
+   * @param identifier - 哨兵常量的标识符（从声明处抓出来的那个）。
+   * @returns 问题清单（空数组 = 通过）。
+   */
+  const sentinelReferenceProblems = (source, identifier) => {
+    const problems = []
+    const tokens = scanCodeTokens(source)
+    const occurrences = tokens.filter(token => token.kind === 'ident' && token.value === identifier).length
+    if (occurrences < 2) {
+      problems.push(`哨兵常量 ${identifier} 在**代码位置**只出现 ${occurrences} 次（注释与字符串字面量里的名字不算：它们同样会被打包器丢掉）`)
+    }
+    const body = applyBodyRange(source)
+    if (body === undefined) {
+      problems.push('取不到 `export function apply(` 的函数体（哨兵必须写在该模块的装配点：模块注册/装配时写入日志或登记表的那一处）')
+      return problems
+    }
+    const inBody = []
+    tokens.forEach((token, index) => {
+      if (token.kind !== 'ident' || token.value !== identifier) return
+      if (token.index <= body.start || token.index >= body.end) return
+      inBody.push(index)
+    })
+    if (inBody.some(index => ['const', 'let', 'var', 'function', 'class'].includes(tokens[index - 1]?.value ?? ''))) {
+      problems.push(`apply() 的函数体里**重声明**了 ${identifier}（遮蔽同名常量：模块级那个哨兵串从此没有任何可执行引用，链接器可以整串丢掉）`)
+    }
+    if (!inBody.some(index => isValueUse(tokens, index))) {
+      problems.push(`apply() 的函数体里没有 ${identifier} 的**可执行引用**（值位置：模板插值 \${IDENT} / 拼接 + IDENT / 实参 f(IDENT) / 属性值 k: IDENT —— 只写在注释、字符串或体内重声明里都与"这个模块被装配了"无关）`)
+    }
+    return problems
+  }
   const SENTINEL_SITES = {
     skills: 'packages/host/enterprise/src/skill-telemetry.ts',
     apps: 'packages/host/wasm-apps-host/src/index.ts',
@@ -3904,16 +4137,52 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
       + '它是从 channel-constants.ts 的 featureSentinel() 派生的）')
     if (declaration === null) continue
     const identifier = declaration[1]
-    const occurrences = [...source.matchAll(new RegExp(`\\b${identifier}\\b`, 'gu'))].length
-    check(occurrences >= 2,
-      `${relative} 的哨兵常量 ${identifier} 只出现在声明处（${occurrences} 次）—— 没被引用的字符串会被`
-      + '打包器/链接器一起丢掉，"产物里没有这个串"于是既可能是模块被裁掉了、也可能只是串被优化掉了')
-    const applyAt = source.indexOf('export function apply(')
-    check(applyAt >= 0, `${relative} 里找不到 export function apply( —— 哨兵必须写在该模块的装配点（模块注册/装配时写入日志或登记表的那一处）`)
-    check(applyAt >= 0 && source.slice(applyAt).includes(identifier),
-      `${relative} 的装配函数 apply() 没有引用哨兵常量 ${identifier}（只在模块顶层声明 = 与"这个模块被装配了"无关）`)
+    const problems = sentinelReferenceProblems(source, identifier)
+    check(problems.length === 0,
+      `${relative} 的哨兵常量 ${identifier} 没有通过"可执行引用"判据：${problems.join('；')}`)
   }
 
+  // ---- ⑤ 量具自检：合成样本必须落在判据的两侧 ----
+  //
+  // 为什么必须常驻这一段（2026-10-13 独立审计 P1 的直接教训）：④ 的第一版判"文本出现过"，
+  // 于是"删掉可执行引用、只留注释"的变异体全绿。判据改成"可执行引用"之后，**那个变异形态
+  // 本身**必须是常驻的红灯来源 —— 否则下一轮谁把实现退回 `includes()`，本节其它样本不会有
+  // 任何反应："判据被判据钉住"的那一半缺了，这一节就只是看起来在判。
+  const PROBE_SENTINEL_IDENTIFIER = 'PROBE_FEATURE_SENTINEL'
+  const probeSentinelSource = body => `export const ${PROBE_SENTINEL_IDENTIFIER} = 'picoaide.feature.probe.v1'\n${body}\n`
+  /** 合成正例：这些都是"真的读了那个常量"，判据必须接受（判红正确写法 = 判据本身是坏的）。 */
+  const SENTINEL_PROBE_ACCEPT = [
+    ['模板插值（三个落点当前的形态）',
+      'export function apply(ctx) {\n  ctx.logger?.info?.(`registered (${' + PROBE_SENTINEL_IDENTIFIER + '})`)\n}'],
+    ['字符串拼接（参数表里带默认对象：函数体必须靠括号配对取，不能 indexOf 第一个花括号）',
+      'export function apply(ctx, options = {}) {\n  ctx.logger.info(\'registered (\' + ' + PROBE_SENTINEL_IDENTIFIER + ')\n}'],
+    ['调用实参', 'export function apply(ctx) {\n  register(ctx, ' + PROBE_SENTINEL_IDENTIFIER + ')\n}'],
+    ['属性值', 'export function apply(ctx) {\n  record({ sentinel: ' + PROBE_SENTINEL_IDENTIFIER + ' })\n}'],
+  ]
+  /** 合成负例：**串没有被任何可执行代码读到**的几种形态，判据必须逐条拒绝。 */
+  const SENTINEL_PROBE_REJECT = [
+    ['删掉可执行引用、只留一行注释（审计实测全绿的那个变异体）',
+      'export function apply(ctx) {\n  // 装配哨兵 ' + PROBE_SENTINEL_IDENTIFIER + ' 曾经写在这一行\n}'],
+    ['只剩字符串字面量里的名字（文本出现过，但读的是那个字符串）',
+      'export function apply(ctx) {\n  ctx.logger.info(\'registered (' + PROBE_SENTINEL_IDENTIFIER + ')\')\n}'],
+    ['apply() 体内完全不出现（只在模块顶层声明）',
+      'export function apply(ctx) {\n  ctx.logger.info(\'registered\')\n}'],
+    ['体内重声明同名常量（遮蔽：模块级那个串再没被读到）',
+      'export function apply(ctx) {\n  const ' + PROBE_SENTINEL_IDENTIFIER + ' = 1\n  register(String(' + PROBE_SENTINEL_IDENTIFIER + '))\n}'],
+    ['体内只作为属性键（读的是键名，不是那个常量）',
+      'export function apply(ctx) {\n  record({ ' + PROBE_SENTINEL_IDENTIFIER + ': 1 })\n}'],
+  ]
+  for (const [why, body] of SENTINEL_PROBE_ACCEPT) {
+    const problems = sentinelReferenceProblems(probeSentinelSource(body), PROBE_SENTINEL_IDENTIFIER)
+    check(problems.length === 0,
+      `哨兵判据必须接受${why}（合成正例）—— 把正确写法判红就等于没有判据，实际判为问题：${problems.join('；')}`)
+  }
+  for (const [why, body] of SENTINEL_PROBE_REJECT) {
+    const problems = sentinelReferenceProblems(probeSentinelSource(body), PROBE_SENTINEL_IDENTIFIER)
+    check(problems.length > 0,
+      `哨兵判据必须拒绝${why}（合成负例）—— 这一条是"判据被判据钉住"的那一半：`
+      + '缺了它，判据退回"标识符文本出现过"不会有任何红灯')
+  }
   // 契约文档是本轮的交付物之一：它不在，变体标识的消费面与哨兵的两条硬约束就没有出处。
   const contractDoc = join(root, 'docs', 'decisions', '2026-10-13-channel-feature-modules.md')
   if (check(existsSync(contractDoc), '渠道功能模块契约文档必须存在（docs/decisions/2026-10-13-channel-feature-modules.md）')) {
@@ -7831,5 +8100,8 @@ process.stdout.write('verify-ci-scripts: OK — ref 形态判定唯一真源(tag
   + '于是「缺省全开→缺省全关」与「解析改成静默丢字段」两种变异当场红;'
   + 'ci-channels.sh 真跑四类坏声明(非布尔/未知模块/数组/字符串)各自红且不回显取值与未知键名;'
   + '官方模板键表逐模块派生 + 漏写 features.<module> 的负例;'
-  + '哨兵串命名从 FEATURE_MODULES 派生、引用必须落在各模块自己的 apply() 里'
-  + '(静态代理:没被引用的串会被链接器一起丢掉) + 契约文档必须存在且列出三个哨兵串)\n')
+  + '哨兵串命名从 FEATURE_MODULES 派生、且必须是 apply() 体内**值位置的可执行引用**'
+  + '(注释/字符串字面量/体内重声明都不算:先扫代码位置的标识符、再括号配对取函数体;'
+  + '静态代理:没被引用的串会被链接器一起丢掉) + 该判据**自带量具自检**'
+  + '(合成正例 4 例必须接受 / 合成负例 5 例必须拒绝,含"删掉可执行引用只留注释")'
+  + ' + 契约文档必须存在且列出三个哨兵串)\n')

@@ -626,9 +626,16 @@ export function stageChannelProfile(
  * 把**功能模块声明**就位进随包渠道配置（`build/channel.json`）—— 变体标识的**输出点**。
  *
  * 为什么落在随包 profile 上（2026-10-13 定案，本轮只建立取值/输出点/文档，**不接线**）：
- *   - 它是每个渠道产物里**已经存在**的那一份渠道内容（客户端包与镜像都带它），
- *     将来的三个消费者（Go `-tags`、客户端组装清单、webadmin `--build-arg`）不必各自
- *     再去解析私有仓原文、更不必各自把三个布尔重拼一遍；
+ *   - 它是**品牌渠道**客户端产物里那一份渠道内容（就是本函数写入的 `build/channel.json`）。
+ *     **覆盖边界**（2026-10-13 独立审计 P1 更正，别照"客户端包与镜像都带它"读）：
+ *     ①**官方渠道没有随包 profile** —— `stageChannelProfile()` 对 official 走删除分支；
+ *     ②服务端镜像里带的是**私有仓原文**（`ci-build-channel-images.sh` 把 `channels/<c>/.`
+ *     整份拷进 `channels-context/`，再 `COPY` 进镜像），里面**没有** `features_variant`。
+ *     所以将来的三个消费者（Go `-tags`、客户端组装清单、webadmin `--build-arg`）**不能**
+ *     假设"从产物里读现成值"：客户端组装可以读随包 profile，而镜像侧那两条路必须在镜像
+ *     构建期由同一个解析器（`normalizeChannelFeatures()` + `channelFeaturesVariant()`）
+ *     从渠道目录原文算出来，或由下一轮把派生键写进镜像用的渠道目录快照 —— 契约见
+ *     `docs/decisions/2026-10-13-channel-feature-modules.md` §5；
  *   - 渠道没写 `features` 时这里写入的是**规范化后的全开结果**：下游读到的永远是
  *     "三个键全在"的对象，不需要再实现一次"缺省全开"（缺省语义只有
  *     `normalizeChannelFeatures()` 一份）。

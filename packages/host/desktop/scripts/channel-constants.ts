@@ -116,6 +116,12 @@ export const CHANNEL_TEMPLATE_KEYS = [
   // 只要对象存在就满足裸键，于是 `"features": {}` 能通过模板判据 —— 而拷贝这份模板的
   // 新渠道会**看不到有哪些模块可关**，正是这张表要防的形态（"藏在代码兜底值里"）。
   // 叶键把"官方渠道 = 完整模板"这条语义落成可判的事实：新增模块时这里跟着加一行。
+  //
+  // **往这张表里加键 = 跨仓动作**（2026-10-13 独立审计 P0）：`--require-template` 的三个
+  // 调用点是**非 tag** 的打包 job（每次非 docs-only 的 PR/push 都跑），所以"harness 先合并、
+  // 私有渠道仓随后补官方渠道的键"这段窗口里 master 会一路红，而 tag 期的 gate 拦不住它。
+  // 正确顺序：**私有仓先补键 → 再合并引入新键的 harness 改动**（补键对合并前的 harness
+  // 无害）。决策记录 §4 有完整说明。
   'features.skills',
   'features.apps',
   'features.connectors',

@@ -143,13 +143,17 @@ If a channel does not need one of them, turn it off explicitly in the channel co
 - The official channel's template lists all of these keys **per module**, so adding a channel shows at
   a glance which modules can be turned off.
 
-> **Where this chain currently ends**: the declaration is written into the channel configuration that
-> ships with the client as `features` (the normalised switches, all keys present) and
-> `features_variant` (a stable variant identifier such as `skills,apps`, `connectors` or `none`).
+> **Where this chain currently ends**: for a brand channel the declaration is written into the channel
+> configuration that ships with the client as `features` (the normalised switches, all keys present)
+> and `features_variant` (a stable variant identifier such as `skills,apps`, `connectors` or `none`);
+> the official channel has no such shipped configuration (it uses the built-in identity), and the
+> channel content inside the server image is still the raw channel-repository copy.
 > That identifier is the **same string** future consumers must share: the server image's compile tags
 > (Go `-tags`), the client assembly manifest and the admin console build argument
-> (`--build-arg FEATURES=<variant>`). Three copies of the rule would produce a half-wired state
-> ("present in the image, missing in the client") with no failing check anywhere.
+> (`--build-arg FEATURES=<variant>`) — the two image-side consumers resolve it at build time from the
+> same source of truth instead of assuming the artefact already carries it. Three copies of the rule
+> would produce a half-wired state ("present in the image, missing in the client") with no failing
+> check anywhere.
 > Until those consumers are wired, changing `features` does **not** change any artefact.
 > The full contract (including how to prove a module really is absent from an artefact) lives in the
 > repository at `docs/decisions/2026-10-13-channel-feature-modules.md`.
