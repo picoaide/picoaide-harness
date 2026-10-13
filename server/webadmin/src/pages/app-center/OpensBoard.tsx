@@ -59,6 +59,17 @@ const WINDOWS: { value: string; label: string; days: number }[] = [
 
 const TOP_CHOICES = ['10', '20']
 
+/**
+ * 应用中心 · 运营看板的**变体哨兵串**（P3；命名 = `picoaide.feature.<模块>.v1`，模块名 `apps`
+ * 与 Go 侧 `-tags`、渠道配置 `features` 逐字一致）。
+ *
+ * **每个模块页各自带哨兵**（不是只在分区布局 `AppCenterLayout.tsx` 上写一份）：产物判据的
+ * 内容面按"这个文件会不会被别的 chunk 拉进来"判，而静态引用一个子页时（审计 M6 的形态）
+ * 被拉进来的正是**这个文件** —— 哨兵不在它身上，泄漏就没有任何观测面。双侧判据与两条纪律见
+ * `pages/CapabilityCenter.tsx` 的同名常量，产物级断言在 `scripts/check-feature-chunks.mjs`。
+ */
+export const FEATURE_SENTINEL = 'picoaide.feature.apps.v1'
+
 export default function OpensBoard() {
   const [days, setDays] = useState('7')
   const [topN, setTopN] = useState('10')
@@ -148,7 +159,7 @@ export default function OpensBoard() {
   ]
 
   return (
-    <div className="space-y-4" data-testid="opens-board">
+    <div className="space-y-4" data-testid="opens-board" data-feature-sentinel={FEATURE_SENTINEL}>
       <PageHeader
         title="运营看板"
         desc="应用打开次数（F16）：PV / UV / 趋势 / 热门应用 TOP N —— 判断哪些应用真正被使用"

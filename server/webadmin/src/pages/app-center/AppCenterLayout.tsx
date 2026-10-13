@@ -38,9 +38,11 @@ const TABS: AppCenterTab[] = [
  * 应用中心的**变体哨兵串**（P3；命名 = `picoaide.feature.<模块>.v1`，模块名 `apps`
  * 与 Go 侧 `-tags`、渠道配置 `features` 逐字一致）。
  *
- * 落点选在**分区布局**而不是某个子页：它是 `/app-center/*` 任何一条子路由都会渲染的那一层，
- * 于是"应用面在不在产物里"与"这个串在不在"是同一件事。双侧判据与两条纪律见
- * `pages/CapabilityCenter.tsx` 的同名常量（`scripts/check-feature-chunks.mjs`）。
+ * 落点是分区布局（`/app-center/*` 任何一条子路由都会渲染的那一层），但**不是唯一落点**：
+ * 三个子页（`Apps` / `OpensBoard` / `Limits`）各自也带同一串 —— 内容面按"这个文件会不会被
+ * 别的 chunk 拉进来"判，静态引用某个子页时被拉进来的是那个文件本身（审计 M6），哨兵只在
+ * 布局上就看不见。双侧判据与两条纪律见 `pages/CapabilityCenter.tsx` 的同名常量
+ * （`scripts/check-feature-chunks.mjs`）。
  */
 export const FEATURE_SENTINEL = 'picoaide.feature.apps.v1'
 

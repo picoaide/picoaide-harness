@@ -43,12 +43,20 @@ WORKDIR /build
 #   不传这个 build-arg ⇒ 缺省全开（与本次改造之前的产物同源）。
 # 判据：webadmin 侧的产物双侧断言 = `server/webadmin/scripts/check-feature-chunks.mjs`
 #       （`make -C server webadmin-check-features`）；Go 侧 = `make -C server check-tags`。
-ARG FEATURES=skills,apps,connectors
-# 用 ENV 而不是把变量写进 RUN：`npm run build`（tsc -b && vite build）整条链路都要能读到
-# 同一个值（vite.config.ts 与 vitest.config.ts 都从环境读，真源解析在 webadmin/features.mjs）。
-ENV FEATURES=$FEATURES
+#
+# ⚠️ **ARG/ENV 必须写在 `npm ci` 之后**（P2-5，2026-10-14 独立审计实测）：ENV 是构建链上的
+# 一层，写在依赖安装之前时每换一个变体都会让 ENV 之后的全部层失效 —— 合成 Dockerfile 实测
+# （本地缓存 node:24-alpine）：换 `--build-arg FEATURES` 后 `ENV` 之后的 `RUN` 一律重跑，
+# 也就是**每个变体重跑一次全量 `npm ci`（含外网下载）**。把它挪到 `COPY webadmin/` 之后、
+# `RUN npm run build` 之前：变体在构建链里照旧可见（ENV 对后面的 RUN 生效），依赖层跨变体复用。
+# 两个 ARG 的**缺省值**与 `server/Makefile` 的 `GO_TAGS ?=`、`webadmin/features.mjs` 的
+# `DEFAULT_FEATURES_VARIANT` 由 `scripts/verify-ci-scripts.mjs` 的「变体缺省值同源」一节对拍。
 COPY webadmin/package.json webadmin/package-lock.json ./
 RUN npm ci
+# 用 ENV 而不是把变量写进 RUN：`npm run build`（tsc -b && vite build）整条链路都要能读到
+# 同一个值（vite.config.ts 与 vitest.config.ts 都从环境读，真源解析在 webadmin/features.mjs）。
+ARG FEATURES=skills,apps,connectors
+ENV FEATURES=$FEATURES
 COPY webadmin/ ./
 RUN npm run build
 

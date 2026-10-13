@@ -1,7 +1,15 @@
 import { existsSync, readFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { dirname, join, relative, resolve, sep } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { FEATURE_ENABLED, FEATURE_MODULES, FEATURES_VARIANT, isFeatureEnabled, type FeatureModule } from './features'
+// 源码图判据的唯一实现（同一份也跑在产物判据 `scripts/check-feature-chunks.mjs` 的前置检查里）。
+// **期望表仍然各持一份**：判据的期望独立于被测实现，但"怎么读 import 图"不需要两套口径。
+import {
+  findCutProblems,
+  findRegistryProblems,
+  findSentinelProblems,
+  resolveSpecifier,
+} from '../../scripts/feature-page-graph.mjs'
 
 // ---------------------------------------------------------------------------
 // P3 变体（2026-10-14）：开关表自洽 + **守卫形态自证**
@@ -56,6 +64,39 @@ const MODULE_PAGE_IMPORTS: Readonly<Record<FeatureModule, readonly string[]>> = 
     './pages/app-center/Limits',
   ],
   connectors: ['./pages/Connectors'],
+}
+
+/**
+ * **期望**：每个模块的哨兵串（§P0 §6 的 `picoaide.feature.<module>.v1`）。
+ *
+ * 同样手写：哨兵串是跨面契约（Go `-tags` / 渠道 `features` / webadmin 三处同一个串），
+ * 从模块名拼出来就等于把"命名规则变了"这件事变成判据自己跟着变 —— 串必须有人写下来。
+ */
+const MODULE_SENTINELS: Readonly<Record<FeatureModule, string>> = {
+  skills: 'picoaide.feature.skills.v1',
+  apps: 'picoaide.feature.apps.v1',
+  connectors: 'picoaide.feature.connectors.v1',
+}
+
+/** webadmin 包根（`src/App.tsx` 的上一级）。图判据与页表都用它做基准。 */
+const PACKAGE_ROOT = resolve(dirname(APP_PATH), '..')
+
+/**
+ * {@link MODULE_PAGE_IMPORTS} 的说明符 → 包根相对的 POSIX 路径（图判据的入参形态）。
+ *
+ * 解析不到 ⇒ throw（不静默跳过：期望表写错一个路径时，"判据少判一个文件"必须是红灯）。
+ * @returns 模块 → 页面源文件路径。
+ */
+function modulePagePaths(): Record<string, string[]> {
+  const out: Record<string, string[]> = {}
+  for (const module of FEATURE_MODULES) {
+    out[module] = MODULE_PAGE_IMPORTS[module].map((spec) => {
+      const file = resolveSpecifier(APP_PATH, spec, PACKAGE_ROOT)
+      if (file === null) throw new Error(`期望表里的模块页解析不到源文件：${spec}（基准 ${APP_PATH}）`)
+      return relative(PACKAGE_ROOT, file).split(sep).join('/')
+    })
+  }
+  return out
 }
 
 /** `__FEATURE_<MODULE>__ ? lazy(() => import('<spec>')) : …` 的全部匹配（含区间）。 */
@@ -146,5 +187,54 @@ describe('模块页守卫形态（产物级判据的前置条件）', () => {
 
     // 非空自证：守卫扫描必须真的扫到东西（正则退化时"零命中"不许全绿）。
     expect(guarded.length, `App.tsx 里扫不到任何被守卫的懒加载（扫描器退化？路径=${APP_PATH}）`).toBe(declaredTotal)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// P3 第三片：模块页的**产物入口唯一性**（源码图判据，毫秒级）
+//
+// 现场（独立审计 M6）：核心页 `src/pages/Users.tsx` 里写一行
+// `import AppsProbe from './app-center/Apps'`（外加防 tree-shaking 的副作用）之后，
+// `FEATURES=skills,connectors` 的产物里 `Users-<hash>.js` 带着应用中心的页面代码，
+// 而当时的产物判据 5/5 全绿：**结构面**只认 Vite 的动态 chunk 名（静态引用被内联进引用方，
+// 没有自己的 chunk 名），**内容面**当时每个模块只有一个哨兵文件（apps 的哨兵在
+// AppCenterLayout 上，被拉进来的是 Apps）。
+//
+// 三条一起判（实现与产物判据共用 `scripts/feature-page-graph.mjs`，期望表各持一份）：
+//   ① 页表 ⟺ 守卫双向对拍（新增模块页不登记 ⇒ 红）；
+//   ② 页表里每个文件都带本模块哨兵并渲染它（内容面的覆盖面 = 页表）；
+//   ③ 模块页/模块私有代码只能经守卫的 import() 进入（静态引用、未被守卫的动态 import、
+//      跨模块引用、核心页引用，全部红）。
+// ---------------------------------------------------------------------------
+describe('模块页的产物入口唯一性（P3 · 源码图）', () => {
+  it('App.tsx 里被守卫的 import() ⟺ 本判据的模块页表（双向，缺一个方向就是判据缩面）', () => {
+    const problems = findRegistryProblems({ packageRoot: PACKAGE_ROOT, modulePages: modulePagePaths() })
+    expect(
+      problems,
+      '模块页表与 App.tsx 的守卫不对拍（新增/改名模块页时必须两边同时改）：\n'
+        + problems.map((p) => `  · ${p}`).join('\n'),
+    ).toEqual([])
+  })
+
+  it('每个模块页都带本模块哨兵并把它渲染出来（内容面的覆盖面 = 页表，不是一个模块一份）', () => {
+    const problems = findSentinelProblems({
+      packageRoot: PACKAGE_ROOT,
+      modulePages: modulePagePaths(),
+      moduleSentinels: MODULE_SENTINELS,
+    })
+    expect(
+      problems,
+      '模块页缺哨兵（被静态拉进别的 chunk 时，内容面就看不见它的代码）：\n'
+        + problems.map((p) => `  · ${p}`).join('\n'),
+    ).toEqual([])
+  })
+
+  it('模块页只能经 App.tsx 里 __FEATURE_<MODULE>__ 守卫的 import() 进入产物（静态引用即红）', () => {
+    const problems = findCutProblems({ packageRoot: PACKAGE_ROOT, modulePages: modulePagePaths() })
+    expect(
+      problems,
+      '有模块页/模块私有代码能被守卫之外的路径引用 —— 关闭该模块时它的页面代码仍会进产物：\n'
+        + problems.map((p) => `  · ${p}`).join('\n'),
+    ).toEqual([])
   })
 })

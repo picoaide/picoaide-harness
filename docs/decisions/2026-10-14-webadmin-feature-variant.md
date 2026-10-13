@@ -75,13 +75,23 @@ P1 只做了 Go 侧的 tag 接线（开了等于没开）；P0 只定了模块�
 | `apps` | `/app-center`、`/app-center/opens`、`/app-center/limits`（`/app-platform` 老书签重定向） | `src/pages/app-center/{AppCenterLayout,Apps,OpensBoard,Limits}.tsx` |
 | `connectors` | `/connectors` | `src/pages/Connectors.tsx` |
 
-## 4. 判据在哪（三条，独立通道）
+## 4. 判据在哪（四条，独立通道）
 
 | 判据 | 面 | 判什么 |
 | --- | --- | --- |
 | `src/lib/features.test.ts` | **源码形态**（毫秒级） | 模块名字面量与顺序；开关表三个键全在且是布尔；`FEATURES_VARIANT` ⟺ 逐模块布尔（同一次解析）；**守卫形态**：每个模块页的 `import()` 必须写在 `__FEATURE_<MODULE>__ ? lazy(…) : …` 里，且不得再有静态 import |
+| `src/lib/features.test.ts`（P3 第三片新增） | **源码图**（毫秒级） | 同一个文件里另有三条，实现共用 `server/webadmin/scripts/feature-page-graph.mjs`：① `App.tsx` 里被守卫的 `import()` ⟺ 本判据的模块页表**双向**对拍；② 页表里**每个**文件都带本模块哨兵并渲染它；③ **模块页 / 模块私有代码只能经守卫的 `import()` 进入**（静态引用、未被守卫的动态 `import()`、跨模块引用、核心页引用全部红） |
 | `src/lib/routes.test.ts`、`src/lib/nav.test.ts` | **按变体给期望** | 双向对拍在**两侧**都成立：产物侧 `PARSED`（按开关过滤）↔ `ROUTE_REGISTRY`（同样过滤）；声明侧 `PARSED_ALL` ↔ `DECLARED_ROUTE_REGISTRY`（含关闭模块，**每一种变体下都成立**）。权限点前向守卫读声明表 ⇒ 关掉模块**不会**让它的权限点从闸门视野里消失；同时新增"声明表不是停车场"（开启的模块其条目必须逐条真的进侧栏） |
-| `scripts/check-feature-chunks.mjs`（`npm run check:features`） | **产物字节**（分钟级） | 真跑 **5 次** `vite build`：全开 / 全关 / 逐个关闭。每次双侧断言：关闭的模块其**哨兵串**不在 dist、其**页面 chunk 文件名**不产出；开启的模块两侧都必须存在。另有反空转（每次构建必须真的产出核心页 chunk 与 `index.html`）与前置检查（源文件里没有哨兵串 ⇒ 退出码 2，与"产品错了"的 1 分开） |
+| `scripts/check-feature-chunks.mjs`（`npm run check:features`） | **产物字节**（分钟级） | 真跑 **5 次** `vite build`：全开 / 全关 / 逐个关闭。每次双侧断言：关闭的模块其**哨兵串**不在 dist、其**页面 chunk 文件名**不产出；开启的模块两侧都必须存在。另有反空转（每次构建必须真的产出核心页 chunk 与 `index.html`）与前置检查：**逐页哨兵 + 页表双向 + 源码图三条**（缺项退出码 2；源码图上就有泄漏时退出码 1，构建之前即红） |
+
+**为什么源码图那三条是必需的**（P3 第三片的直接动因，2026-10-14 独立审计 M6）：模块页被
+**静态**引用时，Vite 把它内联进引用方的 chunk —— **结构面**（动态 chunk 名）看不见它，
+**内容面**只在这个文件自己带哨兵时才看得见。审计的实测形态：在核心页 `src/pages/Users.tsx`
+顶部写 `import AppsProbe from './app-center/Apps'`（外加防 tree-shaking 的 `globalThis` 副作用），
+`FEATURES=skills,connectors` 的 `assets/Users-<hash>.js` 里带着应用中心的页面代码，而当时的
+5 个变体判据**全绿**（apps 的哨兵当时只在 `AppCenterLayout.tsx` 上，被拉进来的是 `Apps.tsx`）。
+所以两条一起补：**哨兵下移到每个模块页**（内容面的覆盖面 = 页表）**+ 源码图判据**（不依赖
+打包器的 tree-shaking 行为，边的存在本身就是红灯）。
 
 **为什么产物判据必须真跑构建**：形态对不等于产物对（插件版本、`manualChunks`、新增一条静态
 import 都能让"源码看着对、chunk 照样产出"）。**变异证据**（本片实测）：把 `connectors` 的守卫
@@ -90,10 +100,17 @@ import 都能让"源码看着对、chunk 照样产出"）。**变异证据**（�
 （哨兵串与 `Connectors-*.js` 都还在），而 `skills` / `apps` 两行照旧绿 —— 逐模块矩阵确实能定位到
 "哪一个模块漏了"，不是一刀切。
 
-**哨兵串**（P0 §6 的三条纪律在这里同样适用）：`picoaide.feature.<module>.v1`，写在该模块
-**真的会渲染**的那条路径上（页面根元素的 `data-feature-sentinel`），不是躺在常量模块里 ——
-没被引用的字符串会被打包器一起丢掉，那样"产物里没有这个串"就既可能是"模块被裁掉了"、
-也可能只是"串没了"。判据**必须双侧**：只判"关闭变体里没有"是恒真的（一个空产物也满足）。
+**哨兵串**（P0 §6 的三条纪律在这里同样适用）：`picoaide.feature.<module>.v1`，写在**该模块
+每一个页面文件**里（页面根元素的 `data-feature-sentinel`，落点表 = 本片 §3 的模块边界表与
+`check-feature-chunks.mjs` 的 `MODULE_EXPECTATIONS[*].pages`，并由
+`scripts/verify-ci-scripts.mjs` 第 19 节登记对拍），不是躺在常量模块里 —— 没被引用的字符串会被
+打包器一起丢掉，那样"产物里没有这个串"就既可能是"模块被裁掉了"、也可能只是"串没了"。
+判据**必须双侧**：只判"关闭变体里没有"是恒真的（一个空产物也满足）。
+
+**逐页哨兵的覆盖面为什么是页表而不是"每模块一个文件"**：内容面回答的是"这个文件的代码进没进
+产物"，而静态引用发生时被拉进来的是**那个具体的文件**（审计 M6 拉进来的是 `Apps.tsx`，而当时
+唯一的 apps 哨兵在 `AppCenterLayout.tsx` 上）。所以页表里每个文件各自带串是量具的一部分，
+`check-feature-chunks.mjs` 的前置检查与 `features.test.ts` 都会逐页判它。
 
 ## 5. 构建命令
 
@@ -104,14 +121,17 @@ cd server/webadmin && npm ci && npm test && npm run build
 # 本地：某个变体（测试与构建读同一个开关）
 cd server/webadmin && FEATURES=apps,connectors npm test && FEATURES=apps,connectors npm run build
 
-# 变体产物双侧判据（5 次构建，约 1 分钟；不开 = 不拦）
+# 变体产物双侧判据（5 次构建，约 2 分钟；`make check` 与 CI 的 server job 都跑它）
 cd server/webadmin && npm run check:features
+
+# 变体**测试**矩阵：4 个非缺省变体各跑一遍完整单测（约 5–8 分钟；`make check` 与 CI 同一条命令）
+make -C server webadmin-variant-tests
 
 # 服务端 + 管理端**一起**选变体（唯一输入是 GO_TAGS，webadmin 侧自动翻译成 none）
 make -C server build-server GO_TAGS=apps,connectors      # 关掉技能面
 make -C server build-server GO_TAGS=                      # 三个全关（FEATURES 自动 = none）
 
-# 发布门禁（含变体产物判据）：gofmt + vet + go test + webadmin 单测 + 变体判据 + webadmin 构建
+# 发布门禁（含变体测试矩阵 + 变体产物判据）：gofmt + vet + go test + webadmin 单测/矩阵/产物判据 + webadmin 构建
 make -C server check
 
 # 服务端侧（Go）变体矩阵，与本片成对
@@ -150,9 +170,16 @@ Go 的 `-tags` 决定**接口在不在**，webadmin 的 `FEATURES` 决定**页�
    `features_variant`（它是私有仓原文），所以要么在镜像构建期用同一个解析器从渠道目录原文算，
    要么先把派生键写进 `channels-context/` 快照。**这一片没有接线**，因此"渠道关掉某模块"
    目前还不会自动改变镜像内容。
-2. **没有把产物判据接进 CI**：`npm run check:features` 进了 `make check`（本地发布门禁），
-   但 CI 的 `server` job 目前只跑 `npm test`。它是分钟级的（5 次构建），接进 CI 的位置与
-   P1 的 `check-tags` 一样需要单独决定（那时两者可以合成一个"变体矩阵"job）。
+2. **变体判据的调度点**（P3 第三片已接线，2026-10-14 独立审计 P1）：本片第一版把
+   `npm run check:features` 只放进本地 `make check`，CI 的 `server` job 只跑缺省的 `npm test`
+   —— 而 `nav.test.ts` / `routes.test.ts` 是**按变体给期望**的，于是"关闭变体会坏"这一类回归
+   （实测 M3：删掉 `nav.ts` 的开关过滤 ⇒ `FEATURES=skills,apps npm test` 红，而全开门禁与产物
+   判据全绿）在 CI 上无人拦。现在三处都是调度点：`server/Makefile` 的
+   `webadmin-variant-tests`（4 个非缺省变体）+ `webadmin-check-features`，前者被 `make check`
+   调用，两者都由 CI 的 `server` job 起（存在性由 `scripts/verify-ci-scripts.mjs` 第 19 节判，
+   删任一处即红）。**注意**：这一片**没有**把"服务端变体 == webadmin 变体"做成端到端判据
+   （要等镜像构建期真的从渠道配置解析出变体之后，见第 1 条）—— 现在判的是"三处缺省值同源"
+   （Dockerfile 两个 ARG ↔ Makefile 的 `GO_TAGS ?=` ↔ `features.mjs` 的缺省变体）。
 3. **没有做服务端侧真正的条件编译**：那是 P1 文档 §5 的第二片（本片只动 webadmin 侧）。
    Go 侧仍把三个模块的包编进二进制（`check-tags` 的 `⏳` 行就是这件事的账）。
 4. **没有给"非模块页"加开关**：`skills` 面在管理端只有能力中心一条入口（`/capabilities`）；
@@ -169,5 +196,16 @@ Go 的 `-tags` 决定**接口在不在**，webadmin 的 `FEATURES` 决定**页�
   这是**刻意**的选择：宁可红一次并留下一条"口径要跟着改"的记录，也不要一个只在文件名上成立的判据。
 - **关闭分支里的 `DisabledPage` 占位组件**：只为了让 JSX 的类型面保持"永远是一个组件"
   （`tsc` 会检查两个分支，死分支也一样）。折叠后它与死分支一起消失，不进产物。
+- **源码图判据是文本级扫描，不是 TypeScript 编译器**（`feature-page-graph.mjs`）：为的是跑在
+  每次 `npm test` 里（毫秒级）。代价与口径：`import type` / `export type` 被显式排除（编译期
+  抹掉，不是运行时边）；只解析相对说明符与 `@/` 别名（其余是外部依赖，不可能是本仓页面）；
+  测试文件不入图（它们 import 页面是正常形态）；注释里写的 `import('…')` 会被当成边 ——
+  真出现时红灯指向那一行，改注释即可。**不覆盖**的是"同一个文件被复制粘贴成另一份"
+  （那属于代码重复，不是变体裁剪面）。
+- **变体测试矩阵的成本**：4 个非缺省变体 × 完整套件 ≈ 5–8 分钟（本机实测 7m45s，含并发构建负载；
+  CI 的 `server` job 45 分钟预算内）。它换来的是"关闭变体会坏"这一类回归第一次有了自动拦截点；
+  只跑变体相关的那几个测试文件会便宜得多，但"哪些文件是变体相关的"会变成一张要维护的表
+  （少登记一个文件就静默缩面）。矩阵实现在 `server/webadmin/scripts/check-feature-variants.mjs`
+  （`VARIANT_MATRIX` 是唯一真源，`scripts/verify-ci-scripts.mjs` 第 19 节真跑它读矩阵）。
 - **判据只覆盖"页面代码不进 dist"**，不覆盖"被裁掉的接口在服务端是否真的 404"
   （那是 P1 第二片的事）。

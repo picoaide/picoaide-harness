@@ -269,6 +269,17 @@ function fmtTime(iso: string): string {
   return d.toLocaleString('zh-CN', { hour12: false })
 }
 
+/**
+ * 应用中心 · 限制项页的**变体哨兵串**（P3；命名 = `picoaide.feature.<模块>.v1`，模块名 `apps`
+ * 与 Go 侧 `-tags`、渠道配置 `features` 逐字一致）。
+ *
+ * **每个模块页各自带哨兵**（不是只在分区布局 `AppCenterLayout.tsx` 上写一份）：产物判据的
+ * 内容面按"这个文件会不会被别的 chunk 拉进来"判，而静态引用一个子页时（审计 M6 的形态）
+ * 被拉进来的正是**这个文件** —— 哨兵不在它身上，泄漏就没有任何观测面。双侧判据与两条纪律见
+ * `pages/CapabilityCenter.tsx` 的同名常量，产物级断言在 `scripts/check-feature-chunks.mjs`。
+ */
+export const FEATURE_SENTINEL = 'picoaide.feature.apps.v1'
+
 export default function Limits() {
   const [view, setView] = useState<LimitsView | null>(null)
   const [form, setForm] = useState<Limits | null>(null)
@@ -578,7 +589,7 @@ export default function Limits() {
   const groups = Array.from(new Set(fieldRows.map((f) => f.group)))
 
   return (
-    <div className="space-y-4 p-6">
+    <div className="space-y-4 p-6" data-feature-sentinel={FEATURE_SENTINEL}>
       <PageHeader
         title="限制项"
         desc="员工自建 WASM 应用的并发、内存与时间预算限制。改动即时下发（单实例内存上限需重启），保存时会按可用内存做四笔账自检。"

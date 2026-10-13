@@ -51,6 +51,10 @@ PICOAI_ADMIN_PASSWORD=admin123 bin/picoaide-server \
   二进制、页面代码也不进 `dist`。**必须一起选**，只改一侧会出现"页面在、接口 404"。
   口径与判据见 [../docs/decisions/2026-10-14-webadmin-feature-variant.md](../docs/decisions/2026-10-14-webadmin-feature-variant.md)
   与 [../docs/decisions/2026-10-14-server-build-tags.md](../docs/decisions/2026-10-14-server-build-tags.md)。
+  变体面的两条门禁（`make check` 与 CI 的 `server` job 都跑）：`make webadmin-variant-tests`
+  （4 个非缺省变体各跑一遍 webadmin 单测 —— 关闭变体的回归在这里才拦得住）与
+  `make webadmin-check-features`（产物级双侧判据：真跑 5 次构建 + 逐页哨兵 + 源码图"模块页
+  只能经守卫 `import()` 进入"）。
 
 ## 文档
 

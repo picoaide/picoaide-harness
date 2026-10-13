@@ -1041,6 +1041,16 @@ jobs:
           if-no-files-found: ignore
       - run: npm test
         working-directory: server/webadmin
+      # 2026-10-14 独立审计 P1:上面那步是**缺省（全开）变体**的 webadmin 单测,而
+      # `nav.test.ts` / `routes.test.ts` 是按变体给期望的 —— 关闭变体的回归（实测:删掉
+      # `nav.ts` 的开关过滤后,关闭变体会发布指向不存在路由的侧栏条目,点进去 404）
+      # 在 CI 上无人拦。下面两步把"变体矩阵"变成**调度点**,本地 `make check` 与这里跑同一条命令:
+      #   ① webadmin-variant-tests:4 个非缺省变体各跑一遍完整单测;
+      #   ② webadmin-check-features:产物级双侧判据（真跑 5 次构建;含源码图"模块页只能经
+      #      守卫 import() 进入"与逐模块哨兵）。
+      # 两步的存在性由 `scripts/verify-ci-scripts.mjs` 的「变体调度点」一节判（删任一步即红）。
+      - run: make webadmin-variant-tests
+      - run: make webadmin-check-features
       - run: make build-server
       - name: Deployment asset syntax checks
         # 部署脚本(deploy.sh / install-server.sh)已于 2026-09-10 移除,此处只校验

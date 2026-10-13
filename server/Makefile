@@ -18,7 +18,7 @@ VERSION ?= $(shell git describe --tags --always 2>/dev/null | sed 's/^v//')
 # 建一次并留在 PG 实例里;要强制重建就手工 DROP DATABASE picoaide_tmpl_*。
 # 另:go test 结果会被缓存,`make test-server-fast` 在无改动时整轮秒级返回;
 # `make check` 仍带 -count=1(发布门禁,永远真跑)。
-.PHONY: test test-server test-server-fast build-server webadmin webadmin-check-features docker-image check check-fast check-tags
+.PHONY: test test-server test-server-fast build-server webadmin webadmin-check-features webadmin-variant-tests docker-image check check-fast check-tags
 
 # 并行测试包的并发数(本地默认 4;CI 的 `go test -p 1` 见 .github/workflows/ci.yml,
 # 那里串行是为了 service 容器的 max_connections,不是性能考虑)。
@@ -165,6 +165,24 @@ webadmin:
 webadmin-check-features:
 	cd webadmin && npm run check:features
 
+# webadmin **变体测试矩阵**（P3 第三片）：非缺省变体各跑一遍完整单测。
+#
+# 现场（独立审计 P1）：`nav.test.ts` / `routes.test.ts` 是**按变体给期望**的（关掉的模块
+# 其侧栏条目 / 路由不得留在产物里），但它们只在有人**手动**设 `FEATURES` 时才会执行 ——
+# CI 的 `npm test` 与 `make check` 的缺省都是全开变体。实测（变异 M3：删掉 `nav.ts` 里
+# `FEATURE_NAV_ENTRIES.filter(…)` 那行）：`FEATURES=skills,apps npm test` 红，而同一次
+# 变异下产物判据与全开门禁全绿 ⇒ 关闭变体会发布一个指向不存在路由的侧栏条目（点进去 404），
+# 没有任何自动门禁拦得住。判据有效 ≠ 判据有人跑，所以矩阵本身要有**调度点**。
+#
+# 调度点 = `check`（本地发布门禁）与 CI 的 server job（同一条命令）。矩阵与实现都在
+# `webadmin/scripts/check-feature-variants.mjs`（**唯一真源**；写成仓内脚本而不是本文件里的
+# `for` 循环，是因为 `check-integration-tests` 的 CI 执行面闭包读不懂 `@for` 形态，而
+# `cd webadmin && npm run …` 与上面的 `webadmin-check-features` 是同一条被闭包认识的形态）。
+# 缺省变体不在这里重复（上层已跑过一次 `npm test`），只跑另外 4 个非缺省组合。
+# 分钟级（4 × 完整套件），所以 `check-fast` 不含它。
+webadmin-variant-tests:
+	cd webadmin && npm run check:variant-tests
+
 # 服务端 Docker 镜像(计划 Task 4.6):本地构建单平台,带版本注入(--version 输出 VERSION)
 # 用法:make docker-image 或 make docker-image IMAGE=ghcr.io/picoaide/picoaide-harness-server TAG=v0.4.0
 #      CHANNEL=<渠道 id>(缺省 official;渠道内容取 channels-context/<id>/)
@@ -202,10 +220,12 @@ check:
 	@if [ -n "$$(gofmt -l $(GO_DIRS))" ]; then echo "gofmt未通过:"; gofmt -l $(GO_DIRS); exit 1; fi
 	go vet $(GO_TAG_FLAG) $(GO_PACKAGES)
 	$(MAKE) test-server
-	# webadmin 三件：单测（按当前变体给期望）→ **变体产物判据**（真跑 5 次构建）→ 正式构建。
-	# 判据夹在中间：`npm run build` 产出的是 `make build-server` 要嵌入的那份 dist
-	# （用同一个 FEATURES），而 webadmin-check-features 用独立 outDir，不污染它。
+	# webadmin 四件：单测（按当前变体给期望）→ **非缺省变体测试矩阵** → **变体产物判据**
+	# （真跑 5 次构建）→ 正式构建。判据夹在中间：`npm run build` 产出的是 `make build-server`
+	# 要嵌入的那份 dist（用同一个 FEATURES），而这两个判据都用各自的独立 outDir，不污染它。
+	# 顺序上先跑分钟级的变体测试矩阵、再跑产物判据（前者红得更快、信息更直接）。
 	cd webadmin && FEATURES=$(FEATURES) npm test
+	$(MAKE) webadmin-variant-tests
 	$(MAKE) webadmin-check-features
 	cd webadmin && FEATURES=$(FEATURES) npm run build
 

@@ -20,34 +20,53 @@
  *   3. **反空转**：每次构建都要证明"这次构建真的产出了页面 chunk"（核心页 chunk 在、
  *      dist 非空、index.html 在），否则关闭侧的全部"不存在"断言可以被一个失败的构建满足。
  *
- * ## 量具（两个独立通道，互为交叉验证）
+ * ## 量具（三个独立通道，互为交叉验证）
  *
  *   · **内容**：每个模块一个哨兵串 `picoaide.feature.<module>.v1`（命名从渠道契约的
- *     `FEATURE_MODULES` 派生），写在该模块**真的会渲染**的那条路径上（页面根元素的
- *     `data-feature-sentinel`）。关掉的模块 ⇒ 产物里找不到这个串。
+ *     `FEATURE_MODULES` 派生），写在**该模块每一个页面文件**里（页面根元素的
+ *     `data-feature-sentinel`，见 `MODULE_EXPECTATIONS[*].pages`）。关掉的模块 ⇒ 产物里
+ *     找不到这个串。
  *   · **结构**：Vite 按模块文件名给动态 chunk 命名（`CapabilityCenter-<hash>.js` …）
  *     ⇒ 关掉的模块，它的页面 chunk 文件名一个都不该出现。
+ *   · **源码图**（前置，不依赖构建）：模块页只能经 `App.tsx` 里 `__FEATURE_*__` 守卫的
+ *     `import()` 进入（`scripts/feature-page-graph.mjs`）。**这一条是给前两条补盲区的**：
+ *     模块页被**静态**引用时（审计 M6 的形态：核心页里写一行
+ *     `import Apps from './app-center/Apps'`），它被内联进引用方的 chunk —— 既没有自己的
+ *     chunk 名（结构面看不见），当时也不是每个页面都带哨兵（内容面看不见）。静态引用是
+ *     "关闭模块的页面代码不进 dist"这条不变量最直接的破坏方式，必须在源码图上判。
  *
- * 两个通道都做双侧；只做一侧的那种（"文件名清单"或"哨兵串"单用）都在下面各自的
+ * 三个通道都做双侧；只做一侧的那种（"文件名清单"或"哨兵串"单用）都在下面各自的
  * 说明里写清了它单独用会漏什么。
+ *
+ * ## 判据**自己**的表也是判据面（退出码 2 的那一半）
+ *
+ * `MODULE_EXPECTATIONS` 是手写的期望表（刻意不 import 被测实现），它与 `App.tsx` 里被守卫的
+ * `import()` 说明符**双向对拍**、并要求表里每个页面文件都带本模块哨兵：任一方向缺项 ⇒ 退出码 2
+ * （"判据自己缩面了"），而不是悄悄少判一个文件。缺了这两条，新增一个模块页时形态表会被
+ * 强制更新、这张产物表却不会 —— 新页面的泄漏正好落进上面第三条通道的盲区。
  *
  * ## 用法与退出码
  *
  * ```bash
- * node scripts/check-feature-chunks.mjs              # 全部矩阵（5 次构建，约 1 分钟）
+ * node scripts/check-feature-chunks.mjs              # 全部矩阵（5 次构建，约 2 分钟）
  * node scripts/check-feature-chunks.mjs --keep       # 保留产物目录（排障用）
  * node scripts/check-feature-chunks.mjs --quiet      # 只打印结论行
  * ```
  *
- * 退出码：0 = 矩阵全部符合预期；1 = 有不符合项；2 = **判据自身**读不到输入 / 量具缺失
- * （源文件里没有哨兵串、页面源文件找不到、vite 不可执行）—— 2 与 1 分开，是为了让
- * "判据坏了"与"产品错了"在 CI 日志里可区分。
+ * 退出码：0 = 矩阵全部符合预期；1 = 有不符合项（含源码图上的泄漏 —— 那一类在构建之前就红）；
+ * 2 = **判据自身**读不到输入 / 量具缺失 / 页表与守卫不对拍（源文件里没有哨兵串、页面源文件
+ * 找不到、vite 不可执行）—— 2 与 1 分开，是为了让"判据坏了/表缩面了"与"产品错了"在 CI
+ * 日志里可区分。
  */
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { dirname, join, relative, resolve, sep } from 'node:path'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+// 源码图判据的唯一实现（同一份实现也跑在 `src/lib/features.test.ts` 里 —— 毫秒级那条链
+// 每次 `npm test` 都会走，产物判据这条链是分钟级）。**期望表仍然各持一份**：判据的期望
+// 独立于被测实现，但"怎么读 import 图"不需要两套口径。
+import { findCutProblems, findRegistryProblems, findSentinelProblems } from './feature-page-graph.mjs'
 
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const DIST_ROOT = join(PACKAGE_ROOT, 'node_modules', '.cache', 'picoaide-feature-dist')
@@ -68,30 +87,54 @@ const NONE_VARIANT = 'none'
 /**
  * 每个模块的量具与结构面。
  *
- * `sentinelFile`（哨兵串所在源文件）与 `pageChunks`（该模块会产出的动态 chunk 基名）
- * 是**判据的期望表**：改模块边界（页面改名/挪模块）必须同时改这里，否则前置检查会红
- * （见 `checkPreconditions`），不会静默少判一个模块的页面。
+ * `pages`（该模块的**全部**页面源文件）是**判据的期望表**：
+ *   · 每个文件都必须带本模块的哨兵串并渲染它（内容面的覆盖面 = 这张表）；
+ *   · 每个文件都必须恰好被 `App.tsx` 里本模块守卫的那条 `import()` 引入（与守卫双向对拍）；
+ *   · 每个文件对应一个动态 chunk 基名（Vite 按模块文件名命名）—— 结构面就是它。
+ * 改模块边界（新增页面 / 页面改名 / 挪模块）必须同时改这里，否则前置检查会红（见
+ * `checkPreconditions`），不会静默少判一个页面。
+ *
+ * 页面清单**刻意手写**（不从 `App.tsx` 派生）：判据的期望不能与"被测实现里恰好写了什么"
+ * 自洽 —— 派生的那一刻，"有人把守卫删了"就同时把期望也删了。双向对拍（守卫 ⟺ 本表）
+ * 才是那份保险。
  */
 const MODULE_EXPECTATIONS = [
   {
     module: 'skills',
     sentinel: 'picoaide.feature.skills.v1',
-    sentinelFile: 'src/pages/CapabilityCenter.tsx',
-    pageChunks: ['CapabilityCenter'],
+    pages: ['src/pages/CapabilityCenter.tsx'],
   },
   {
     module: 'apps',
     sentinel: 'picoaide.feature.apps.v1',
-    sentinelFile: 'src/pages/app-center/AppCenterLayout.tsx',
-    pageChunks: ['AppCenterLayout', 'Apps', 'OpensBoard', 'Limits'],
+    pages: [
+      'src/pages/app-center/AppCenterLayout.tsx',
+      'src/pages/app-center/Apps.tsx',
+      'src/pages/app-center/OpensBoard.tsx',
+      'src/pages/app-center/Limits.tsx',
+    ],
   },
   {
     module: 'connectors',
     sentinel: 'picoaide.feature.connectors.v1',
-    sentinelFile: 'src/pages/Connectors.tsx',
-    pageChunks: ['Connectors'],
+    pages: ['src/pages/Connectors.tsx'],
   },
 ]
+
+/** 页表 → 模块 → 页面源文件（`feature-page-graph.mjs` 的入参形态）。 */
+const MODULE_PAGES = Object.fromEntries(MODULE_EXPECTATIONS.map((e) => [e.module, e.pages]))
+
+/** 页表 → 模块 → 哨兵串（同一份期望表喂给内容面与源码图面）。 */
+const MODULE_SENTINELS = Object.fromEntries(MODULE_EXPECTATIONS.map((e) => [e.module, e.sentinel]))
+
+/**
+ * 一个模块页对应的动态 chunk 基名（Vite 按模块文件名给 chunk 命名：`Apps.tsx` → `Apps-<hash>.js`）。
+ * @param page - 页面源文件（包根相对 POSIX 路径）。
+ * @returns chunk 基名。
+ */
+function chunkBasenameOf(page) {
+  return basename(page).replace(/\.[cm]?[jt]sx?$/u, '')
+}
 
 /**
  * **反空转**用的核心页 chunk 基名（与三个模块无关、任何变体下都必须在）。
@@ -138,10 +181,10 @@ function relPosix(from, to) {
 }
 
 /**
- * **前置检查**：判据自己的量具必须齐备。任一项不满足 ⇒ 退出码 2。
+ * **前置检查**：判据自己的量具必须齐备、期望表必须与守卫对拍。任一项不满足 ⇒ 退出码 2。
  *
  * 为什么单独一步（而不是混进断言里）：量具缺失时后面所有断言都会"通过"——哨兵串源文件
- * 不见了 ⇒ 关掉的变体里当然找不到它。这是"判据坏了"与"产品错了"必须分开的那一处。
+ * 不见了 ⇒ 关掉的变体里当然找不到它。这是"判据坏了/表缩面了"与"产品错了"必须分开的那一处。
  * @returns 问题清单（空 = 齐备）。
  */
 function checkPreconditions() {
@@ -155,28 +198,32 @@ function checkPreconditions() {
   if (pageSources.length === 0) problems.push('src/pages 下一个页面源文件都没有（工作目录不对？）')
 
   for (const expectation of MODULE_EXPECTATIONS) {
-    const file = join(PACKAGE_ROOT, expectation.sentinelFile)
-    if (!existsSync(file)) {
-      problems.push(`模块 ${expectation.module} 的哨兵串源文件不存在：${expectation.sentinelFile}`)
+    if (expectation.pages.length === 0) {
+      problems.push(`模块 ${expectation.module} 的期望页表是空的（判据自己的表塌了）`)
       continue
     }
-    const text = readFileSync(file, 'utf8')
-    if (!text.includes(expectation.sentinel)) {
-      problems.push(
-        `模块 ${expectation.module} 的源文件 ${expectation.sentinelFile} 里没有哨兵串 `
-          + `${JSON.stringify(expectation.sentinel)}：量具缺失 ⇒ "关闭变体里找不到它"变成恒真。`,
-      )
-    }
-    for (const basename of expectation.pageChunks) {
-      const hit = pageSources.filter((p) => p.slice(p.lastIndexOf(sep) + 1) === `${basename}.tsx`)
-      if (hit.length === 0) {
+    for (const page of expectation.pages) {
+      const file = join(PACKAGE_ROOT, page)
+      if (!existsSync(file)) {
         problems.push(
-          `模块 ${expectation.module} 期望的页面 chunk 基名 ${basename} 在 src/pages 下找不到对应 `
-            + `${basename}.tsx（页面改名/挪走后本判据的期望表必须同步，否则少判一个页面）`,
+          `模块 ${expectation.module} 期望的页面源文件不存在：${page}（页面改名/挪走后本判据的期望表必须同步，`
+            + '否则少判一个页面）',
         )
+        continue
+      }
+      if (!pageSources.includes(file)) {
+        problems.push(`模块 ${expectation.module} 的 ${page} 不是 src/pages 下的页面源文件（期望表指向了别处？）`)
       }
     }
   }
+  // 量具齐备：页表里每个文件都带本模块哨兵且渲染它（内容面的覆盖面 = 页表）。
+  problems.push(...findSentinelProblems({
+    packageRoot: PACKAGE_ROOT,
+    modulePages: MODULE_PAGES,
+    moduleSentinels: MODULE_SENTINELS,
+  }))
+  // 双向对拍：`App.tsx` 里被守卫的 import() ⟺ 本判据的页表（缺任一方向都说明判据要缩面了）。
+  problems.push(...findRegistryProblems({ packageRoot: PACKAGE_ROOT, modulePages: MODULE_PAGES }))
   return problems
 }
 
@@ -265,10 +312,11 @@ function judge(matrixEntry, enabled, dist) {
       problems.push(`${expectation.module} 已关闭，但产物里仍带着它的哨兵串 ${expectation.sentinel}（页面代码进了 dist）`)
     }
     // ---- 结构面 --------------------------------------------------------------
-    for (const basename of expectation.pageChunks) {
-      const present = dist.chunkBasenames.has(basename)
-      if (on && !present) problems.push(`${expectation.module} 已开启，但缺少它的页面 chunk ${basename}-*.js`)
-      if (!on && present) problems.push(`${expectation.module} 已关闭，但仍产出了它的页面 chunk ${basename}-*.js`)
+    for (const page of expectation.pages) {
+      const chunk = chunkBasenameOf(page)
+      const present = dist.chunkBasenames.has(chunk)
+      if (on && !present) problems.push(`${expectation.module} 已开启，但缺少它的页面 chunk ${chunk}-*.js（对应 ${page}）`)
+      if (!on && present) problems.push(`${expectation.module} 已关闭，但仍产出了它的页面 chunk ${chunk}-*.js（对应 ${page}）`)
     }
   }
   return problems
@@ -288,6 +336,20 @@ function main() {
     process.stderr.write('check-feature-chunks: 判据自身的前置检查未通过（退出码 2）\n')
     for (const problem of preconditions) process.stderr.write(`  · ${problem}\n`)
     return 2
+  }
+
+  // 源码图上的泄漏（退出码 1，**先于构建**判）：静态引用一个模块页时，它会被内联进引用方的
+  // chunk —— 结构面没有 chunk 名可判、内容面只在被拉进来的那个文件自己带哨兵时才看得见。
+  // 这条不依赖打包器行为，先判能让失败信息直接指向那行 import，也省掉 5 次构建。
+  const cutProblems = findCutProblems({ packageRoot: PACKAGE_ROOT, modulePages: MODULE_PAGES })
+  if (cutProblems.length > 0) {
+    process.stderr.write(`check-feature-chunks: 源码图上就有 ${cutProblems.length} 处模块页被守卫之外的路径引用（退出码 1）\n`)
+    for (const problem of cutProblems) process.stderr.write(`  · ${problem}\n`)
+    process.stderr.write(
+      '  口径：模块页只能经 src/App.tsx 里 __FEATURE_<MODULE>__ 守卫的 import() 进入产物；'
+        + '静态引用（或未被守卫的 import()）会让关闭变体的产物里仍带着该页代码。\n',
+    )
+    return 1
   }
 
   const matrix = buildMatrix()
@@ -321,14 +383,15 @@ function main() {
     process.stderr.write(`check-feature-chunks: ${failures.length} 项不符合预期\n`)
     for (const failure of failures) process.stderr.write(`  · ${failure}\n`)
     process.stderr.write(
-      '  口径：关闭的模块其页面代码不得进 dist（内容=哨兵串、结构=页面 chunk 名）；'
-        + '开启的模块两侧都必须存在。改模块边界请同步 MODULE_EXPECTATIONS。\n',
+      '  口径：关闭的模块其页面代码不得进 dist（内容=哨兵串、结构=页面 chunk 名、'
+        + '源码图=模块页只能经守卫 import() 进入）；'
+        + '开启的模块两侧都必须存在。改模块边界请同步 MODULE_EXPECTATIONS（页表与守卫双向对拍）。\n',
     )
     return 1
   }
   process.stdout.write(
     `check-feature-chunks: ✅ ${matrix.length} 个变体全部符合预期`
-      + `（全开侧存在 / 关闭侧不存在，逐模块双侧；模块：${FEATURE_MODULES.join(', ')}）\n`,
+      + `（源码图无旁路入口 / 全开侧存在 / 关闭侧不存在，逐模块双侧；模块：${FEATURE_MODULES.join(', ')}）\n`,
   )
   return 0
 }
