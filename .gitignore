@@ -62,7 +62,7 @@ image.tar
 packages/host/desktop/e2e-results/
 packages/host/enterprise/lib/
 packages/client/account-card/lib/
-packages/client/capability-center/lib/
+packages/host/capability-center/lib/
 packages/client/branding/lib/
 packages/client/wasm-apps/lib/
 packages/client/panel-surface/lib/
@@ -71,6 +71,7 @@ packages/host/cron/lib/
 packages/host/connectors/lib/
 packages/host/browser/lib/
 packages/host/wasm-apps-host/lib/
+packages/host/gateway-client/lib/
 # dsh-memory-evolve 是 **vendored in-tree 源码**(packages/vendor/memory-evolve,全仓
 # 唯一的 submodule 是 deepseek-harness),上游独立仓库 github:csyangwen/dsh-memory-evolve
 # 只用来做升级时的三方合并 base。它的 lib/ **入库**(64 个文件),所以这里没有忽略规则 ——
