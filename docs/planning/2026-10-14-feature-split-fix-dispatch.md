@@ -181,6 +181,45 @@ git -C deepseek-harness remote set-url origin https://github.com/deepseek-ai/dee
 `go test ./cmd/server` —— p1b 自家那一轮已给过 88 vs 209 命名空间、关闭态二进制可启动等证据，且
 `.github/workflows/ci.yml:1007` 这一步现在就在 CI 里跑。
 
+## 2.2 合入与复验记录（2026-10-14 06:5x–07:3x）
+
+**已合入 `feat/p0-integration` 的三路**（各自 `git log <branch> --not HEAD` 均为 0 条）：
+
+| 路 | 合入方式 | 复验结果 |
+|---|---|---|
+| D-01 `p1b-conditionalize` | `--no-ff` 合并（零冲突） | 见 §2.1（4 套件绿 + 变异反证） |
+| D-06 `fix-mount-flake` | `--no-ff` 合并（零冲突） | 见 §2.1（enterprise 1145 passed，0 failed） |
+| D-04/D-05 `p3-webadmin-variant` | 两次 `--no-ff`（**两个登记表冲突，见下**） | `make -C server webadmin-check-features` ⇒ **exit 0（5/5 变体）**；`make -C server webadmin-variant-tests` ⇒ **exit 0（4 个非缺省变体，791/791）** |
+
+### 合并冲突与解法（登记表类冲突的正确解法）
+
+`scripts/check-root-guards.mjs`（摘要表）与 `scripts/check-workflows.mjs`（判据步骤策略/词表/登记表）**两路都在同一个位置追加条目** ⇒ 冲突。解法=**并集**，且摘要必须**重算**：
+
+1. `check-workflows.mjs`：两侧的策略对象/词表条目/`REQUIRED_CI_STEPS` 登记项**全部保留**（`ci-check-go-build-tags` + `ci-webadmin-variant-tests` + `ci-webadmin-check-features`），并随并集把下界常量 `SELFTEST_PINNED_STEP_COVERAGE_ASSERTIONS` 从 `1 + 14` 复算成 `1 + 15`。
+2. `check-root-guards.mjs`：**不许取任何一侧的旧摘要**（合并后的脚本是并集，两边摘要都不对）。用 `node scripts/check-guard-parser-integrity.mjs --print-digests` 在**合并后的工作树**上重算 —— `check:workflows` 实测落到 `a2362e82…ff01`（既不是 p1b 的 `c2db38d1…`，也不是 p3 的 `ee0d0dfa…`），`check:ci-scripts` 与 p3 侧一致（p1b 没动那个脚本）。
+3. 复验：`check-guard-parser-integrity` / `check-workflows` / `verify-ci-scripts` 三个自证守卫**各自 exit 0**，根守卫 17/17。
+
+### 合并后**新发现并已修**的集成缺陷（本轮最大收获）
+
+`server/webadmin/src/lib/capability-endpoints.spec.ts` 把 `server/internal/router/router.go` 当作"生产路由表"的唯一来源；而 p1b 把 skills/apps/connectors 的 **87 条** `AdminRoute` 声明搬进了按 build tag 分片的 `optional_{skills,apps,connectors}_on.go`。结果：`router.go` 里只剩 64 条基础面 ⇒ 该 spec **5 条锚点红**（"生产路由表缺少锚点 PUT /api/server/admin/shared-skills/:name/enabled" 等）。
+
+- **影响面**：**默认 features 也红** ⇒ CI 的 server job `npm test` 必红（不是变体问题）；`make webadmin-variant-tests` 只是最先撞上它的那一步 ⇒ 这条是"四路各自绿、合起来红"的典型。
+- **修法**：声明集改为 `router.go` + 三个 `_on.go`（推导链仍只从 `router.go` 取，避免误命中），并加**分片棘轮** —— `readdirSync` 发现自己没登记的 `optional_*_on.go` 即抛错（防"新模块的路由"再次静默掉出对拍面）。
+- **反证**：把 `optional_skills_on.go` 里那条 `PUT /shared-skills/:name/enabled` 的**路径串**改成 `…-PROBE` ⇒ 该锚点当场红（exit 1）；恢复后 12/12 绿、`webadmin-variant-tests` 4/4 变体 791 用例绿。
+  （注：先试过"把整行注释掉"，**变异无效** —— 该解析器是**纯文本正则**，注释里的 `AdminRoute(...)` 照样被匹配；变异必须动**可被解析的文本**。）
+
+### D-07 `p2-client-variant-pack` 审计定案（需修后合入，修复轮进行中）
+
+独立审计（只读，报告 `temp/p2-client-variant-pack/audit-tmp/R2-AUDIT.md`）三条怀疑**全部成立**，且都有真跑证据：
+
+| # | 判定 | 证据（真跑） | 严重度 |
+|---|---|---|---|
+| S1 | `connectors` 关不掉：`packages/host/browser/package.json` 的生产依赖把整包带进 asar | 真跑 electron-builder `--dir` ⇒ **exit 1**「connectors 仍随包」；收集器证据 `dsh-browser → dsh-connectors` | **P0**（对该提交声称的能力；表现是 fail-loud，无坏包） |
+| S2 | prebuild 的变体跳过读**上一轮**清单，且 `DSH_PREBUILD=force` 覆盖不了（`prebuild-workspace-deps.ts:599-602` 的 `continue` 排在 `!force` 之前） | 带 `force` 真跑整轮，`capability-center` 从未出现 `building (forced)` | P1 |
+| S3 | 缺席判据的权威是**临时清单**（`verify-packaged-runtime.ts:2166/2265`），清单缺失 ⇒ 关闭臂整体消失 ⇒ **静默假绿** | 真实 asar（整包都在）+ 声明 false + 清单缺失 ⇒ 判据**全过** exit 0 | P1（假绿方向，最危险） |
+
+另有三条 P2（物理布局死分支 / `currentChannelVariant()` 死导出 / `packages: []` 的摘抄面同义反复断言）与提交信息用例数漂移。**最小必修集**见报告 §"最小必修集"（4 条，含文件:行号）。
+
 ## 3. 已确认**不需要动**的项（避免下一会话重复劳动）
 
 - p1b 的 `COMBOS` 矩阵已从 `packages/host/desktop/scripts/channel-constants.ts` **派生**（8 组合，`server/scripts/check-go-build-tags.mjs:153-174`），旧审计的"矩阵只有 5/8"已失效。
