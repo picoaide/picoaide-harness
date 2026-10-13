@@ -83,7 +83,7 @@
 | 1 | `/readyz` 是应用中心资产 | `server/cmd/server/main.go:745-747`（`d.Ready == nil` 直接 panic）；唯一生产来源 `main.go:259` 的 `wasmPlat.Checker.Handler()`；**`readyz` 整包位于 `server/internal/wasmapp/readyz/`，基础侧（`cmd/server/main.go`、`internal/router`、`internal/serverauth`、`internal/serverstore`）零 import，只有 `cmd/server/wasmapp*.go` 引用它** | 基础侧提供替身探针（`readyz` 需随模块或搬到中性包）；`apps` 关闭时不得因此拒启 |
 | 2 | 权限点 ↔ 路由双向判据 | `server/cmd/server/audit_r13ge_permset_test.go:72`（`reservedPermissions` 当前空表）；`server/webadmin/src/lib/nav.test.ts:665-678` 四向对拍读 `server/internal/serverauth/rbac.go` | **保留权限点 + 登记**（权限模型不随变体变） |
 | 3 | 渠道字段 `app_origin_scheme` 属应用中心 | `scripts/ci-channels.sh:770-772`（必需字段）；服务端 `main.go:463`（fail-loud） | 随 `apps` 变体放宽：关闭时不再强制 |
-| 4 | Dockerfile 跨模块取文件 | `server/Dockerfile:88` 把 `skills/app-builder/scripts/pack-assets.mjs` 拷给演示应用构建（:81 注释自陈"是同一个文件"）；`scripts/ci-build-channel-images.sh:228-229` 断言该技能文件存在 | 把该脚本搬到中性位置（演示应用工具链），技能侧引用同一份；四方对拍判据同步 |
+| 4 | Dockerfile 跨模块取文件 | `server/Dockerfile:88` 把 `skills/app-builder/scripts/pack-assets.mjs` 拷给演示应用构建（:81 注释自陈"是同一个文件"）；`scripts/ci-build-channel-images.sh:228-229` 断言该技能文件存在 | 该脚本搬到中性位置（演示应用工具链，如 `server/demoapps/scripts/`），技能侧改成引用同一份；四方对拍判据（磁盘 ↔ Dockerfile COPY ↔ `builtinSkillRegistry` ↔ `seededSkillDigests`）同步改。**已查清**：`/opt/picoaide/skills` 的唯一消费方是 `skillseed`（`server/cmd/server/main.go:243` → `:257` → `internal/router/router.go:82` → 平台内置技能面），整条链在 `internal/wasmapp/` 树下 ⇒ 该目录属 `skills` 模块，`skills` 关闭时不应随包 |
 | 5 | 演示应用/内置技能播种 | `server/cmd/server/main.go:230`（演示应用）、`:243-251`（内置技能目录） | 分别随 `apps` / `skills` 变体 |
 | 6 | 应用归因写 `usage.app_id` | `server/internal/llmgateway/app_attribution.go:29` → `serverstore/wasm_app_opens.go:386-411`（同事务校验 `kind='wasm_app'` 存在） | 关闭 `apps` 后归因恒空是**预期**，需在文档与判据里写死（不是缺陷） |
 | 7 | 审计链双版本 | `server/internal/serverstore/audit.go:377-388`、`:684-687`；写入方含 `appstore/admin.go:114/141`（三种 kind 共用） | 链校验两版本都过 ⇒ 不报错；但**链内容不可跨变体比对**，写进口径 |
@@ -129,7 +129,7 @@
 6. 连接器凭据**不自动删**（明文凭据属用户数据），只做文档与可选清理入口。
 
 **待拍板**：
-- 内置技能目录（`/opt/picoaide/skills`，Dockerfile 逐条 COPY）在 `skills` 关闭时是否随包？（决定 §5-4 的搬法是"搬脚本"还是"整目录条件化"）
+- ~~内置技能目录在 `skills` 关闭时是否随包？~~ → **已由证据收敛（仍可推翻）**：`/opt/picoaide/skills`（Dockerfile 逐条 COPY）的唯一消费方是 `skillseed`（`server/cmd/server/main.go:243/257` → `internal/router/router.go:82` → 平台内置技能面 `GET /api/server/admin/skills/builtin` 与客户端 `/api/client/v2/skills/builtin`），而 `skillseed` 整包在 `internal/wasmapp/` 树下 ⇒ 它是 `skills` 模块的内容，关闭时不应随包；演示应用构建所需的那一份 `pack-assets.mjs` 因此必须搬出技能目录（见 §5-4）。
 - webadmin 是否真裁（要真裁必须加 Dockerfile build-arg + vite `define`）；
 - P0 的拆包是否作为独立 PR 先合（推荐：是，纯重构、无行为变化，便于回溯）。
 
