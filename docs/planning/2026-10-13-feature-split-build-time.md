@@ -103,7 +103,38 @@
 | 7 | 审计链双版本 | `server/internal/serverstore/audit.go:377-388`、`:684-687`；写入方含 `appstore/admin.go:114/141`（三种 kind 共用） | 链校验两版本都过 ⇒ 不报错；但**链内容不可跨变体比对**，写进口径 |
 | 8 | `appstore` 是共享底座 | `internal/wasmapp/api/admin.go:16` import `internal/appstore`（反向不成立） | 两个变体都必须保留 `appstore`，只裁路由与上层 |
 
-## 6. 分期与工作流划分
+## 5bis. P0-b 的实测口径（拆 host 面；2026-10-13 独立核证）
+
+### 关键更正：客户端的真开关是**依赖清单**，不是 profile 层
+
+实测（基线 asar，135,392,765 B）：asar 里 `@picoaide/*` 的集合 **恰好等于** `packages/host/desktop/package.json` 的 `dependencies` 集合（10 个）；**不在依赖里**的 `@picoaide/dsh-panel-surface` 在 asar 里 0 条。⇒ 把某模块从 profile 的 bundle 层摘掉只是"不加载"，**文件照样进 app.asar**；要真的不进产物，必须把该包从 `dsh-plugin-desktop.dependencies` 里摘掉（并按变体重算打包清单）。
+
+### 残留量化（关闭 `skills` 时，按 P0 第一版形态交付）
+
+| 残留 | 字节 |
+|---|---|
+| `@picoaide/dsh-enterprise/lib/skill-install-<hash>.js`（安装器/预检/归档/根表/frontmatter） | 220,271 |
+| `@picoaide/dsh-enterprise/lib/skill-telemetry.js` | 9,608 |
+| `@picoaide/dsh-enterprise/lib/auth-gate.js` 里的四条技能路由（sourcemap 归因，下界） | 28,395（整文件 263,254） |
+| **最小残留合计** | **≈493 KB（1+2+3 的文件体量）** |
+| 若忘了摘依赖：`@picoaide/dsh-capability-center/lib/client.js` 等 | ≈171.5 KB |
+
+对照（同一 asar）：connectors 493,150 B、wasm-apps 客户端 410,375 B、wasm-apps-host 259,518 B、browser 800,272 B。
+
+### 要搬的东西与两个必须先解决的耦合
+
+- `skills`：`skill-install.ts`（4,023 行）、`manifest-precheck.ts`（634）、`agent-preset-install.ts`（509）、`skill-runtime-roots.ts`（365）、`archive-util.ts`（313）、`skill-telemetry.ts`（223）、`skill-frontmatter.ts`（196）、`skill-name-rules.ts`（85）、`builtin-skills.ts`（67）＝ **6,415 行**；外加 `auth-gate.ts` 的四条本机路由块 `:2030-3117`（**1,088 行 = 该文件 34.6%**）与 9 个只被技能路径调用的 helper。
+- `apps`：`wasm-apps.ts`（2,031）、`wasm-app-tools.ts`（758）、`wasm-apps-ai-rows-consent.ts`（579）＝ **3,368 行**。
+- **耦合 1（入口切分）**：`auth-gate.ts` 是 tsdown 的**单一入口**（`packages/host/enterprise/tsdown.config.ts:10-38`），技能路由与登录门编进同一个 `lib/auth-gate.js` ⇒ 搬走不是"挪文件"，必须做入口切分并重排共享 chunk。
+- **耦合 2（apps → skills 反向依赖）**：`wasm-app-tools.ts:39` → `builtin-skills.ts:18` → `skill-install.ts` 的 `resolveSkillsDir`。搬 `skills` 时 apps 要么声明"apps → skills 包"的依赖，要么把那 3 行路径解析复制成第二真源（本仓明确反对第二真源）⇒ **必须先定这一条**。
+- **base 必需 = 零条**：bootstrap / session-service / gateway-model / gateway-llm / error-reporting / channel-sync / deep-link / channel-content / session-identity / loopback / invariant / server-connector 全部**没有任何技能或 apps 的 import**（`skill|Skill` 只出现在注释与 `BootstrapConfig.skills` 类型字段）⇒ 该搬的都能搬。
+
+### 两条"静默"缺口（变体化前必须补判据）
+
+1. `picoaide-skill-telemetry` **不在** `REQUIRED_DESKTOP_ROWS`（`packages/host/desktop/src/startup-rows.ts:70-96` 共 19 条）⇒ 它被静默禁用时**没有任何判据会红**；变体化会让这件事变成常态，必须先把它纳入登记或明确豁免理由。
+2. 跨包测试 import 存在**两种口径**：`packages/host/enterprise/tests/**` 用相对路径读 `packages/client/capability-center/src/**` 却**未声明依赖**；而 `packages/client/account-card` 的同类跨包用例**加了 devDependency**。拆包后必须统一（否则"声明即构建"的不变量在测试面出现分叉）。
+
+
 
 | 期 | 内容 | 收敛判据 |
 |---|---|---|
