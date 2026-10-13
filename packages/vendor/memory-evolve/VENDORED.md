@@ -196,10 +196,23 @@ node <repo>/scripts/verify-inventories.mjs && node <repo>/scripts/verify-layout.
   按需安装。本包不再参与它的分发。
 - `lib/coi/skills-sync.js` 的 `PLATFORM_SKILLS` 保留为 `['app-builder']`（**不是**清空）：
   它是"这个技能名永远不许经开机同步落进用户技能库"的守卫，`BUILTIN_SKILLS` 里也不含它。
-- 合并后自查：`node --test tests/builtin-skills-decoupled.test.js`（其中两条用例已按新事实
-  重写为"平台技能**不在**包内 + 服务端 `server/skills/app-builder` 文件齐备且
-  `name == 目录名`"）；`tests/coi.test.js` 的 skills-sync 用例同样钉住"包内 `skills/`
-  与本插件清单一一对应"。
+- 合并后自查：`node --test tests/builtin-skills-decoupled.test.js`；`tests/coi.test.js` 的
+  skills-sync 用例同样钉住"包内 `skills/` 与本插件清单一一对应"。
+- **2026-10-13（本仓提交 `e07bf2fa2d`，W4 打包器解耦）该用例**再次**本地改写 ——
+  上面那句"两条用例已按新事实重写"描述的是 2026-09-19 那一版，**已不完整**：
+  - 事实变化：打包器 `scripts/pack-assets.mjs` 的唯一实现搬到中性位置
+    `server/demoapps/scripts/pack-assets.mjs`（演示应用打包阶段与随技能分发**必须是同一份
+    实现**，两份会漂），`server/Dockerfile` 的**最终阶段**从那同一个源 `COPY` 进
+    `<PICOAI_SKILL_SEED_DIR>/app-builder/scripts/pack-assets.mjs`；注入关系登记在服务端
+    `server/internal/wasmapp/skillseed/builtin_skills_test.go` 的 `skillFileInjections`。
+    技能源树里**不再有**该文件的副本。
+  - 用例改名并扩成「镜像下发树 = 磁盘树 + 构建期注入文件」，新增**三类**断言：
+    ① 磁盘树文件齐备；② 每个注入文件的中性源存在、且技能目录里**没有**副本；
+    ③ `server/Dockerfile` 真的从那**一个源** `COPY` 到技能目录里的那个相对路径。
+  - ⚠️ 合并上游时若按旧文案只核"那两条用例（不在包内 + 文件齐备）"，会把这三类断言
+    **静默丢回上游版本** —— 它们正是"注入 COPY 被删掉而没人发现"的见证。复核口径以本目录
+    **当前**文件的用例名为准：
+    `平台技能的新源目录在服务端仓库里：镜像下发的那棵树 = 磁盘树 + 构建期注入的文件，两者齐备`。
 
 ### H. 死代码清理（2026-09-23；**升级合并后必须逐项复核，否则会被 `cp -a` 静默带回来**）
 

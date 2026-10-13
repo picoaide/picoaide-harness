@@ -24,9 +24,12 @@ import (
 	"github.com/picoaide/picoaide/internal/skillmanifest"
 )
 
-// repoSkillDir 是本仓真实的内置技能目录（打包资产的源头）。
-// 测试直接打真资产：换成构造样本的话，「内置资产能不能过服务端校验」这条
-// 最该被钉住的断言就变成自说自话。
+// repoSkillDir 是本仓真实的内置技能**源树**目录（`server/skills/` 那一棵）。
+// 它只用于"打包器本身"的单元用例（PackDir 的确定性、路径闸）。
+//
+// ⚠️ 凡是要问「下发给员工的这份资产如何如何」（能不能过闸门 / 运行期装载 / 接口契约 /
+// 摘要）的用例，对象都必须是 `imageSkillDir` 装配出来的**镜像里那一棵树**：源树比下发树
+// 少一个构建期注入的文件（`skillFileInjections`），打源树等于答错了题。
 //
 // 目录名从 repoSkillsRoot（builtin_skills_test.go）拼出来：**技能集合**本身由那张登记表
 // 与三方对账判据守着（R13-F-05），这里只钉 app-builder 这一条真资产的细节。
@@ -96,10 +99,28 @@ func TestPackDirIsDeterministic(t *testing.T) {
 
 // 内置资产必须能通过**服务端既有的** manifest 校验（与管理员上传同一个
 // skillmanifest.Parse）。这条直接打真资产：frontmatter 少一个必填字段就红。
+//
+// ⚠️ 对象是**镜像里那一棵树**（`imageSkillDir` = 磁盘技能源树 + `server/Dockerfile`
+// 最终阶段注入的文件），不是磁盘源树：解耦后下发的那棵树比源树多一个文件（注入的打包器），
+// 打源树就等于答错了题 —— 注入文件过不了闸门（尺寸/条目/路径/manifest 规则）时这条仍然绿，
+// 而运行期 `skillseed` 会把整条技能记成坏资产跳过（清单为空、员工装不到，只在启动日志与
+// 管理端诊断里可见）。"判据描述的对象 ≠ 运行期读的对象"正是本仓反复登记的假绿形态。
 func TestRealAssetPassesServerManifestValidation(t *testing.T) {
-	archive, _, err := PackDir(repoSkillDir)
+	// 前置：注入登记不得为空，否则本用例会静默退化成"只打磁盘源树"（覆盖面凭空少一半）。
+	injectionsByKey, _ := registeredSkillInjections(t)
+	injected := make([]skillFileInjection, 0, len(injectionsByKey))
+	for _, inj := range sortedInjections(injectionsByKey) {
+		if inj.Skill == "app-builder" {
+			injected = append(injected, inj)
+		}
+	}
+	if len(injected) == 0 {
+		t.Fatal("app-builder 没有任何注入文件登记 —— 前置不成立：本用例必须覆盖镜像树里的每一个文件")
+	}
+	skillDir := imageSkillDir(t, "app-builder")
+	archive, _, err := PackDir(skillDir)
 	if err != nil {
-		t.Fatalf("PackDir: %v", err)
+		t.Fatalf("PackDir(%s): %v", skillDir, err)
 	}
 	lim := archiveutil.DefaultLimits(SkillFile)
 	if _, err := archiveutil.Validate(archive, lim); err != nil {
@@ -122,7 +143,8 @@ func TestRealAssetPassesServerManifestValidation(t *testing.T) {
 	if len(m.Description) < skillmanifest.MinDescriptionRunes {
 		t.Fatalf("description 过短")
 	}
-	// 非 .md 文件必须真的进包（examples/ 是「照着 skill 做」的模板）。
+	// 非 .md 文件必须真的进包（examples/ 是「照着 skill 做」的模板 +
+	// scripts/ 下的注入文件 —— 技能文档按这个相对路径引用它）。
 	for _, want := range []string{
 		"SKILL.md",
 		"references/abi.md",
@@ -147,8 +169,27 @@ func TestRealAssetPassesServerManifestValidation(t *testing.T) {
 			t.Fatalf("归档缺少条目 %q（entries=%v）", want, entries)
 		}
 	}
-	// SKILL.md 必须逐字是磁盘上那份（打包不得改写内容）。
-	raw, err := os.ReadFile(filepath.Join(repoSkillDir, SkillFile))
+	// 注入文件必须真的进包，且逐字节等于中性源那一份（镜像里的技能文件 == 中性源字节，
+	// 这是"两个落点同源 ⇒ 规则不会漂"的前提；少一条 ⇒ 员工装到的技能缺这个文件）。
+	for _, inj := range injected {
+		want, rerr := os.ReadFile(filepath.Join(repoServerRoot, filepath.FromSlash(inj.Source)))
+		if rerr != nil {
+			t.Fatalf("读中性源 %s: %v", inj.Source, rerr)
+		}
+		got, _, found, binary, _, xerr := archiveutil.ExtractFileContent(archive, inj.Dest, manifestPreviewBytes)
+		if xerr != nil {
+			t.Fatalf("ExtractFileContent(%s): %v", inj.Dest, xerr)
+		}
+		if !found || binary {
+			t.Fatalf("注入文件 %s 没进包（found=%v binary=%v，entries=%v）—— "+
+				"镜像里的技能目录缺这个文件，而技能文档仍按该相对路径引用它", inj.Dest, found, binary, entries)
+		}
+		if got != string(want) {
+			t.Fatalf("包内 %s 与中性源 %s 不一致（注入必须逐字节同源）", inj.Dest, inj.Source)
+		}
+	}
+	// SKILL.md 必须逐字是装配出来的那棵树上那份（打包不得改写内容）。
+	raw, err := os.ReadFile(filepath.Join(skillDir, SkillFile))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,7 +339,7 @@ func TestArchiveutilStillRejectsTraversalArchive(t *testing.T) {
 
 func TestCatalogLoadsRealAssetAndServesContract(t *testing.T) {
 	dir := t.TempDir()
-	copyTree(t, repoSkillDir, filepath.Join(dir, "app-builder"))
+	copyTree(t, imageSkillDir(t, "app-builder"), filepath.Join(dir, "app-builder"))
 	c := New(dir)
 	h := NewHandlers(c)
 	r := testRouter(h)
@@ -378,7 +419,7 @@ func TestCatalogLoadsRealAssetAndServesContract(t *testing.T) {
 func TestCatalogDropsBrokenAssetAndRecordsProblem(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "app-builder")
-	copyTree(t, repoSkillDir, target)
+	copyTree(t, imageSkillDir(t, "app-builder"), target)
 	raw, err := os.ReadFile(filepath.Join(target, SkillFile))
 	if err != nil {
 		t.Fatal(err)
@@ -418,7 +459,7 @@ func TestCatalogMissingDirIsEmptyNotError(t *testing.T) {
 func TestCatalogSkipsNonAppIDDirectory(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "Bad_Name")
-	copyTree(t, repoSkillDir, target)
+	copyTree(t, imageSkillDir(t, "app-builder"), target)
 	c := New(root)
 	if err := c.Load(); err != nil {
 		t.Fatal(err)
@@ -442,7 +483,9 @@ func TestExportArchiveForE2E(t *testing.T) {
 	if out == "" {
 		t.Skip("SKILLSEED_E2E_OUT 未设置（这是给跨语言 E2E 脚本用的取证出口）")
 	}
-	archive, files, err := PackDir(repoSkillDir)
+	// 出口里的字节必须是**服务端真正会下发的那一串** ⇒ 打镜像里那一棵树
+	// （磁盘源树 + Dockerfile 最终阶段注入的文件），不是源树。
+	archive, files, err := PackDir(imageSkillDir(t, "app-builder"))
 	if err != nil {
 		t.Fatalf("PackDir: %v", err)
 	}
@@ -469,7 +512,7 @@ func adminTestRouter(h *Handlers) *gin.Engine {
 
 func TestAdminListBuiltinReportsRealAsset(t *testing.T) {
 	dir := t.TempDir()
-	copyTree(t, repoSkillDir, filepath.Join(dir, "app-builder"))
+	copyTree(t, imageSkillDir(t, "app-builder"), filepath.Join(dir, "app-builder"))
 	h := NewHandlers(New(dir))
 	w := doGet(t, adminTestRouter(h), "/api/server/admin/skills/builtin")
 	if w.Code != http.StatusOK {
@@ -526,7 +569,7 @@ func TestAdminListBuiltinReportsRealAsset(t *testing.T) {
 func TestAdminListBuiltinReportsSkippedSkillWithReason(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "app-builder")
-	copyTree(t, repoSkillDir, target)
+	copyTree(t, imageSkillDir(t, "app-builder"), target)
 	raw, err := os.ReadFile(filepath.Join(target, SkillFile))
 	if err != nil {
 		t.Fatal(err)
@@ -568,7 +611,7 @@ func TestAdminListBuiltinReportsSkippedSkillWithReason(t *testing.T) {
 func TestAdminListBuiltinExplainsDirNameMismatch(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "app-builder")
-	copyTree(t, repoSkillDir, target)
+	copyTree(t, imageSkillDir(t, "app-builder"), target)
 	raw, err := os.ReadFile(filepath.Join(target, SkillFile))
 	if err != nil {
 		t.Fatal(err)
@@ -617,7 +660,7 @@ func TestAdminListBuiltinMissingDirIsNotAnError(t *testing.T) {
 // 零问题"，而空态文案还指向一个不存在的「被跳过」块（R2-SK-2）。
 func TestAdminListBuiltinReportsLooseFilesAtAssetRoot(t *testing.T) {
 	root := t.TempDir()
-	raw, err := os.ReadFile(filepath.Join(repoSkillDir, SkillFile))
+	raw, err := os.ReadFile(filepath.Join(imageSkillDir(t, "app-builder"), SkillFile))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -86,6 +87,30 @@ import (
 //     "读"与"写"，所以取"最终阶段不碰技能目录"这条可静态判定的强形式。
 //   - **同字节副本的扫描面 = 仓库**（不是技能源树）：承诺是"源树里只此一份"，扫描面就
 //     必须一样宽 —— 把副本放到 `server/demoapps/scripts/` 下的**别的名字**同样会让规则漂。
+//     跳过表另有一条**自证判据**：被跳过的目录里不许有**被 git 跟踪**的内容（"这个目录
+//     从来不属于源树"这句承诺由 git 回答，而不是靠目录名硬编码；见 `assertSkippedDirsHoldNoTrackedFiles`）。
+//
+// 第 ⑤ 项的对象修正（2026-10-13，第二轮审计 P1 —— 判据对象 ≠ 运行期下发对象）：
+// 解耦后**下发的那棵树比磁盘源树多一个文件**（注入的打包器），于是打在 `server/skills/<name>/`
+// 上的 `PackDir` → `archiveutil.Validate` → `skillmanifest.Parse` 这套「与上传完全相同的闸门」
+// 不再覆盖注入文件：注入文件过不了闸门（尺寸/条目/路径/manifest 规则）时全部判据仍然绿，
+// 而运行期 `skillseed` 会把整条技能记成坏资产跳过。现在 ⑤ 与真资产闸门（`skillseed_test.go`
+// 的 `TestRealAssetPassesServerManifestValidation`）以及全部"真资产"夹具（catalog / 管理端 /
+// E2E 出口）都打 `imageSkillAssetRoot` **按 Dockerfile 语义装配出来的那一棵树**，
+// 并把两个独立的"镜像树"模型（虚拟叠加 vs 装配）互相对拍。
+//
+// 本轮（第 ⑤ 项对象修正 + 跳过表收窄/自证）的变异验证（2026-10-13 在本分支工作树里逐条实跑，
+// harness = temp/p0/w4-decouple-demo-packer/fixverify2/run-fix2-mutations.sh，
+// 原始输出 = 同目录 mutations-fix2.log）：
+//   - 注入文件涨到 17 MiB（归档 > 16 MiB 上限）**且摘要已登记**（排除版本纪律这条干扰项）⇒
+//     修复后红：⑤ 的 `loadSkill`、`TestRealAssetPassesServerManifestValidation`、catalog 与
+//     管理端真资产用例一起喊"归档超过上限"；**修复前（HEAD 的判据面）同变异全绿** ——
+//     这就是 P1 说的覆盖面差（闸门打在磁盘源树上，注入文件整个不在面内）；
+//   - 删掉注入技能目录的那条 COPY ⇒ 四条独立红：摘要模型与装配树分叉（18 → 17 个文件）、
+//     中性源落点数不符、注入落点 0 条、包内缺 `scripts/pack-assets.mjs`；
+//   - 把中性源的同字节副本放进 `server/webadmin/dist/` ⇒ **修复后红 / 修复前绿**
+//     （按目录名跳过 `dist` 时扫描面窄于"源树里只此一份"这句承诺）；
+//   - 让 `build/` 下出现一个被 git 跟踪的文件 ⇒ 跳过表自证判据红并点名 `build/probe.md`。
 //
 // 上述五条（外加 ⑧ 的独立承重）的变异验证（2026-10-13 在本分支的隔离副本里逐条实跑，
 // 每条都让本包红；harness = temp/p0/w4-decouple-demo-packer/fixverify/run-fix-mutations.sh，
@@ -134,7 +159,8 @@ const (
 	repoRootPath = "../../../.."
 )
 
-// repoScanSkipDirs 是仓库级扫描跳过的目录名（逐层匹配）：它们都不是"本仓源树"。
+// repoScanSkipDirs 是仓库级扫描跳过的目录名（逐层匹配）：它们都**没有**被本仓跟踪的内容，
+// 因此都不是"本仓源树"。
 //
 //	.git             VCS 元数据（worktree 里是文件，主检出里是目录）
 //	deepseek-harness 上游 pin 的只读 submodule（不归本仓判据管，且体量极大）
@@ -142,14 +168,22 @@ const (
 //	                 出现多次，扫进来只会制造与真实漂移无关的红）
 //	node_modules     依赖
 //	.yarn            包管理器缓存
-//	dist / build     构建产物（源树里没有它们，产物里有副本不算"两份实现"）
+//	build            构建产物（electron-builder 的输出目录；当前树上不存在）
+//
+// ⚠️ 这张表**只按目录名**跳过，所以它自己必须回答一句承诺：「这个目录名从来不属于源树」。
+// 由 `assertSkippedDirsHoldNoTrackedFiles` 机械判定：被跳过的目录下不许有被 git 跟踪的内容
+// （同名目录某天被跟踪 ⇒ 红，逼人把这一项从表里去掉，扫描面跟着承诺一起放宽）。
+//
+// `dist` **不在这张表里**，就是这个判据第一次运行的结果：`server/webadmin/dist/.gitkeep`
+// 是被跟踪的（`.gitkeep` 占位），于是"`dist/` 从不属于源树"不成立 —— 把它留在表里意味着
+// 往 `server/webadmin/dist/` 放一份打包器副本不会被任何判据发现。收窄后该目录照扫
+// （实测面很小：`server/webadmin/dist` 只有那个占位文件、`packages/host/desktop/dist` 为空）。
 var repoScanSkipDirs = map[string]bool{
 	".git":             true,
 	"deepseek-harness": true,
 	"temp":             true,
 	"node_modules":     true,
 	".yarn":            true,
-	"dist":             true,
 	"build":            true,
 }
 
@@ -387,18 +421,32 @@ func TestBuiltinSkillInventoryMatchesDiskDockerfileAndDigests(t *testing.T) {
 	}
 
 	// ⑤ 每个已下发技能：① 走运行期**同一条**校验路径（含「目录名 == frontmatter name」的
-	// identity 规则）；② **镜像里那一棵树**的内容摘要（磁盘技能树 + 中性源注入的文件，与
-	// 第 ⑦ 项同一口径）已登记且版本一致。运行期 `loadSkill` 就是生产读资产的入口，用它
-	// 而不是另写一套检查，避免判据与运行期判据漂移。
+	// identity 规则），对象是**镜像里那一棵树**（磁盘技能树 + 最终阶段注入的文件，
+	// `imageSkillAssetRoot` 按 Dockerfile 语义装配）；② 该树的内容摘要已登记且版本一致
+	// （先与"真实装配出来的那棵树"对拍，两条独立的"镜像树"模型必须给出同一个摘要）。
+	// 运行期 `loadSkill` 就是生产读资产的入口，用它而不是另写一套检查，避免判据与运行期
+	// 判据漂移 —— 但入口必须喂**生产会读到的那棵树**，否则"内置资产能不能过闸门"这条
+	// 最该被钉住的断言答的是另一道题（注入文件完全不在覆盖面里）。
+	imageRoot := imageSkillAssetRoot(t)
 	for _, dir := range sortedKeys(shipped) {
 		root := repoSkillDirFor(dir)
-		if _, err := loadSkill(repoSkillsRoot, dir); err != nil {
-			t.Errorf("已下发技能 %s 过不了运行期的资产校验（loadSkill）：%v\n"+
+		if _, err := loadSkill(imageRoot, dir); err != nil {
+			t.Errorf("已下发技能 %s 过不了运行期的资产校验（loadSkill，对象 = 镜像里那一棵树）：%v\n"+
 				"  → 运行期 skillseed 会把整条技能记成「被跳过的坏资产」：清单里没有它、客户端装不到，"+
 				"只在启动日志与管理端诊断里可见。", dir, err)
 			continue
 		}
 		digest, files := effectiveSkillDigest(t, dir, injectionsByKey)
+		if gotDigest, gotFiles := skillContentDigest(t, filepath.Join(imageRoot, dir)); gotDigest != digest || gotFiles != files {
+			t.Errorf("已下发技能 %s 的摘要模型与实际装配出来的镜像树分叉：\n"+
+				"  虚拟叠加（磁盘树 + skillFileInjections）= %s（%d 个文件）\n"+
+				"  装配出来的那棵树（%s）= %s（%d 个文件）\n"+
+				"  → 登记表描述的不是员工装到的那份资产（客户端对拍的 sha256 来自 PackDir 打的那棵树）。\n"+
+				"  → 常见原因：注入文件落进了一个磁盘树上**不存在**的新目录（摘要模型要补上这个目录条目），"+
+				"或装配语义漏了一条落点。",
+				dir, digest, files, filepath.Join(imageRoot, dir), gotDigest, gotFiles)
+			continue
+		}
 		version := skillFrontmatterVersion(t, filepath.Join(root, SkillFile))
 		if files == 0 {
 			t.Errorf("已下发技能 %s 一个普通文件都没摘要到（目录被搬走或变空？）", root)
@@ -444,6 +492,10 @@ func TestBuiltinSkillInventoryMatchesDiskDockerfileAndDigests(t *testing.T) {
 	//	   保证：非登记源 COPY 进 seed 目录、或落点源与登记源不一致，都在那里当场红）；
 	//	c. 注入的字节真的参与技能内容摘要（若把注入 COPY 删掉判据也不红，这条登记就是死代码），
 	//	   且"加上注入文件后的摘要"正是 `seededSkillDigests` 里登记的那一个。
+	//
+	// a 的扫描面（`repoScanSkipDirs`）自己也要有判据：跳过表不许把**被跟踪**的内容挡在面外
+	// （目录名硬编码的盲区：`dist/` 某天开始入库）。
+	assertSkippedDirsHoldNoTrackedFiles(t, repoRootPath)
 	for _, inj := range sortedInjections(injectionsByKey) {
 		if !shipped[inj.Skill] {
 			t.Errorf("skillFileInjections 往技能 %q 注入 %q，但该技能不在 builtinSkillRegistry 的已下发集合里 —— "+
@@ -593,6 +645,62 @@ func imageSkillTreeOf(t *testing.T, skill string, byKey map[string]skillFileInje
 	return tree
 }
 
+// imageSkillAssetRoot 把「镜像里的技能资产根」**装配**到临时目录里并返回它。
+//
+// 为什么判据需要一棵装配出来的树：`server/skills/<name>/` 是**构建上下文的源树**，
+// 不是员工最终装到的那棵树 —— `server/Dockerfile` 的最后一个构建阶段还会把中性源的
+// 文件**注入**技能目录（`skillFileInjections`）。凡是问「下发给员工的这份资产能不能过
+// 闸门」的判据（PackDir → archiveutil.Validate → skillmanifest.Parse、运行期 `loadSkill`、
+// 内容摘要、接口契约），对象都必须是这一棵树：打源树等于答错了题 —— 注入文件过不了闸门
+// （尺寸/条目/路径/manifest 规则）时全部判据仍然绿，而运行期会把整条技能记成坏资产跳过：
+// 清单为空、员工装不到，只在启动日志与管理端诊断里可见。
+//
+// 装配语义**取自 Dockerfile 本身**（最后一个构建阶段里落进 `PICOAI_SKILL_SEED_DIR` 的
+// COPY）：① 技能目录整棵；② 由中性源注入的文件，落点逐字取 COPY 的目标。于是这棵树是
+// 构建语义的产物，而不是把 `skillFileInjections` 再抄一遍 —— 注入 COPY 被删掉时这棵树
+// 会一起少掉那个文件（第 ⑦ 项的落点数与第 ⑤ 项的摘要对拍各自独立喊）。
+func imageSkillAssetRoot(t *testing.T) string {
+	t.Helper()
+	injectionsByKey, injectionsBySource := registeredSkillInjections(t)
+	insns := dockerfileInstructions(readRepoFile(t, repoDockerfilePath))
+	lastStage := dockerfileLastStage(insns)
+	shipped, _, landings := dockerfileSkillCopies(t, insns, injectionsByKey, injectionsBySource, lastStage)
+
+	root := t.TempDir()
+	for _, dir := range sortedKeys(shipped) {
+		copyTree(t, repoSkillDirFor(dir), filepath.Join(root, dir))
+	}
+	for _, src := range sortedKeys(landings) {
+		raw, err := os.ReadFile(filepath.Join(repoServerRoot, filepath.FromSlash(src)))
+		if err != nil {
+			t.Fatalf("读中性源 %s（%s）：%v —— 镜像里的技能树必须能真的装配出来", src, repoServerRoot, err)
+		}
+		for _, l := range landings[src] {
+			if !l.InSeed {
+				continue // 非技能目录落点（如演示应用打包阶段）不进这棵树
+			}
+			// l.Dest = <PICOAI_SKILL_SEED_DIR>/<技能>/<Dest>（解析期已逐字核对过形态）。
+			rel := strings.TrimPrefix(l.Dest, imageSkillSeedDir+"/")
+			dst := filepath.Join(root, filepath.FromSlash(rel))
+			if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+				t.Fatalf("建注入落点目录 %s: %v", filepath.Dir(dst), err)
+			}
+			if err := os.WriteFile(dst, raw, 0o644); err != nil {
+				t.Fatalf("写注入落点 %s: %v", dst, err)
+			}
+		}
+	}
+	return root
+}
+
+// imageSkillDir 返回某个技能**在镜像里**的目录（磁盘技能树 + 最终阶段注入的文件）。
+//
+// 所有"真资产"夹具都必须走这里而不是 `repoSkillDir`：后者是源树，少一个注入文件。
+func imageSkillDir(t *testing.T, skill string) string {
+	t.Helper()
+	return filepath.Join(imageSkillAssetRoot(t), skill)
+}
+
 // cleanSkillReference 归一化引用 token：去掉尾部的标点/引号（`README.md.`、`app.js,`
 // 之类），归一化路径。返回 "" 表示这个 token 不参与对账（越界路径）。
 func cleanSkillReference(tok string) string {
@@ -659,6 +767,66 @@ func TestBuiltinSkillReferencedFilesExistInImageTree(t *testing.T) {
 				"  → 只是举例/占位路径 ⇒ 改写成不带技能目录前缀的写法（本判据只对账技能树内的相对路径）。",
 				skill, ref, strings.Join(refs, ", "), refs)
 		}
+	}
+}
+
+// assertSkippedDirsHoldNoTrackedFiles 是 `repoScanSkipDirs` 的**自证判据**。
+//
+// 跳过表里每一条都在说「这个目录名从来不属于本仓源树」；按**目录名**硬编码跳过时，这句
+// 承诺没人判 —— 名字里带 `dist`/`build` 的目录某天开始被跟踪（构建产物入库）时，
+// `sameBytesElsewhere` 的扫描面会静默窄于它的承诺（"源树里只此一份"）：把打包器的副本
+// 放进那个目录，任何判据都不会发现。于是承诺不再由人读注释来保证，而是由 git 回答：
+//
+//	被跳过的目录下**不许有被跟踪的文件**（`git ls-files`）。
+//
+// 一旦有 ⇒ 红，并点名目录与前几个文件：要么把那几个文件移出该目录，要么把这一项从跳过表里
+// 去掉（扫描面必须与承诺一起放宽）。注意 submodule 是**一条 gitlink 条目**（路径就是
+// `deepseek-harness`，没有内容条目），不是"该目录下有跟踪内容"，本判据只看祖先目录段。
+//
+// git 不可用（导出包 / 非工作树）时这条**不可判定**：记一条日志并跳过它本身 —— 其余扫描面
+// 与跳过表照旧生效（与 serverstore 的存量 DDL 来源对拍同一姿势）。
+func assertSkippedDirsHoldNoTrackedFiles(t *testing.T, root string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Logf("跳过「被跳过的目录里没有跟踪内容」自证：本机没有 git（%v）", err)
+		return
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		t.Fatalf("解析仓库根 %s: %v", root, err)
+	}
+	out, err := exec.Command("git", "-C", abs, "ls-files", "-z").Output()
+	if err != nil {
+		t.Logf("跳过「被跳过的目录里没有跟踪内容」自证：git ls-files 在 %s 不可用（%v；导出包或非工作树？）", abs, err)
+		return
+	}
+	hits := map[string]map[string]bool{}
+	for _, rel := range strings.Split(string(out), "\x00") {
+		if rel == "" {
+			continue
+		}
+		segs := strings.Split(path.Clean(filepath.ToSlash(rel)), "/")
+		// 只看**祖先目录**段：同名文件（`src/build.ts`）与 submodule 的 gitlink 条目不算。
+		for _, seg := range segs[:len(segs)-1] {
+			if repoScanSkipDirs[seg] {
+				if hits[seg] == nil {
+					hits[seg] = map[string]bool{}
+				}
+				hits[seg][rel] = true
+			}
+		}
+	}
+	for _, name := range sortedKeys(hits) {
+		files := sortedKeys(hits[name])
+		shown := files
+		if len(shown) > 5 {
+			shown = shown[:5]
+		}
+		t.Errorf("repoScanSkipDirs 里的 %q 下有**被 git 跟踪**的内容（共 %d 个，前几个：%v）——\n"+
+			"  跳过表按目录名硬编码，于是这些文件被挡在同字节副本扫描（sameBytesElsewhere）之外：\n"+
+			"  把打包器的一份副本放进这个目录，任何判据都不会发现，而承诺仍是「源树里只此一份」。\n"+
+			"  → 把那几个文件移出该目录，或把 %q 从 repoScanSkipDirs 里去掉（扫描面必须与承诺一起放宽）。",
+			name, len(files), shown, name)
 	}
 }
 
