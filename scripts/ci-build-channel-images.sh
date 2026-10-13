@@ -282,6 +282,11 @@ for channel in "${CHANNELS[@]}"; do
       # 而"清单是空的"在客户端只表现为"能力中心里没有这条技能"，零报错。
       test -s /opt/picoaide/skills/app-builder/SKILL.md || { echo "MISSING /opt/picoaide/skills/app-builder/SKILL.md" >&2; exit 1; }
       test -s /opt/picoaide/skills/app-builder/references/publishing.md || { echo "MISSING builtin skill references/" >&2; exit 1; }
+      # 构建期从**中性源**注入技能目录的打包器（技能文档里 20 处按 scripts/pack-assets.mjs
+      # 这个相对路径引用它）。它由 server/Dockerfile 的 COPY 注入，而 Go 侧判据只读
+      # Dockerfile **文本** —— 这一条是同一件事的镜像级见证（跑在真镜像里）：
+      # 注入 COPY 被删、或被挪进中间阶段时，文本判据会红；万一两者都漏过去，这里也会红。
+      test -s /opt/picoaide/skills/app-builder/scripts/pack-assets.mjs || { echo "MISSING /opt/picoaide/skills/app-builder/scripts/pack-assets.mjs" >&2; exit 1; }
       test -s "/opt/picoaide/CHANNEL" || { echo "MISSING /opt/picoaide/CHANNEL" >&2; exit 1; }
       # 平台键齐全是硬判据:服务端只按这个清单下发更新地址,少一个键 = 该平台
       # 永远拿不到客户端(门户同样少一个下载入口),而镜像"看起来"是好的。

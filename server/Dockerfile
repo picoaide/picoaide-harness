@@ -204,6 +204,15 @@ ENV PICOAI_CLIENT_RELEASE_DIR=/opt/picoaide/client
 # 而是登记在 skillseed 的 `skillFileInjections`（技能 / 目录内落点 / 中性源 / 落点数）：
 # 本文件里凡把**非 skills/ 源**COPY 进 <PICOAI_SKILL_SEED_DIR> 的指令，都必须在那张表里
 # 逐条登记，否则判据 Fatal（"读不出清单"不等于"清单是空的"）。
+#
+# ⚠️ 两条位置纪律（判据硬判，不是约定）：
+#   ① 凡落进 <PICOAI_SKILL_SEED_DIR> 的 COPY/ADD 必须在**最后一个构建阶段** —— 中间阶段
+#     不进入最终镜像，文件到不了 /opt/picoaide/skills（dest 写对、落点数对、摘要模型对，
+#     员工装到的技能却缺这个文件）；
+#   ② **最终阶段的 RUN 不许出现技能目录的路径**（含 `$PICOAI_SKILL_SEED_DIR`）—— 判据只
+#     解析 COPY/ADD，RUN 能在技能目录里写出判据看不见的字节（那样"镜像字节 == 中性源字节"
+#     就不成立，而摘要登记的仍是中性源的那一份）。技能目录的内容只能由 COPY/ADD 决定。
+#     要断言镜像里技能文件存在，请写进 scripts/ci-build-channel-images.sh 的 verify_image。
 COPY skills/app-builder/ /opt/picoaide/skills/app-builder/
 # 落点 2/2：把打包器从**同一个中性源**注入技能目录，镜像内布局与解耦前逐字节一致
 # （`/opt/picoaide/skills/app-builder/scripts/pack-assets.mjs` 仍在，技能文档里的

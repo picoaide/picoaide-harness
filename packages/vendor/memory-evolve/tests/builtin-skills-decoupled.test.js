@@ -220,11 +220,54 @@ test('平台技能源目录已移出本包（2026-09-19 归位服务端；包内
   assert.deepEqual(onDisk, [...BUILTIN_SKILLS].sort(), '包内 skills/ 必须与本插件清单一一对应')
 })
 
-test('平台技能的新源目录在服务端仓库里，文件齐备（它就是镜像里下发的那份资产）', () => {
+test('平台技能的新源目录在服务端仓库里：镜像下发的那棵树 = 磁盘树 + 构建期注入的文件，两者齐备', () => {
+  // ⚠️ 2026-10-13（打包器解耦）：镜像里最终下发的那棵树**不等于** `server/skills/<name>/`
+  // 这一份磁盘树 —— `server/Dockerfile` 还会从中性源把打包器**注入**技能目录
+  // （`scripts/pack-assets.mjs`，唯一实现在 `server/demoapps/scripts/`，因为演示应用的
+  // 打包器与随技能分发的必须是同一份实现）。注入关系登记在服务端
+  // `server/internal/wasmapp/skillseed/builtin_skills_test.go` 的 `skillFileInjections`。
+  // 所以本用例钉两半：① 磁盘树的文件齐备；② 每个注入文件的中性源存在、技能目录里
+  // **没有**副本、且 Dockerfile 真的从那一个源 COPY 进了技能目录。
   assert.ok(existsSync(SERVER_SKILLS_DIR), `找不到服务端技能目录：${SERVER_SKILLS_DIR}（仓库布局变了？）`)
+  const dockerfile = readFileSync(join(REPO_ROOT, 'server', 'Dockerfile'), 'utf8')
+  const SEED_DIR = '/opt/picoaide/skills'
+  // 镜像里那一棵树 = 磁盘树 + 这些注入文件（rel = 技能目录内相对路径）。
+  const INJECTED = [
+    { skill: 'app-builder', rel: 'scripts/pack-assets.mjs', source: 'server/demoapps/scripts/pack-assets.mjs' },
+  ]
+  assert.ok(INJECTED.length > 0, '前置：平台技能的注入登记不能是空的（否则本用例只钉磁盘树了）')
+  const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+
   for (const name of PLATFORM_SKILLS) {
     const dir = join(SERVER_SKILLS_DIR, name)
     assert.ok(existsSync(dir), `服务端技能目录缺失：server/skills/${name}`)
+    const injected = INJECTED.filter((entry) => entry.skill === name)
+    for (const entry of injected) {
+      const sourcePath = join(REPO_ROOT, ...entry.source.split('/'))
+      assert.ok(existsSync(sourcePath), `注入文件 ${entry.rel} 的中性源缺失：${entry.source}`)
+      assert.equal(
+        existsSync(join(dir, entry.rel)),
+        false,
+        `server/skills/${name}/${entry.rel} 不该有磁盘副本（解耦后唯一实现在 ${entry.source}）`,
+      )
+      // Dockerfile 必须从**那一个源**把它 COPY 进技能目录（判据只读文本；镜像级见证在
+      // scripts/ci-build-channel-images.sh 的 verify_image）。Dockerfile 的源路径相对
+      // **构建上下文**（`server/`），所以这里去掉仓库前缀。
+      assert.ok(entry.source.startsWith('server/'), `注入源 ${entry.source} 必须在 server/ 构建上下文里`)
+      const contextSource = entry.source.slice('server/'.length)
+      const copyLine = new RegExp(
+        `^COPY[ \\t]+(?:--[^ \\t]+[ \\t]+)*${escape(contextSource)}[ \\t]+`
+        + `${escape(`${SEED_DIR}/${name}/${entry.rel}`)}[ \\t]*$`,
+        'mu',
+      )
+      assert.match(
+        dockerfile,
+        copyLine,
+        `server/Dockerfile 必须把 ${contextSource} COPY 到 ${SEED_DIR}/${name}/${entry.rel}`
+        + '（解耦后的注入关系；否则镜像里技能目录缺这个文件，而技能文档仍按该相对路径引用它）',
+      )
+    }
+    // 磁盘树必须齐备；注入文件按"它来自中性源"另判（上面那一段），不要求它在磁盘上。
     const rels = listFiles(dir)
     for (const expected of [
       'SKILL.md',
