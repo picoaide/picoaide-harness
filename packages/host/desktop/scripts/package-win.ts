@@ -231,7 +231,10 @@ if (isDirectInvocation(import.meta)) {
       // 不构建则安装包携带缺失/旧 bundle,品牌版本号不显示。顺序见
       // prebuild-workspace-deps.ts)。
       const { prebuildWorkspaceDeps } = await import('./prebuild-workspace-deps.ts')
-      prebuildWorkspaceDeps(dirname(dirname(fileURLToPath(import.meta.url))))
+      // 变体跳过读**本轮** features（清单由后一步 prepareChannelPackaging() 写）。
+      prebuildWorkspaceDeps(dirname(dirname(fileURLToPath(import.meta.url))), {
+        features: resolveChannelBuildContext().features,
+      })
     }
     // 渠道化准备(按渠道派生图标素材 + 就位随包 channel.json)。CI 打包走
     // --no-prebuild,brand-prepare 不会经 prebuild 触发 —— 少了这一步,渠道包

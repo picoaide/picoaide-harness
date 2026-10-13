@@ -17,7 +17,8 @@
  * (两个零依赖叶子包 `@picoaide/dsh-host-locale` / `@picoaide/dsh-host-home` 的
  * lib/types),`src/main.ts`/`src/app-ai-runner.ts` 静态 import
  * `@picoaide/dsh-wasm-apps-host`(它自己又读 `@picoaide/dsh-browser/guard`)。
- * 而 browser 的 tsc 读 connectors 的 lib/types,connectors 只读两个叶子包 ⇒
+ * 而 browser 的 tsc 只读两个叶子包的 lib/types（2026-10-13 起不再读 connectors 的
+ * 类型：契约在 `src/connectors-contract.ts` 本地声明），connectors 只读两个叶子包 ⇒
  * 正确顺序是:**叶子包 → connectors → browser → wasm-apps-host → desktop → 其余**。
  * 旧顺序(desktop 最先、wasm-apps-host 垫底)在**干净检出**下会让 desktop 的
  * `tsc` 找不到那两个包的声明文件——`yarn check` 因为调度器已先把它们建好而看不
@@ -44,6 +45,14 @@
  *      静态读配置;读不出只跳过这条来源,绝不因此判"需要重建")。
  * 漏一个就判"需要重建",绝不静默跳过。缺产物时的重建会沿依赖链向上传播
  * (依赖产物变新 ⇒ 依赖方也重建),这与既有的 mtime 语义一致。
+ *
+ * 2026-10-14(R2 审计 S2 修复)**变体跳过的输入改成本轮 features,且 force 能覆盖它**:
+ * 旧实现读 `<desktop>/temp/channel-variant.json`,而那是**后一步**
+ * `prepareChannelPackaging()` 写的 ⇒ 读到的是上一轮残留(上一轮 `skills=false`、这一轮
+ * 全开时,全开构建必需的 `capability-center` 会被静默跳过并复用陈旧 `lib/`);
+ * 且变体分支排在 `!force` 之前,`DSH_PREBUILD=force` 到不了。现在 features 由调用方
+ * (`resolveChannelBuildContext()` 已解析好的那份)当入参传入,不传就一个包都不跳;
+ * 判断是 `if (!force && variantSkip.has(...))`。
  */
 
 import { spawnSync } from 'node:child_process'
@@ -51,6 +60,8 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isDirectInvocation } from './direct-invocation.mjs'
+import { closedFeatureSurfaces, type FeatureSwitches } from '../src/channel-features.ts'
+import { channelFeaturesVariant, normalizeChannelFeatures } from './channel-constants.ts'
 
 /** 构建产物目录(相对包根):lib/ 是各包 tsdown/tsc 的 outDir;desktop 另有 build/(brand-prepare)。 */
 const OUTPUT_DIRS = ['lib', 'build']
@@ -548,17 +559,83 @@ export function stalenessReason(
   return oldestMtime(outputs) >= newestInput ? null : 'inputs newer than oldest output'
 }
 
+/**
+ * 本次变体下**可以安全跳过**的包目录 → 该包所属的变体标识（空 Map = 全开/未声明）。
+ *
+ * ## 输入是**本轮**的渠道 features，不是磁盘上的上一轮清单（2026-10-14 R2 审计 S2 修复）
+ *
+ * 旧实现读 `<desktop>/temp/channel-variant.json`，而那份清单是**后一步**
+ * `prepareChannelPackaging()`（`channel-prepare.ts`）写的、四个打包入口都是先跑本函数
+ * ⇒ 读到的是**上一轮**构建的残留：上一轮 `skills=false`、这一轮全开时，全开构建
+ * 必需的 `capability-center` 会被静默跳过（`lib/` 在就复用陈旧产物，不在就最终在
+ * afterPack 红）。现在 features 由调用方（打包入口已解析好的渠道上下文）**显式传入**；
+ * 没传（`yarn prebuild` / 冒烟脚本直接调）就**一个包都不跳** —— "不知道本轮变体"
+ * 时多建一个包只是慢，跳过则是错。
+ *
+ * "安全"是承重的限定词：只有当**没有任何保留包**把该目录列进 `deps` 时才可跳过。
+ * 反例就在本表里 —— `browser` 的 `deps` 含 `packages/host/connectors`（它的
+ * `tests/*.spec.ts` 值导入真实 `ConnectorStore` 造夹具，运行期那一次惰性 require
+ * 也解析到那份 `lib/`）⇒ 即便渠道关掉了连接器，prebuild 也必须照常产出那份 `lib/`，
+ * 否则保留包自己构建失败。反正它会随 staging `package.json` 的依赖裁剪而不进 asar。
+ * @param features - **本轮**渠道的功能模块开关（`undefined` = 全开/未声明 ⇒ 不跳）。
+ * @returns 目录 → 变体标识（标识与 `channelFeaturesVariant()` 同源）。
+ */
+export function variantPrunedDirs(features?: FeatureSwitches): ReadonlyMap<string, string> {
+  const dirs = closedFeatureSurfaces(features).flatMap(surface => [...surface.directories])
+  if (dirs.length === 0) return new Map()
+  const variant = channelFeaturesVariant(normalizeChannelFeatures(features))
+  const closed = new Set(dirs)
+  const needed = new Set<string>()
+  for (const pkg of WORKSPACE_PACKAGES) {
+    if (closed.has(pkg.dir)) continue
+    for (const dep of pkg.deps ?? []) needed.add(dep)
+  }
+  const result = new Map<string, string>()
+  for (const dir of dirs) {
+    if (needed.has(dir)) continue
+    result.set(dir, variant)
+  }
+  return result
+}
+
+/** `prebuildWorkspaceDeps()` 的可注入输入。 */
+export interface PrebuildOptions {
+  /**
+   * **本轮**渠道的功能模块开关（打包入口从 `resolveChannelBuildContext()` 拿到的
+   * 那份）。省略 = 不按变体跳过任何包（见 {@link variantPrunedDirs}）。
+   */
+  readonly features?: FeatureSwitches
+}
+
 /** 预构建 desktop 自身 + enterprise/account-card/branding/其余自研插件包。
  *
  * `desktopRoot` 是 dsh-plugin-desktop 包根(调用方一直传这个);仓库根由它上溯三级
  * 得到(yarn workspace 命令在包内任意目录都能解析,故 cwd 统一用 desktopRoot)。
+ * @param desktopRoot - dsh-plugin-desktop 包根。
+ * @param options - 渠道 features（见 {@link PrebuildOptions}）。
  */
-export function prebuildWorkspaceDeps(desktopRoot: string): void {
+export function prebuildWorkspaceDeps(desktopRoot: string, options: PrebuildOptions = {}): void {
   const repoRoot = resolve(desktopRoot, '..', '..', '..')
   const force = process.env.DSH_PREBUILD === 'force' || process.argv.includes('--force')
+  const variantSkip = variantPrunedDirs(options.features)
   const skipped: string[] = []
+  const variantSkipped: string[] = []
   for (const pkg of WORKSPACE_PACKAGES) {
     const key = workspaceKey(pkg)
+    // 功能模块变体（2026-10-13，P2）：被关闭的模块**不再随包**，三个 `dist:*` 默认
+    // 先跑本函数 ⇒ 不跳过就会去构建一个不进产物的包（白付一次 tsdown）。
+    // `variantPrunedDirs()` 只在**没有**保留包把它当构建输入时才把它列进来：
+    // `browser` 的构建输入里有 `connectors`（见本表第 2 条的注释），跳过它会让保留包
+    // 构建失败 —— 那种"省一次构建"换来一次红是本末倒置。真正让模块不进产物的是
+    // staging `package.json` 的依赖裁剪（`pack-app-root.mjs`），不是这里。
+    //
+    // `DSH_PREBUILD=force` **压过**变体跳过（2026-10-14 R2 审计 S2）：force 的语义是
+    // "无视一切跳过理由重建"，把它挡在变体分支之后等于这个开关在最需要它的场合
+    // （上一轮清单/入参算错时的兜底）失效。
+    if (!force && variantSkip.has(pkg.dir)) {
+      variantSkipped.push(`${key} (变体 ${variantSkip.get(pkg.dir)} 关闭了该模块)`)
+      continue
+    }
     const reason = stalenessReason(repoRoot, pkg)
     if (!force && reason === null) {
       skipped.push(key)
@@ -566,9 +643,30 @@ export function prebuildWorkspaceDeps(desktopRoot: string): void {
     }
     // 带上判定原因:本缺陷的现场症状是"跳过重建"看着一切正常,日志必须能直接
     // 区分"因为缺产物重建"与"因为源文件更新重建"。
-    console.log(`[prebuild] ${key}: building${reason === null ? ' (forced)' : ` (${reason})`}`)
+    // force 时**一律**印 `(forced)`(后面再附陈旧原因):`DSH_PREBUILD=force` 的语义是
+    // "无视一切跳过理由重建",而"被变体跳过"这一条根本走不到陈旧判定 ⇒ 只看
+    // `reason === null` 会让 force 覆盖变体跳过的现场印成陈旧原因、看不出是谁下令重建
+    // (2026-10-14 R2 审计 S2 的验收判据就是这一行 `building (forced)`)。
+    const reasonLabel = force
+      ? ` (forced)${reason === null ? '' : `，另有陈旧: ${reason}`}`
+      : ` (${reason})`
+    console.log(`[prebuild] ${key}: building${reasonLabel}`)
     const args = pkg.workspace === null ? ['run', 'build'] : ['workspace', pkg.workspace, 'build']
     run(args, desktopRoot, `${key} build`)
+  }
+  if (variantSkipped.length > 0) {
+    console.log(
+      `[prebuild] 变体裁剪，跳过: ${variantSkipped.join(', ')}`
+      + '（这些模块不随包；保留包若把它当构建输入就不会列在这里 —— 见 variantPrunedDirs）',
+    )
+  }
+  if (force && variantSkip.size > 0) {
+    // 区分"变体跳过"与"force 覆盖"：force 下这里必须出现，否则说明覆盖没生效
+    // （2026-10-14 R2 审计 S2 的现场症状就是这条日志从不出现）。
+    console.log(
+      `[prebuild] DSH_PREBUILD=force：变体跳过被覆盖，${variantSkip.size} 个包照常重建`
+      + `（${[...variantSkip.keys()].join(', ')}）`,
+    )
   }
   if (skipped.length > 0) {
     console.log(`[prebuild] up to date, skipped: ${skipped.join(', ')} (DSH_PREBUILD=force 可强制重建)`)

@@ -317,7 +317,10 @@ if (isDirectInvocation(import.meta)) {
     if (!noPrebuild) {
       // 打包前预构建依赖包(见 prebuild-workspace-deps.ts)
       const { prebuildWorkspaceDeps } = await import('./prebuild-workspace-deps.ts')
-      prebuildWorkspaceDeps(dirname(dirname(fileURLToPath(import.meta.url))))
+      // 变体跳过读**本轮** features（清单由后一步 prepareChannelPackaging() 写）。
+      prebuildWorkspaceDeps(dirname(dirname(fileURLToPath(import.meta.url))), {
+        features: resolveChannelBuildContext().features,
+      })
     }
     // 拆分模式:--pack 只打包+签名;--notarize 只公证+DMG+验证(可对同一产物
     // 重试,公证 submission id 经状态文件续等);--dmg 对已签名 app 直接出

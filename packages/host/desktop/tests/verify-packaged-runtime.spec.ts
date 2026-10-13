@@ -68,6 +68,7 @@ import { FORBIDDEN_MACOS_NATIVE_ENTRIES } from '../scripts/mac-runtime.ts'
 import { writeValidMacBundle } from './helpers/mac-bundle-fixture.ts'
 import { TEST_BUDGETS } from './wait-budgets.ts'
 import { packagedAppId } from '../scripts/channel-build.ts'
+import { FEATURE_MODULE_SURFACES } from '../src/channel-features.ts'
 import { ensureDesktopProfile } from '../src/profile.ts'
 
 // 上下文里的 `appInfo.id` 一律取自 `packagedAppId()`（= 本次构建声明的身份）：afterPack
@@ -93,6 +94,17 @@ function context(
  * `scripts/verify-renderer-error-capture.mjs`）；缺二进制就 fail-loud ——
  * `yarn check` 本来就要跑图形门禁，二进制是既有前置条件。
  */
+/**
+ * 六个功能模块包的目录（`node_modules/@picoaide/...`）。
+ *
+ * 物理布局的"完整树"夹具必须带上它们：`assertFeatureModuleDirs()` 在物理分支上判
+ * "没被任何变体关闭的模块都必须随包"（量具自检）。少了它们，夹具就不再是"完整的
+ * 物理树"，而用例的语义正是"完整的树必须通过" —— 修夹具、不修判据。
+ */
+const FEATURE_MODULE_DIRS: readonly string[] = FEATURE_MODULE_SURFACES
+  .flatMap(surface => [...surface.packages])
+  .map(pkg => `node_modules/${pkg}`)
+
 function resolveElectronBinary(): string {
   const require = createRequire(import.meta.url)
   const binary = require('electron') as unknown
@@ -1705,6 +1717,7 @@ describe('打包布局判定：损坏的 app.asar 不得被当成物理布局（
         || REQUIRED_PACKAGED_RUNTIME_ENTRIES.some(entry => rel === join(appRoot, entry).replaceAll('\\', '/'))
         || REQUIRED_ASAR_EXPORT_PATHS.some(entry => rel === join(appRoot, entry).replaceAll('\\', '/'))
         || REQUIRED_PROFILE_PATCH_ANCHORS.some(entry => rel === join(appRoot, entry).replaceAll('\\', '/'))
+        || FEATURE_MODULE_DIRS.some(entry => rel === join(appRoot, entry).replaceAll('\\', '/'))
     }
     vi.stubEnv('PACKAGED_RUNTIME_LAYOUT', 'physical')
     expect(() => verifyWithBrandStub(context('/build', 'linux'), missing, existsComplete)).not.toThrow()
@@ -1742,6 +1755,7 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
         || REQUIRED_PACKAGED_RUNTIME_ENTRIES.some(entry => rel === join(appRoot, entry).replaceAll('\\', '/'))
         || REQUIRED_ASAR_EXPORT_PATHS.some(entry => rel === join(appRoot, entry).replaceAll('\\', '/'))
         || REQUIRED_PROFILE_PATCH_ANCHORS.some(entry => rel === join(appRoot, entry).replaceAll('\\', '/'))
+        || FEATURE_MODULE_DIRS.some(entry => rel === join(appRoot, entry).replaceAll('\\', '/'))
     })
     expect(() => verifyWithBrandStub(runtimeContext, noArchive, existsComplete)).not.toThrow()
 

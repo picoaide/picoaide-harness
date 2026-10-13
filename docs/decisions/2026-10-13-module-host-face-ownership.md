@@ -139,6 +139,12 @@ wasm-apps-host；`account-card` → capability-center），`account-card` 另有
 
 ## 6. 变体摘除集（交付物 B，供 P2 直接消费）
 
+> **2026-10-13（P2）更新**：下面这张表是**设计期的口径**，P2 已经把"关掉一个模块"
+> 落成**构建期的一条声明**（`src/channel-features.ts` 的 `FEATURE_MODULE_SURFACES`）
+> \+ 三个折叠点。因此表里绝大部分行**不再需要人手工删** —— 现在的可执行口径见
+> **§6bis**。本节保留原文，因为它是"为什么必须同时动这几处"的依据（漏一处的后果
+> 就是当初的实测结论），也是新增模块时该照着登记什么。
+
 关闭某个模块时，**必须同时**删掉下列各处；漏一处的后果写在括号里。
 
 ### 6.1 关闭 `skills`
@@ -183,6 +189,120 @@ wasm-apps-host；`account-card` → capability-center），`account-card` 另有
 | `@picoaide/dsh-host-locale` | 同理（base 的语言叶子） |
 | `@picoaide/dsh-gateway-client` | **只在两个模块都关掉时可以摘**：它的消费方是 enterprise（登录门/深链/通道同步——base，恒在）+ 两个模块包。所以 `skills`/`apps` 关掉任何一个它都得留；两个都关才跟着走 |
 
+## 6bis. 可执行口径（2026-10-13，P2 落地后）
+
+### 6bis.1 关掉一个模块，只改**一处**
+
+渠道配置 `channel.json` 的 `features`（私有仓）：
+
+```jsonc
+{ "features": { "skills": false } }   // 不写 = 全开；写 false 才关闭
+```
+
+之后**全链路自动**：
+
+| 环节 | 谁做 | 产物侧结果 |
+| --- | --- | --- |
+| 取值 + 变体标识 | `scripts/channel-constants.ts` 的 `normalizeChannelFeatures()` / `channelFeaturesVariant()` | `build/channel.json` 多出 `features` / `features_variant` 两个键 |
+| 写变体清单 | `scripts/channel-variant.ts` 的 `applyChannelVariant()`（挂在 `prepareChannelPackaging()` 里） | `<desktop>/temp/channel-variant.json`（**不进包**；它是随包声明的**派生物**，不是判据的权威 —— 见下两行） |
+| **真开关**：裁依赖 | `scripts/pack-app-root.mjs` 的 `stagePackAppRoot()` | staging `package.json` 的 `dependencies` 少掉该模块的包 ⇒ **整包不进 app.asar** |
+| 装配面：bundle 层 | `src/profile.ts` 的 `requiredDesktopBundles()` | `dsh.profile.bundles` 不再列它（否则 profile 去解析一个不存在的包，应用起不来） |
+| 装配面：必需行 | `src/startup-rows.ts` 的 `requiredDesktopRows()` | boot 后的必需行断言不再要求那几行（否则正常的裁剪会被报成启动失败） |
+| 三张必需表 + 每包下限 | `scripts/verify-packaged-runtime.ts` 的 `packagedRuntimeVariantView()` | 归档验证按折叠后的表判，不把"已裁掉"判成"缺条目"；折叠前先过 `assertVariantDeclarationConsistency()` |
+| 缺席判据 | 同上 `assertFeatureModulePresence()` | 关闭的模块**整包不许出现**；全开变体必须看得见每一个模块。**权威 = 随包 `build/channel.json` 的 `features`**（2026-10-14 R2 审计 S3）：临时清单缺失/与声明不一致/声明全开却有残留 ⇒ fail-loud |
+| 预构建 | `scripts/prebuild-workspace-deps.ts` 的 `variantPrunedDirs(features)` | 跳过集由**调用方传入的本轮 features** 派生（不传 = 一个包都不跳）；没有保留包把它当构建输入时跳过（否则照建，见 §6bis.3）。`DSH_PREBUILD=force` **覆盖**这条跳过（2026-10-14 R2 审计 S2） |
+| 运行期开关 | `src/desktop-channel.ts` 的 `profile.features` | 上面两条装配面判定的唯一输入 |
+
+**官方渠道 / 没写 `features` 的渠道**：`applyChannelVariant()` 返回 `undefined` 并且
+**删掉**上一次变体留下的清单 ⇒ 打包输入与改造前逐字节相同（先例：
+`prepareChannelBuilderOverrides()` 对官方渠道返回 `[]`）。
+
+### 6bis.2 三份**静态**清单刻意**不**按变体收窄
+
+`packages/host/desktop/scripts/prebuild-workspace-deps.ts` 的 `WORKSPACE_PACKAGES`、
+`.github/workflows/ci.yml` 的 `workspace-build` tar 清单、`scripts/check-workspaces.mjs`
+的 `PACKAGES[*].needs` / `DEPENDENTS` —— 这三份描述的是**仓库**（磁盘上有哪些包、
+谁依赖谁），不是某一次渠道构建的产物：
+
+* `scripts/verify-inventories.mjs` 拿它们与磁盘逐一互拍，少一行就红；
+* CI 的 `gate` job 只构建**一次**、产出**一份** `workspace-build.tgz` 给整条渠道矩阵
+  复用 ⇒ 按某一个渠道收窄它会让同一次 CI 里其它渠道的打包 job 缺产物；
+* 真正让模块不进产物的是 staging `package.json` 的依赖裁剪，与这三份清单无关。
+
+所以变体只允许**从这些清单里挑选**（`variantPrunedDirs()` 读它们、不改它们）。
+这条口径由 `packages/host/desktop/tests/channel-variant-packaging.spec.ts` 的
+「三份静态清单**不随变体收窄**」逐条钉住（含"清单里不许出现按变体条件删行的分支"）。
+
+### 6bis.3 `connectors` 关掉时预构建**照样建它**（有意的）
+
+`@picoaide/dsh-browser` 的 `deps` 里有 `packages/host/connectors` ——
+`prebuild-workspace-deps.ts` 的注释第 2 条记了真实理由：**browser 的 `tests/*.spec.ts`
+值导入真实 `ConnectorStore`**（`src/` 自 2026-10-13 起已不读它的类型，契约在
+`src/connectors-contract.ts` 本地声明），运行期那一次惰性 require 也解析到那份 `lib/`。
+跳过它会让**保留包自己的 check** 失败。反正它不会进 asar（依赖清单已经摘了）。
+`variantPrunedDirs(features)` 因此只在"没有保留包把它当构建输入"时才跳过 —— 今天实际
+能跳的只有 `capability-center`。
+
+**2026-10-14 R2 审计 S1 的补充**：它之所以"依赖清单已经摘了"还不进 asar，靠的是
+**同时**把 `packages/host/browser/package.json` 里那条生产依赖改成 `peerDependencies`
+（+ `devDependencies` 副本）—— 否则 electron-builder 的传递生产依赖收集会顺着
+`browser → connectors` 把整包重新拖进 asar（实测 `--dir` 打包 exit 1）。见
+`scripts/check-workspaces.mjs` 的 `PACKAGES[dsh-browser]` 注释。
+
+### 6bis.4 新增一个功能模块时，要登记什么（一处）
+
+`packages/host/desktop/src/channel-features.ts` 的 `FEATURE_MODULE_SURFACES` 加一条：
+`module`（= `FEATURE_MODULES` 的成员，逐字）、`packages`（npm 包名，同时是依赖键与
+bundle 层名）、`rows`（profile 行 id）、`directories`（仓库相对目录）。
+两边清单的一致性由 `scripts/channel-variant.ts` 的 `assertModuleSurfaceCoverage()`
+逐键对拍（少一个键 / 多一个键 / 顺序不同都红），并由 `tests/channel-variant.spec.ts`
+断言。
+
+**今天裁剪不了的模块必须写 `blockedReason`**（见 §6bis.5），构建期
+`assertChannelVariantSupported()` 会拒建并点名原因 —— 不许"照常构建"。
+
+### 6bis.5 `apps`：今天**拒建**，不是"支持了"
+
+`apps` 在表里带 `blockedReason`：桌面壳自身**静态 import** 它的宿主包 ——
+`src/main.ts`（`electron-adapter` / `app-proof` / 两个服务常量）、
+`src/app-ai-runner.ts`（`ai-chat` + `WASM_APPS_AI_RUNNER_SERVICE`）、
+`src/wasm-apps-windows.ts`（`WASM_APPS_WINDOW_ADAPTER_SERVICE`）。tsdown 把
+`dependencies` 当 external ⇒ 依赖清单里摘掉它 = `lib/main.js` 起来即
+`ERR_MODULE_NOT_FOUND`（整个客户端打不开），而不是"少一个面板"。
+
+**本轮的选择是 fail-loud 拒绝**（`features.apps=false` 时构建立即失败并列出这三处），
+而不是产出一个起不来的客户端、也不是"照常构建装作裁了"。要真正支持它，先把这三处
+改成"模块不在时不接线"，再从 `blockedReason` 移除本条。这正是 §6.2 第 4 条的同一件事。
+
+### 6bis.6 判据在哪（P2 新增/改动的）
+
+* **缺席判据（承重）**：`verify-packaged-runtime.ts` 的 `assertFeatureModulePresence()`
+  —— 复用 `@electron/asar` 的 `listPackage` + `scripts/asar-entry-path.ts` 的
+  `normalizeAsarEntry()`（**不自拼平台分隔符**，见 2026-09-12 的 Windows 实测）。
+  **双侧**：关闭的模块整包不许出现；全开变体必须看得见每一个模块（量具自检 ——
+  只判"关闭变体里没有"是恒真的，一个空产物也满足）。
+  物理布局（`asar: false`）走同一条判据的目录形态（`assertFeatureModuleDirs()`）。
+* **哨兵串只作副证**：`channel-constants.ts` 的 `featureSentinel()` 不进这条判据 ——
+  实测未引用的字符串、以及"被调用但返回值被丢弃"的路径都会被链接器/打包器丢掉 ⇒
+  "产物里没有这个串"推不出"模块被裁掉了"。
+* **变体视图**：`packagedRuntimeVariantView()` 是三张必需表 + 每包下限的**唯一折叠点**
+  （含总下限按"三张表的并集"削减 —— 按单张表削减会把 connectors 这种"扁平表 0 条"
+  的包算错，让变体构建假红）。
+* **全开零影响**：`tests/channel-variant-packaging.spec.ts` 断言无清单时视图的每一栏
+  与裸表**同一个对象/逐元素相同**；`tests/channel-variant.spec.ts` 断言无清单时
+  `stagePackAppRoot()` 产出的 `package.json` 与改造前逐字相同。
+* **判据的权威是随包声明**（2026-10-14 R2 审计 S3 修复）：`resolveVariantManifestUnderDeclaration()`
+  = 先 `declaredFeaturePrune()`（读随包 `build/channel.json` 的 `features`）再与
+  `temp/channel-variant.json` 对拍，`assertVariantDeclarationConsistency()` 三态 fail-loud
+  （声明有关闭+清单缺失 / 两侧不一致 / 声明全开+残留清单）。缺省参数走这条路；
+  显式传 `null`/对象是测试与人工复核接缝（**绕过**对拍，否则夹具无法在任意机器
+  状态下构造全开基线）。
+* **物理布局的自检臂要直接调用**（2026-10-14 R2 审计 P2-1）：
+  `assertFeatureModuleDirs()` 的"未被关闭的模块必须存在"那一臂在
+  `verifyPackagedRuntime()` 里**不可达**（被更早的必需项 / 必需导出判据先接住），
+  所以导出了它并有 `tests/channel-variant-packaging.spec.ts` 的直接调用用例；
+  承重方向（关闭的模块仍在 ⇒ 红）在两条路径上都可达。
+
 ## 7. 判据在哪（本轮新增/改动的）
 
 - **行为零变化的判据 = 既有测试**：四条技能路由与两条应用面注册块的
@@ -207,4 +327,7 @@ wasm-apps-host；`account-card` → capability-center），`account-card` 另有
   P3（webadmin）都不在本轮；
 - 没有让 `desktop/src/{main,app-ai-runner,wasm-apps-windows}.ts` 变得可选 —— 那三处
   是 P2 的工作面（§5 白名单第一行），本轮的产出是"它现在是**仅剩**的三处"；
+  **P2 的结论（2026-10-13）**：这三处今天仍然是 `apps` 关闭变体的唯一阻塞点，
+  因此 `apps` 在 `FEATURE_MODULE_SURFACES` 里带 `blockedReason`、构建期**拒建**
+  （见 §6bis.5）—— `skills` 与 `connectors` 已经可以真的裁出产物；
 - 没有动 webadmin 与服务端 Go 侧的路由/作业条件化。

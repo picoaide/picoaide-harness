@@ -36,6 +36,7 @@ import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statS
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isDirectInvocation } from './direct-invocation.mjs'
+import { channelVariantDirFor, readChannelVariantManifest } from './channel-variant.ts'
 
 /**
  * 随包发布的应用根条目（白名单；**只列运行期需要的**）。
@@ -159,6 +160,55 @@ export function stagePackAppRoot(packageRoot, outDir = 'dist') {
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
   for (const key of ['build', 'devDependencies', 'scripts', 'peerDependencies', 'resolutions', 'files']) {
     delete manifest[key]
+  }
+  // 功能模块变体（2026-10-13，P2）：**这是"模块代码不进产物"的真开关**。
+  // 实测口径（见 docs/decisions/2026-10-13-module-host-face-ownership.md §2）：
+  // app.asar 里 `@picoaide/*` 的集合恰好等于这份 `dependencies` 的集合 ——
+  // 从 profile 的 bundle 层里摘掉某模块只等于"不加载"，文件照样进包。
+  //
+  // 清单不存在（= 三个模块全开 / 官方渠道）时**一个键都不碰**：这正是
+  // "官方与全开变体逐字节等价于改造前"的落点（`applyChannelVariant()` 只在有模块
+  // 被关掉时写清单，并且每次构建都先清残留）。
+  const variant = readChannelVariantManifest(channelVariantDirFor(packageRoot))
+  if (variant !== undefined) {
+    const pruned = new Set(variant.packages)
+    const dependencies = manifest.dependencies
+    const dropped = []
+    if (dependencies !== null && typeof dependencies === 'object' && !Array.isArray(dependencies)) {
+      for (const name of Object.keys(dependencies)) {
+        if (!pruned.has(name)) continue
+        dropped.push(name)
+        delete dependencies[name]
+      }
+    }
+    // `dsh.bundle.patch` 里若按**裸包名**登记了模块层，同样要摘（相对路径形态的
+    // 层由 profile 的 bundle 清单负责，见 src/profile.ts 的 REQUIRED_BUNDLES）。
+    // 今天桌面这份 `dsh.bundle.patch` 只有 `./cordis.patch.yml`，所以这一步是
+    // 空操作 —— 留着是因为"登记口径换成裸包名"是随时可能发生的一次改动，
+    // 那时漏摘的后果是"包不在、层还在"（组合期解析不到包名，应用起不来）。
+    const dsh = manifest.dsh
+    if (dsh !== null && typeof dsh === 'object' && !Array.isArray(dsh)) {
+      const bundle = dsh.bundle
+      if (bundle !== null && typeof bundle === 'object' && !Array.isArray(bundle)) {
+        const patch = bundle.patch
+        if (Array.isArray(patch)) {
+          bundle.patch = patch.filter(entry => !(typeof entry === 'string' && pruned.has(entry)))
+        } else if (typeof patch === 'string' && pruned.has(patch)) {
+          delete bundle.patch
+        }
+      }
+    }
+    // 逐条点名而不是只印一个数：漏摘一条就是"客户拿到他明确不想要的东西"。
+    console.log(
+      `pack-app-root: 变体 ${variant.variant}（关闭 ${variant.modules.join(', ')}）—— `
+      + `从 staging package.json 摘掉 ${dropped.length} 条依赖: ${dropped.join(', ') || '(无)'}`,
+    )
+    if (dropped.length !== pruned.size) {
+      throw new Error(
+        `pack-app-root: 变体清单要求摘掉 ${pruned.size} 个包，但 staging package.json 的 dependencies 里只找到 `
+        + `${dropped.length} 个（${[...pruned].join(', ')}）—— 清单与依赖清单漂移，产物会带着"声明关了却仍在包里"的模块`,
+      )
+    }
   }
   writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
 

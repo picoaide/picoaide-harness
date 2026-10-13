@@ -387,14 +387,23 @@ const PACKAGES = [
   //      名字；那时 browser 依旧 typecheck 通过、两个夹具 spec 按"连接器包不在检出"
   //      自行跳过（判据见各自的文件头），插件运行期走 fail-closed
   //      （`createCredentialResolver` 返回 undefined）。
-  //      **清单侧仍是 hard `dependencies`（不是可选依赖），这是实测结论**：本仓
-  //      `.yarnrc.yml` 是 `nmHoistingLimits: workspaces`，可选 peer 不会被链接进
-  //      `packages/host/browser/node_modules`（实测把 connectors 挪到 optional peer
-  //      后 `require.resolve('@picoaide/dsh-connectors/store')` 直接 MODULE_NOT_FOUND
-  //      ⇒ dev/测试里凭据功能整体失效）；`optionalDependencies` 会链接，但它对
-  //      `workspace:*` 缺席**不容错**（合成工程实测：删掉那个 workspace 后
-  //      `yarn install` exit 1）。所以"可选"这一语义只落在它真实成立的地方 ——
-  //      运行期那一次惰性 `require` + fail-closed 解析器，而不是包清单里的一句声明。
+  //      **清单侧（2026-10-14 R2 审计 S1 修复）**：connectors 已从
+  //      `packages/host/browser/package.json` 的 `dependencies` 移到
+  //      `peerDependencies`（另加一份 `devDependencies` 供本机 dev/测试解析）。
+  //      原因是 electron-builder 的传递生产依赖收集
+  //      （`traversalNodeModulesCollector` 的 `buildPackage(pkg.dependencies,...)` →
+  //      `appFileCopier.js:161-163`）只递归 `dependencies`/`optionalDependencies`，而
+  //      desktop 的暂存层只摘**它自己**的直接依赖 ⇒ browser 那条边会把 connectors
+  //      整包重新拖进 asar（实测：`--dir` 打包 exit 1，"connectors 仍随包"）。
+  //      peer 不递归、devDependencies 只活在检出里（不进产物）；而 browser 本来就把
+  //      "模块不在"当**正常**状态（`createCredentialResolver` 返回 undefined、两条
+  //      工具 fail-closed）⇒ 这条边语义上就是"由装配根提供、缺席也成立"。
+  //      **不要**放 `optionalDependencies`（收集器照样递归它）；也**不要**只放
+  //      optional peer：`nmHoistingLimits: workspaces` 下可选 peer 不会被链接进
+  //      `packages/host/browser/node_modules`（实测 `require.resolve` 直接
+  //      MODULE_NOT_FOUND ⇒ dev/测试里凭据功能整体失效），所以是"必需 peer +
+  //      devDep 副本"。`yarn install --immutable` 仍绿（peer 由 desktop 的
+  //      `dependencies` 满足；`yarn.lock` 只有 browser 那条 workspace 条目多一行）。
   { name: '@picoaide/dsh-browser', dir: 'packages/host/browser', needs: ['@picoaide/dsh-host-home', '@picoaide/dsh-host-locale', '@picoaide/dsh-connectors', '@picoaide/dsh-foot-menu'] },
   // 客户端专属 WASM 应用 origin（`picoaide-app://` 协议 handler + 本机打开路由）：
   // 2026-09-19 起它经 **browser 包导出的 surface seam**（`@picoaide/dsh-browser/surface`）

@@ -29,6 +29,12 @@ import {
   type ProfileManifest,
   type RuntimeResolution,
 } from '@deepseek-ai/dsh-app-boot'
+import {
+  FEATURE_MODULE_BUNDLES,
+  closedFeatureModules,
+  prunedFeatureBundles,
+  type FeatureSwitches,
+} from './channel-features.ts'
 import { resolveDshHome } from './desktop-home.ts'
 import { parseDocument } from 'yaml'
 import type { DesktopShellMode } from './runtime.ts'
@@ -115,7 +121,57 @@ const REQUIRED_BUNDLES = [
 ]
 /** 携带桌面自身组装补丁层的 bundle（见 `REQUIRED_BUNDLES` 的说明）。 */
 const DESKTOP_LAYER_CARRIER_BUNDLE = '@picoaide/dsh-enterprise'
-const REQUIRED_BUNDLE_SET = new Set(REQUIRED_BUNDLES)
+
+/**
+ * 安装面**自有**的 bundle 层 = 必需层 ∪ 全部功能模块层（不论开关）。
+ *
+ * 与 {@link requiredDesktopBundles} 的区别是承重的：`desktopBundleList()` 把
+ * "不在这个集合里"的名字当成**第三方 bundle 保留下来**（用户自己装的插件不能被
+ * 冲掉）。若只把关闭的模块从**活动**清单里去掉、却让它落在"安装面自有"集合之外，
+ * 它就会从 `$DSH_HOME` 里那份跨版本保留的 `dsh.profile.bundles` 中被当成第三方
+ * **原样加回来** ⇒ 升级到变体版之后客户端去加载一个已经不随包的模块。
+ * 所以"自有"这个集合必须**恒**包含全部功能模块层，与开关无关。
+ */
+const INSTALLATION_BUNDLE_SET = new Set<string>([...REQUIRED_BUNDLES, ...FEATURE_MODULE_BUNDLES])
+
+/**
+ * 本次运行**真的该装配**的 bundle 层（= 必需层减去被关闭模块的层）。
+ *
+ * 三个消费方共用它：`desktopBundleList()`（写 `dsh.profile.bundles`）、
+ * `ensureDesktopProfile()` 的首次 `initProfile()`、以及"必需层被跳过"的 fail-loud
+ * 判定。**任何地方都不得再用裸 `REQUIRED_BUNDLES` 做运行期判定** —— 那会让变体版
+ * 去解析一个不随包的模块（`createRequire().resolve()` 抛错、应用起不来）。
+ *
+ * `features` 缺省取自**随包渠道包**（`build/channel.json` 的 `features`，
+ * 由 `stageChannelProfile()` 写入）：没有渠道包时全开 ⇒ 官方与"没写 features"的
+ * 渠道逐字节等价于改造前。
+ * @param features - 功能模块开关（测试注入；缺省读随包渠道包）。
+ * @returns 活动 bundle 层（顺序 = `REQUIRED_BUNDLES` 的顺序）。
+ */
+export function requiredDesktopBundles(features?: FeatureSwitches): readonly string[] {
+  const pruned = new Set(prunedFeatureBundles(features ?? readDesktopChannelProfile()?.features))
+  return pruned.size === 0 ? REQUIRED_BUNDLES : REQUIRED_BUNDLES.filter(name => !pruned.has(name))
+}
+
+/**
+ * 本次运行被模块开关摘掉的 bundle 层（排障与自检用；全开时为空）。
+ * @param features - 功能模块开关（缺省读随包渠道包）。
+ * @returns 被摘掉的包名（顺序 = `REQUIRED_BUNDLES` 的顺序）。
+ */
+export function prunedDesktopBundles(features?: FeatureSwitches): readonly string[] {
+  return prunedFeatureBundles(features ?? readDesktopChannelProfile()?.features)
+}
+
+/**
+ * 本次运行被关掉的模块名（`features` 里显式 `false` 的那些；全开时为空）。
+ * @param features - 功能模块开关（缺省读随包渠道包）。
+ * @returns 模块名列表。
+ */
+export function closedDesktopFeatureModules(features?: FeatureSwitches): string[] {
+  return closedFeatureModules(features ?? readDesktopChannelProfile()?.features)
+}
+
+/** 上游退役的 bundle（识别出来后从第三方清单里剔掉，不做 "保留"）。 */
 const OBSOLETE_DESKTOP_BUNDLE_SET = new Set(['@deepseek-ai/dsh-desktop-app'])
 const INSTALL_ANCHOR = fileURLToPath(new URL('../package.json', import.meta.url))
 // 十一个自有组装补丁层（本包的 `cordis.patch.yml` + enterprise / capability-center /
@@ -750,10 +806,11 @@ export interface SkippedOptionalEntry {
  * @returns base, Web carrier, then every third-party bundle in prior order.
  */
 export function desktopBundleList(current: readonly string[]): string[] {
-  const thirdParty = current.filter(name => !REQUIRED_BUNDLE_SET.has(name)
+  const required = requiredDesktopBundles()
+  const thirdParty = current.filter(name => !INSTALLATION_BUNDLE_SET.has(name)
     && name !== DESKTOP_PACKAGE_NAME
     && !OBSOLETE_DESKTOP_BUNDLE_SET.has(name))
-  return [...REQUIRED_BUNDLES, ...thirdParty]
+  return [...required, ...thirdParty]
 }
 
 /** Return whether two ordered string lists are identical. */
@@ -768,7 +825,7 @@ function sameList(left: readonly string[], right: readonly string[]): boolean {
  */
 export function ensureDesktopProfile(home: string = resolveDshHome()): string {
   const dir = resolveProfileDir(DESKTOP_PROFILE_NAME, home)
-  if (!existsSync(join(dir, 'package.json'))) initProfile(dir, REQUIRED_BUNDLES)
+  if (!existsSync(join(dir, 'package.json'))) initProfile(dir, requiredDesktopBundles())
   const manifest = readProfileManifest(BIN_NAME, dir)
   const rawBundles = (manifest.dsh?.profile as { bundles?: unknown } | undefined)?.bundles
   if (rawBundles !== undefined
@@ -996,8 +1053,11 @@ export async function prepareDesktopProfile(
   // 语义 —— 一个坏的三方 bundle 不该让整个应用起不来，见
   // `tests/desktop-plugins.spec.ts` 的坏补丁用例），那里继续由 `skippedBundles` 如实上报，
   // 不升级成致命错误。
+  // 「必须层」= 本次变体**真的该装配**的那些（见 `requiredDesktopBundles`）：被模块开关
+  // 摘掉的层不在这里，所以"包随变体被裁掉"不会被这条 fail-loud 误报成"必需层被跳过"。
+  const activeRequiredBundleSet = new Set(requiredDesktopBundles())
   const skippedRequiredBundles = profile.skippedBundles
-    .filter(bundle => REQUIRED_BUNDLE_SET.has(bundle.packageName))
+    .filter(bundle => activeRequiredBundleSet.has(bundle.packageName))
   if (skippedRequiredBundles.length > 0) {
     throw new Error(
       `${BIN_NAME}: required profile bundles were skipped: `

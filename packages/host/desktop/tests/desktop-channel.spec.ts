@@ -37,6 +37,10 @@ describe('desktop channel profile', () => {
       deepLinkScheme: 'picoaide',
       appOriginScheme: 'acme-app',
       deepLinkName: 'Acme AI',
+      // 功能模块开关缺省=全开（渠道没写 features；2026-10-13 P2）。这三个键全在，
+      // 是因为运行期消费方（profile 的 bundle 层 / startup-rows 的必需行）要按
+      // "显式关掉"做减法，而不是各自再实现一次"缺省全开"。
+      features: { skills: true, apps: true, connectors: true },
       // 出口策略缺省=禁止代理（渠道没配 desktop.allow_system_proxy）。
       allowSystemProxy: false,
       // 语音模型部署面缺省=空（渠道没配 speech_* 三项 ⇒ 公网直连下载）。
@@ -53,6 +57,27 @@ describe('desktop channel profile', () => {
     })
   })
 
+  it('features：显式关闭的模块被如实读出，畸形取值一律按"开着"处理', () => {
+    // 方向是承重的：把畸形值当"关"会让客户端去加载一个**不随包**的模块
+    // （变体构建里那个包已经被依赖裁剪摘掉了）⇒ 启动期 ERR_MODULE_NOT_FOUND。
+    // 反过来把畸形值当"开着"，最差只是多装配一个模块 —— 而"真被裁掉的模块"
+    // 在构建期由 `assertChannelVariantSupported()` / 依赖裁剪拦下，到不了这里。
+    const closed = parseDesktopChannelProfile(channelValue({
+      features: { skills: false, apps: false, connectors: false },
+    }))
+    expect(closed?.features).toEqual({ skills: false, apps: false, connectors: false })
+    const partial = parseDesktopChannelProfile(channelValue({ features: { apps: false } }))
+    expect(partial?.features).toEqual({ skills: true, apps: false, connectors: true })
+    for (const raw of ['false', 0, null, [], { skills: 'false' }]) {
+      const parsed = parseDesktopChannelProfile(channelValue({ features: raw }))
+      expect(parsed?.features, `features=${JSON.stringify(raw)} 被当成了"关闭"`).toEqual({
+        skills: true,
+        apps: true,
+        connectors: true,
+      })
+    }
+  })
+
   it('prefers the desktop section over the identity display name', () => {
     expect(parseDesktopChannelProfile(channelValue({
       desktop: { product_name: 'Acme Assistant', window_title: 'Acme 助手' },
@@ -66,6 +91,7 @@ describe('desktop channel profile', () => {
       deepLinkScheme: 'picoaide',
       appOriginScheme: 'acme-app',
       deepLinkName: 'Acme Assistant',
+      features: { skills: true, apps: true, connectors: true },
       allowSystemProxy: false,
       speech: { modelDirectory: undefined, vadModelPath: undefined, modelOrigin: undefined },
       brand: {
