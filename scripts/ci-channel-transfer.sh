@@ -27,6 +27,11 @@
 #   … pull  --list channels.list --to release-artifacts
 #   … clean --list channels.list
 #
+# `push` 与 `clean` 还会顺手做一次**孤儿前缀清扫**(2026-10-13):按对象年龄删掉
+# `_transfer/` 下早于阈值(缺省 24h)的残留 —— 见下面 orphan_sweep 的注释。
+# 手工清理存量(阈值 0 = 除本次前缀外全删):
+#   … clean --list channels.list --orphan-max-age-hours 0 [--orphan-dry-run]
+#
 # 退出码:0 成功;非 0 失败(缺凭据且存在品牌渠道时必须失败 —— 静默跳过会让
 # 品牌渠道"零交付"且没有任何信号)。
 set -euo pipefail
@@ -44,12 +49,17 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LIST="channels.list"
 STAGE="client-assets"
 TO="release-artifacts"
+# 孤儿前缀清扫的年龄阈值(小时)与预演开关;env 与命令行都能给(命令行优先)。
+ORPHAN_MAX_AGE_HOURS="${TRANSFER_ORPHAN_MAX_AGE_HOURS:-24}"
+ORPHAN_DRY_RUN=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --list) LIST="$2"; shift 2 ;;
     --stage|--from) STAGE="$2"; shift 2 ;;
     --to) TO="$2"; shift 2 ;;
+    --orphan-max-age-hours) ORPHAN_MAX_AGE_HOURS="$2"; shift 2 ;;
+    --orphan-dry-run) ORPHAN_DRY_RUN=1; shift ;;
     *) echo "ci-channel-transfer: 未知参数 $1" >&2; exit 2 ;;
   esac
 done
@@ -250,10 +260,9 @@ done
 #   · 仍然是尽力而为:clean 的失败不阻断发布(它的语义是"取回后销毁",不是发布判据)。
 #
 # 说明(历史残留,要认账):**本次改动之前**那些已经结束的 run 留下的 attempt 前缀,
-# 没有任何代码路径会再枚举到它们(脚本只清理**本 run** 的前缀)。它们不可猜测、但桶是
-# 公开读的,处置只能靠运维从桶侧按 `_transfer/<run id>-<attempt>-` 形态人工清理
-# (R2 控制台按前缀列 + 删;或在部署机跑一次
-#  `aws s3 ls s3://$R2_BUCKET/_transfer/` 找带第二段数字的旧前缀)。
+# 当时没有任何代码路径会枚举到它们(脚本只清理**本 run** 的前缀)。2026-10-13 起由下面的
+# orphan_sweep 按**对象年龄**兜住,不再依赖人工从桶侧清理;存量可以用
+# `clean --orphan-max-age-hours 0` 一次清干净(见脚本头的用法段)。
 legacy_prefix_sweep() {
   [ "$MODE" = clean ] || return 0
   # **缺 GITHUB_RUN_ID 就跳过**(2026-09-27 第二十七轮 FIX-37)。
@@ -288,5 +297,97 @@ legacy_prefix_sweep() {
   done < <(printf '%s\n' "$listing" | awk '$1 == "PRE" { sub(/\/$/, "", $2); print $2 }')
 }
 legacy_prefix_sweep
+
+# ---- 孤儿前缀清扫(2026-10-13)----
+#
+# 为什么需要:legacy_prefix_sweep 只能枚举**本 run** 的前缀,而下面这些形态留下的对象
+# 它一个都碰不到 —— run 中途失败/被取消(销毁步根本没跑)、历史上把 attempt 编进前缀的
+# 旧格式、以及本地/合成调用。它们的内容是**客户安装包**,而桶是公开读的,所以"取回后
+# 立即销毁"这句承诺对它们不成立(2026-09-26 审计 Z3-1 第 3 条登记的就是这件事)。
+#
+# 判据形态:按对象 **LastModified 的年龄**删(缺省 24h),不是按 run id 猜:
+#   · 活着的 run 的产物年龄只有分钟级 ⇒ 阈值天然把它们排除在外,三个平台 job 并发
+#     push 也不会互删 —— 判据不依赖"当前 run 是谁"这个无法自证的事实;
+#   · 不依赖 GITHUB_RUN_ID(与 legacy_prefix_sweep 相反)⇒ 本机、无 CI 变量时同样能清;
+#   · 只列 `_transfer/` 前缀,且**永不**删本次的 BASE(前缀排除是硬条件,不看年龄);
+#   · 阈值 0 是给"补做存量清理"用的:先 `--orphan-dry-run` 看数量,再去掉预演真删。
+#
+# 时间口径:两端都用 UTC ISO8601 字符串比较(aws 回 `2026-10-13T01:23:45.000Z`,node 的
+# toISOString() 同形)⇒ 不依赖 `date -d`(GNU 有、BSD/macOS 没有,而本脚本在三个平台的
+# job 里都要跑)。
+#
+# 失败处置:**尽力而为 + 出声**。它与 clean 的其余部分同一语义("取回后销毁"是收尾步,
+# 不是发布判据),所以失败不阻断发布;但必须打印 `::warning::` —— 静默失败正是这类残留
+# 能攒下来的原因(与 legacy_prefix_sweep 缺 run id 时"跳过并说出来"同口径)。
+orphan_sweep() {
+  # pull 不扫:它的职责是把本次产物取回来,清理留给 push/clean(少一次列表往返)。
+  if [ "$MODE" = pull ]; then return 0; fi
+  case "$ORPHAN_MAX_AGE_HOURS" in
+    ''|*[!0-9]*)
+      echo "::error::--orphan-max-age-hours 必须是非负整数(小时),实际 '$ORPHAN_MAX_AGE_HOURS'" >&2
+      exit 2 ;;
+  esac
+  local cutoff listing stale prefix removed=0 failed=0
+  cutoff="$(node -e 'const h = Number(process.argv[1]); process.stdout.write(new Date(Date.now() - h * 3600e3).toISOString())' "$ORPHAN_MAX_AGE_HOURS")" || {
+    echo "::warning::孤儿前缀清扫:算不出截止时间(node 不可用),本次不清扫" >&2
+    return 0
+  }
+  # 输出先捕获、经脱敏再用(键名里就是由 slug 派生的安装包文件名,2026-09-11 泄漏形态)。
+  if ! listing="$(brand_run_capture aws_cmd s3api list-objects-v2 \
+      --bucket "$R2_BUCKET" --prefix "_transfer/" \
+      --query 'Contents[].[Key,LastModified]' --output text)"; then
+    echo "::warning::孤儿前缀清扫:列不出 _transfer/ 下的对象,本次不清扫(存量残留仍在公开读的桶里)" >&2
+    return 0
+  fi
+  [ -n "$listing" ] || return 0
+  # **删除目标必须是一级前缀,不能是对象键**(2026-10-13 实测的坑):上面那份 listing 已经
+  # 过 `brand_sanitize`,键里的品牌文件名会变成 `***-2.7.0-x64-Setup.exe` —— 拿它当删除
+  # 目标就是"删一个不存在的对象",真 aws 报 404、脚本却按自己的计数说"已删"。前缀
+  # `_transfer/<run id>-<token>/` 只含 run id 与 HMAC,不含任何品牌串,可以安全回传。
+  # 聚合口径:取每个前缀里**最新**的对象时间 ⇒ 只有整个前缀都超龄才删,写到一半的
+  # run(哪怕它已经开始推第一个平台)绝不会被删掉半套。
+  stale="$(printf '%s\n' "$listing" | awk -v cut="$cutoff" -v keep="_transfer/${RUN}-${TOKEN}/" '
+    {
+      ts = $2
+      if (ts == "" || ts == "None") next
+      n = split($1, seg, "/")
+      if (n < 3) next
+      p = seg[1] "/" seg[2] "/"
+      if (p == keep) next
+      if (!(p in newest) || ts > newest[p]) newest[p] = ts
+    }
+    END { for (p in newest) if (newest[p] < cut) print p }')"
+  [ -n "$stale" ] || return 0
+  while IFS= read -r prefix; do
+    [ -n "$prefix" ] || continue
+    # 形状硬校验(fail-closed):只认 `_transfer/<run id>-<…>/` 这一级。
+    # 形状对不上就跳过 —— 这条是为了"绝不因为一次脱敏/解析异常删错前缀"。
+    case "$prefix" in
+      _transfer/local-*/|_transfer/[0-9]*-*/) ;;
+      *)
+        echo "::warning::孤儿前缀清扫:跳过形状不认识的前缀(未删)" >&2
+        continue ;;
+    esac
+    if [ "$ORPHAN_DRY_RUN" = "1" ]; then
+      removed=$((removed + 1))
+      continue
+    fi
+    # 用 brand_run_checked(而不是 best_effort):best_effort 恒返回 0,计数会把失败
+    # 也报成"已删" —— 那正是这条清理要消灭的静默失败。
+    if brand_run_checked aws_cmd s3 rm --recursive --only-show-errors "s3://${R2_BUCKET}/${prefix}"; then
+      removed=$((removed + 1))
+    else
+      failed=$((failed + 1))
+    fi
+  done <<< "$stale"
+  if [ "$failed" -gt 0 ]; then
+    echo "::warning::孤儿前缀清扫:${removed} 个已清、${failed} 个清理失败(阈值 ${ORPHAN_MAX_AGE_HOURS}h;失败的仍在桶里)" >&2
+  elif [ "$ORPHAN_DRY_RUN" = "1" ]; then
+    echo "ci-channel-transfer: 孤儿前缀清扫(预演):${removed} 个残留前缀超过 ${ORPHAN_MAX_AGE_HOURS}h 且不属于本次运行(未删)"
+  else
+    echo "ci-channel-transfer: 孤儿前缀清扫:已清 ${removed} 个超过 ${ORPHAN_MAX_AGE_HOURS}h 的残留前缀"
+  fi
+}
+orphan_sweep
 
 echo "ci-channel-transfer: ${MODE} 完成(${PRIVATE_COUNT} 个品牌渠道经 R2 中转,渠道名与路径均未进入公开面)"

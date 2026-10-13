@@ -336,7 +336,16 @@ NO_CACHE='no-cache'
 # 保留最近 N 个版本(用户定案);版本序必须用 sort -V:字面序里 2.10.0 < 2.9.0。
 # 留存**总数**是该口径(`$VER` + 次新的 KEEP-1 个,见下面 prune 段),不是"KEEP 个
 # 之外再加本次版本"。
-KEEP=3
+#
+# 2026-10-13 起 KEEP=2(3 → 2):客户端交付件随镜像分发之后单个渠道包已是 GB 级
+# (实测 v2.8.3-beta.1 的包 1,248,847,268 B,其中 1.22 GB 是三平台安装包),
+# 4 个渠道 × 3 版 ≈ 15 GB、× 2 版 ≈ 10 GB,而 R2 免费额度是 10 GB —— 3 版必然超。
+# 回滚只需要"退回上一版"这一格:客户侧升级序列本来就把升级前镜像固化成渠道 tag
+# (docs/deploy/AI-DEPLOY.md §6 第 0 步,稳定 1–2 天才清),更老的版本以 GitHub Release
+# (公开渠道)与本地镜像 tag 作为长期存档。
+# 改这个数字必须连同 docs/planning/2026-09-10-r2-update-server-runbook.md §3 与
+# scripts/verify-ci-scripts.mjs 的保留断言一起改(判据面同源,少改一处就是文档漂移)。
+KEEP=2
 
 # 探测负载与它声明的字节数(见脚本头注释 C-24):
 #   * `PROBE_PAYLOAD` 是唯一真源,写对象时用它(`printf '%s' "$PROBE_PAYLOAD"`);

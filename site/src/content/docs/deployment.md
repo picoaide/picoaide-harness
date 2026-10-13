@@ -119,7 +119,7 @@ https://release.picoaide.com/<渠道>/releases/<版本>/SHA256SUMS           ←
 | `client.version` | 随该版本镜像发布的客户端版本（与服务端同源） |
 | `published_at` | 该版本的发布时间（UTC） |
 
-- 更新服务器每个渠道**只保留最近 3 个版本**；更早的版本从
+- 更新服务器每个渠道**只保留最近 2 个版本**（最新 + 上一个）；更早的版本从
   [GitHub Release](https://github.com/picoaide/picoaide-harness/releases) 取（公开渠道的历史归档）；
 - GitHub Release **只发公开渠道**（官方 / 预发布）的镜像包与 `SHA256SUMS`；品牌渠道是客户定制交付，
   不进公开 Release；
