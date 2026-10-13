@@ -46,6 +46,15 @@ PICOAI_ADMIN_PASSWORD=admin123 bin/picoaide-server \
 - `--bootstrap-admin` + `PICOAI_ADMIN_PASSWORD` 首次创建超管；`PICOAI_MASTER_KEY` 可显式指定加密主密钥（不设则自动生成于 data 目录，请备份）。
 - 管理页：`http://localhost:8080/admin/`（用户 / 部门 / 网关 / 用量 / 商城 / 能力中心 / 品牌 / 门户）。
 - 无外网环境可 `go run scripts/mock-upstream.go` 起假上游联调网关。
+- **可选模块的变体（构建期开关）**：`make build-server GO_TAGS=<变体>` 同时决定 Go 的 `-tags`
+  与 webadmin 的 `FEATURES`（同一个串，`none` = 三个全关，缺省全开）；被关闭模块的接口不进
+  二进制、页面代码也不进 `dist`。**必须一起选**，只改一侧会出现"页面在、接口 404"。
+  口径与判据见 [../docs/decisions/2026-10-14-webadmin-feature-variant.md](../docs/decisions/2026-10-14-webadmin-feature-variant.md)
+  与 [../docs/decisions/2026-10-14-server-build-tags.md](../docs/decisions/2026-10-14-server-build-tags.md)。
+  变体面的两条门禁（`make check` 与 CI 的 `server` job 都跑）：`make webadmin-variant-tests`
+  （4 个非缺省变体各跑一遍 webadmin 单测 —— 关闭变体的回归在这里才拦得住）与
+  `make webadmin-check-features`（产物级双侧判据：真跑 5 次构建 + 逐页哨兵 + 源码图"模块页
+  只能经守卫 `import()` 进入"）。
 
 ## 文档
 

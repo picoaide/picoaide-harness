@@ -39,7 +39,7 @@ import { createHash, createHmac } from 'node:crypto'
 import { crc32, deflateSync } from 'node:zlib'
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import vm from 'node:vm'
 
@@ -8065,6 +8065,367 @@ exit 0
   }
 }
 
+// ---- 19. webadmin 变体接线：缺省值同源 / 哨兵落点登记 / 调度点（2026-10-14 独立审计 P1+P2）----
+//
+// 三条各自对应的现场（都能在没有本节的树里复现，且**都不产生任何红灯**）：
+//
+//   · **P2-4 缺省值三处手抄**：`server/Dockerfile` 的 `ARG FEATURES=` / `ARG GO_TAGS=`、
+//     `server/Makefile` 的 `GO_TAGS ?=`、`webadmin/features.mjs` 的 `DEFAULT_FEATURES_VARIANT`
+//     各自写一遍。把 FEATURES 缺省改成 `none` 而 GO_TAGS 不动 ⇒ 造出契约文档 §6 描述的
+//     "服务端裁了、管理端没裁"半通镜像，两侧判据都只看自己那半边 ⇒ 全绿。
+//   · **P2-6 webadmin 侧哨兵不在 P0 真源的判据面内**：哨兵串的唯一真源是
+//     `channel-constants.ts` 的 `featureSentinel()`（host 包的三处落点由本文件 3c 节判），
+//     而 webadmin 页面又手抄了同名串 —— 命名规则变更时 host 侧被强制更新、webadmin 侧
+//     （页面 + 产物判据）两边自洽地留着旧串，跨面语义静默分裂。
+//   · **P1-2 变体测试矩阵没有调度点**：`nav.test.ts` / `routes.test.ts` 按变体给期望
+//     （关掉的模块其侧栏条目 / 路由不得留在产物里），但 CI 的 `npm test` 与 `make check`
+//     缺省都只跑全开变体。实测（变异 M3：删掉 `nav.ts` 的开关过滤）：
+//     `FEATURES=skills,apps npm test` 红，而产物判据 `check:features` 与全开门禁全绿 ⇒
+//     关闭变体会发布一个指向不存在路由的侧栏条目（点进去 404），无人拦。
+//
+// 判据形态：**真跑**两侧的实现（渠道常量模块 + `webadmin/features.mjs`）比对**值**，
+// 而不是"文本里出现过某个串"；调度点（Makefile 目标 + `check` 调它 + CI server job 调它）
+// 三处缺一即红 —— "判据存在但没人启动"与"判据被删"在这里是同一件事。
+{
+  const constantsPath = join(root, 'packages/host/desktop/scripts/channel-constants.ts')
+  const constants = await import(pathToFileURL(constantsPath).href)
+  /** 模块清单的唯一真源（渠道契约）。 */
+  const MODULES = constants.FEATURE_MODULES
+  /** 缺省变体标识（全开）。 */
+  const DEFAULT_VARIANT = MODULES.join(',')
+
+  const featuresPath = join(root, 'server', 'webadmin', 'features.mjs')
+  check(existsSync(featuresPath), 'server/webadmin/features.mjs 必须存在（webadmin 侧变体解析的唯一真源）')
+  const webadminFeatures = existsSync(featuresPath) ? await import(pathToFileURL(featuresPath).href) : {}
+  check(JSON.stringify(webadminFeatures.FEATURE_MODULES) === JSON.stringify(MODULES),
+    'webadmin features.mjs 的 FEATURE_MODULES 必须与渠道契约（channel-constants.ts）逐字同源：'
+      + `实际 ${JSON.stringify(webadminFeatures.FEATURE_MODULES ?? null)}，期望 ${JSON.stringify(MODULES)}`
+      + ' —— 两个面各写一份模块清单时，"关掉的一个模块"在一侧存在、在另一侧不存在')
+  check(webadminFeatures.DEFAULT_FEATURES_VARIANT === DEFAULT_VARIANT,
+    `webadmin 的缺省变体必须是全部模块（期望 ${DEFAULT_VARIANT}，实际 `
+      + `${JSON.stringify(webadminFeatures.DEFAULT_FEATURES_VARIANT ?? null)}）—— 缺省变了而 Dockerfile/`
+      + 'Makefile 的缺省没变，就是"服务端裁了、管理端没裁"的半通镜像')
+
+  const dockerfile = readFileSync(join(root, 'server', 'Dockerfile'), 'utf8')
+  const makefile = readFileSync(join(root, 'server', 'Makefile'), 'utf8')
+
+  // ---- ① 三处缺省值必须同源（P2-4）------------------------------------------------
+  /**
+   * 取 Dockerfile 里某个 `ARG <name>=<默认值>` 的**全部**默认值（按出现顺序）。
+   *
+   * 2026-10-14（P2-5 收口）：`ARG GO_TAGS=` 现在出现**两次** —— webadmin stage 要拿它做
+   * fail-loud 断言（下面 ②b），Go stage 拿它喂 `go build -tags=`。旧口径（`exec` 只取第一条）
+   * 在"两处缺省值漂移"时不会有任何红灯：webadmin stage 写 `none`、Go stage 写全开照样过，
+   * 而那正是半通镜像的一种。所以改成取**全集** + 逐条相等。
+   * @param name - ARG 名。
+   * @returns 默认值数组（没有该 ARG ⇒ 空数组）。
+   */
+  const dockerArgDefaults = (name) =>
+    [...dockerfile.matchAll(new RegExp(`^ARG\\s+${name}=(.*)$`, 'gmu'))].map(match => match[1].trim())
+  const dockerFeatures = dockerArgDefaults('FEATURES')
+  const dockerGoTags = dockerArgDefaults('GO_TAGS')
+  const makeGoTags = (/^GO_TAGS\s*\?=\s*(.*)$/mu.exec(makefile) ?? [])[1]?.trim() ?? null
+  check(dockerFeatures.length >= 1 && dockerFeatures.every(value => value === DEFAULT_VARIANT),
+    `server/Dockerfile 的**每一处** \`ARG FEATURES=\` 缺省值都必须 = ${DEFAULT_VARIANT}`
+      + `（实际 ${JSON.stringify(dockerFeatures)}）—— 镜像的 webadmin 变体与 Go 变体是同一个串的`
+      + '两种编码，缺省不一致就是半通状态')
+  check(dockerGoTags.length >= 2 && new Set(dockerGoTags).size === 1 && dockerGoTags[0] === makeGoTags
+    && makeGoTags === DEFAULT_VARIANT,
+    'server/Dockerfile 的 `ARG GO_TAGS=` 必须**每一处**（webadmin stage 与 Go stage 各一处）都与'
+      + ' server/Makefile 的 `GO_TAGS ?=` 逐字相同、'
+      + `且 = ${DEFAULT_VARIANT}（Dockerfile ${JSON.stringify(dockerGoTags)} / Makefile ${String(makeGoTags)}）`
+      + ' —— 只判第一处时，两处漂移（webadmin 侧裁了、Go 侧没裁）不会有任何红灯')
+  check(/^FEATURES\s*\?=.*GO_TAGS/mu.test(makefile),
+    'server/Makefile 必须把 webadmin 的 FEATURES 从 GO_TAGS **机械翻译**出来'
+      + '（`FEATURES ?= $(if $(strip $(GO_TAGS)),$(GO_TAGS),none)` 那一行）—— 两个变量各自手填时，'
+      + '只覆盖一个就造出半通状态且没有任何红灯')
+
+  // ---- ② 变体开关必须写在依赖安装之后（P2-5：每个变体都要重跑 npm ci 的那个坑）------
+  {
+    // 三条都按**指令行**取（`^RUN …$`）：注释里提一句 `RUN npm run build` 不算数 ——
+    // 否则这条判据会被自己的说明文字骗过去（第一版就是这么红的）。
+    const npmCi = dockerfile.search(/^RUN npm ci\s*$/mu)
+    const argFeatures = dockerfile.search(/^ARG\s+FEATURES=/mu)
+    const envFeatures = dockerfile.search(/^ENV\s+FEATURES=\$FEATURES\s*$/mu)
+    const npmBuild = dockerfile.search(/^RUN npm run build\s*$/mu)
+    check(npmCi >= 0 && argFeatures > npmCi && envFeatures > npmCi && argFeatures < npmBuild && envFeatures < npmBuild,
+      'server/Dockerfile 的 `ARG FEATURES=` / `ENV FEATURES=$FEATURES` 必须写在 `RUN npm ci` **之后**、'
+        + '`RUN npm run build` **之前** —— ENV 是构建链上的一层，写在依赖安装之前时每换一个变体都会让'
+        + '它之后的全部层失效（实测：每个变体重跑一次全量 `npm ci`，含外网下载）')
+  }
+
+  // ---- ②b 两个变体 build-arg 必须**成对**：Dockerfile 里那条 fail-loud 断言（P2-5 收口）----
+  //
+  // 现场（2026-10-14 独立审计 P2-5）：`ARG FEATURES=`（webadmin stage）与 `ARG GO_TAGS=`
+  // （Go stage）此前**各自独立、无派生关系**，而 Dockerfile 里 Go stage 的注释又把
+  // `--build-arg GO_TAGS=`（空 = 三个模块全关）单独写成合法姿势 ⇒
+  // `docker build --build-arg GO_TAGS=apps,connectors .` 直接得到"服务端裁了、管理端全开"的
+  // 半通镜像（管理员点得进菜单、每个请求 404），而两侧判据都只看自己那半边 ⇒ 全绿。
+  // 决策文档 §6/§7.2 已把这条认账为"靠『只覆盖一个变量的入口纪律』"，但纪律只存在于散文里，
+  // 任何地方都没有红灯。
+  //
+  // 判据：Dockerfile 里必须**恰好一条**这样的 `RUN` 断言 —— 同时读 `$FEATURES` 与 `$GO_TAGS`、
+  // 做 `none` ⟺ 空 tag 集的翻译、不一致时 `exit 1`；且它必须落在 `ARG FEATURES=` **之后**、
+  // `RUN npm run build` **之前**（fail-loud 要在管理端构建之前发生，而不是构建完才发现）。
+  // 断言本身在构建期执行（实测：只传 GO_TAGS 或只传 FEATURES 都 EXIT=1、成对或缺省都通过、
+  // 且 `npm ci` 层跨变体仍命中缓存）—— 本判据保证它**不会**被后来的人删掉/改成恒真。
+  {
+    /** Dockerfile 里每个 `RUN` 指令的完整文本（含 `\` 续行）。 */
+    const dockerRunBlocks = [...dockerfile.matchAll(/^RUN[ \t]+((?:[^\n]*\\\n)*[^\n]*)$/gmu)]
+      .map(match => match[1])
+    /**
+     * "变体一致性断言"的问题清单（空 = 通过）。纯函数：量具自检直接喂合成样本。
+     * @param body - `RUN` 指令文本。
+     * @returns 问题说明数组。
+     */
+    const variantGuardProblems = (body) => {
+      if (!/\$\{?FEATURES\}?/u.test(body) || !/\$\{?GO_TAGS\}?/u.test(body)) {
+        return ['它没有同时读 `$FEATURES` 与 `$GO_TAGS`']
+      }
+      const problems = []
+      if (!/none/u.test(body) || !/=\s*""/u.test(body)) {
+        problems.push('它没有做 `none` ⟺ 空 tag 集的翻译（webadmin 用显式 `none` 表示三个全关，'
+          + 'Go 用空串；少了这一步，`make docker-image GO_TAGS=` 这条正常入口会被自己的断言拒掉）')
+      }
+      if (!/!=/u.test(body) || !/exit\s+1/u.test(body)) {
+        problems.push('它不一致时不会失败（缺 `!=` 比较或 `exit 1`）—— 那就只是一段打印')
+      }
+      return problems
+    }
+    const guardBlocks = dockerRunBlocks.filter(body => variantGuardProblems(body).length === 0)
+    const candidateBlocks = dockerRunBlocks.filter(body =>
+      /\$\{?FEATURES\}?/u.test(body) && /\$\{?GO_TAGS\}?/u.test(body))
+    check(guardBlocks.length === 1,
+      'server/Dockerfile 必须**恰好一条**"变体 build-arg 一致性"的 fail-loud `RUN`'
+        + `（同时读两个 build-arg + \`none\` 翻译 + 不一致时 \`exit 1\`；命中 ${guardBlocks.length} 条；`
+        + `同时读两个变量的 RUN 共 ${candidateBlocks.length} 条`
+        + (candidateBlocks.length === 0 ? ''
+          : `，问题：${candidateBlocks.map((body, at) =>
+            `#${at + 1} ${variantGuardProblems(body).join('、')}`).join('；')}`)
+        + '）。理由：只覆盖一个 build-arg 会造出半通镜像（页面在、接口 404）而两侧判据全绿')
+    const guardBody = guardBlocks[0] ?? ''
+    if (guardBody !== '') {
+      const argFeaturesAt = dockerfile.search(/^ARG\s+FEATURES=/mu)
+      const npmBuildAt = dockerfile.search(/^RUN npm run build\s*$/mu)
+      const guardAt = dockerfile.indexOf(guardBody)
+      check(argFeaturesAt >= 0 && guardAt > argFeaturesAt && npmBuildAt > guardAt,
+        'server/Dockerfile 的变体一致性断言必须在 `ARG FEATURES=` **之后**、`RUN npm run build` '
+          + '**之前** —— 写在构建之后时"半通镜像"已经建出来了（只是没被使用），'
+          + '而写在 `ARG FEATURES=` 之前时它读到的还是缺省值')
+    }
+    // ---- 量具自检：合成样本必须落在判据的两侧（与第 18 节 ⑨ 同一手法）----
+    // 上面那三条判据全在纯函数/文本匹配里，把 `variantGuardProblems` 掏空成 `return []`
+    // 会让任意 RUN 都算"断言"、把 `exit 1` 检查放宽到恒真也不会被真 Dockerfile 发现
+    // （真的那条本来就是绿的）。样本给出下限。
+    const GUARD_SAMPLES = [
+      {
+        name: '正例（与 Dockerfile 同形）',
+        body: 'set -eu; \\\n    expect="$FEATURES"; \\\n    if [ "$expect" = "none" ]; then expect=""; fi; \\\n'
+          + '    if [ "$expect" != "$GO_TAGS" ]; then echo x >&2; exit 1; fi',
+        ok: true,
+      },
+      {
+        name: '变异①：删掉 exit 1（不一致也只打印）',
+        body: 'expect="$FEATURES"; if [ "$expect" = "none" ]; then expect=""; fi; '
+          + 'if [ "$expect" != "$GO_TAGS" ]; then echo x >&2; fi',
+        ok: false,
+      },
+      {
+        name: '变异②：只读一个变量（另一半永远是缺省值）',
+        body: 'if [ "$FEATURES" != "skills,apps,connectors" ]; then exit 1; fi',
+        ok: false,
+      },
+      {
+        name: '变异③：没有 none 翻译（正常入口会被自己的断言拒掉）',
+        body: 'if [ "$FEATURES" != "$GO_TAGS" ]; then exit 1; fi',
+        ok: false,
+      },
+    ]
+    for (const sample of GUARD_SAMPLES) {
+      const problems = variantGuardProblems(sample.body)
+      check((problems.length === 0) === sample.ok,
+        `量具自检「${sample.name}」：期望${sample.ok ? '通过' : '报错'}，实际`
+          + `${problems.length === 0 ? '通过' : `报错(${problems.join('、')})`}`
+          + ' —— 这条谓词被改松/改紧了（改判据请同批改本样本并写明理由）')
+    }
+  }
+
+  // ---- ③ webadmin 侧哨兵落点必须登记且与真源同源（P2-6）----------------------------
+  const webadminRoot = join(root, 'server', 'webadmin')
+  const checkerPath = join('scripts', 'check-feature-chunks.mjs')
+  const featuresTestPath = join('src', 'lib', 'features.test.ts')
+  /** 哨兵串字面量（`picoaide.feature.<module>.v1`）。 */
+  const SENTINEL_LITERAL_RE = /picoaide\.feature\.[a-z0-9_]+\.v1/gu
+  /**
+   * 文本里的哨兵字面量集合。
+   * @param text - 文件内容。
+   * @returns 去重升序的字面量数组。
+   */
+  const sentinelLiteralsIn = (text) => [...new Set(text.match(SENTINEL_LITERAL_RE) ?? [])].sort()
+  const checkerSource = readFileSync(join(webadminRoot, checkerPath), 'utf8')
+  const expectationRe = /\{\s*module:\s*'([a-z0-9_]+)',[^}]*?sentinel:\s*'([^']+)',[^}]*?pages:\s*\[([^\]]*)\]/gsu
+  const expectations = [...checkerSource.matchAll(expectationRe)].map(match => ({
+    module: match[1],
+    sentinel: match[2],
+    pages: [...match[3].matchAll(/'([^']+)'/gu)].map(entry => entry[1]),
+  }))
+  check(expectations.length === MODULES.length,
+    `从 ${checkerPath} 的 MODULE_EXPECTATIONS 抽到的期望项 ${expectations.length} 条 ≠ 模块数 ${MODULES.length}`
+      + '（表被改写或抽取失效 —— 这张表是本节的登记面，抽取失败必须红而不是"当作没有落点"）')
+  /** 登记页 → 模块。 */
+  const registeredPages = new Map()
+  for (const module of MODULES) {
+    const entry = expectations.find(item => item.module === module)
+    check(entry !== undefined, `check-feature-chunks.mjs 的 MODULE_EXPECTATIONS 里必须有模块 ${module} 一项`)
+    if (entry === undefined) continue
+    check(entry.sentinel === constants.featureSentinel(module),
+      `${module} 的哨兵串必须由 channel-constants.ts 的 featureSentinel() 派生（契约 §6）：`
+        + `判据表里是 ${entry.sentinel}，真源给出 ${constants.featureSentinel(module)}`)
+    check(entry.pages.length > 0, `模块 ${module} 的页表是空的（内容面的覆盖面塌了）`)
+    for (const page of entry.pages) registeredPages.set(page.split(sep).join('/'), module)
+  }
+  // 方向 ①：每个登记页都必须带本模块哨兵（声明 + 真渲染）。
+  for (const [page, module] of registeredPages) {
+    const file = join(webadminRoot, page)
+    check(existsSync(file), `登记在哨兵落点表里的页面不存在：${page}`)
+    if (!existsSync(file)) continue
+    const source = readFileSync(file, 'utf8')
+    const sentinel = constants.featureSentinel(module)
+    check(new RegExp(`export const FEATURE_SENTINEL\\s*=\\s*['"]${sentinel}['"]`, 'u').test(source),
+      `${page} 必须声明本模块的哨兵字面量（期望 \`export const FEATURE_SENTINEL = '${sentinel}'\`）——`
+        + '每个模块页各自带哨兵，静态引用某一个子页时才看得见（审计 M6）')
+    check(/data-feature-sentinel=\{FEATURE_SENTINEL\}/u.test(source),
+      `${page} 必须把哨兵渲染出去（期望 \`data-feature-sentinel={FEATURE_SENTINEL}\`）——`
+        + '只声明不渲染的串会被打包器一起丢掉，"产物里没有它"就失去意义')
+    const literals = sentinelLiteralsIn(source)
+    check(literals.length === 1 && literals[0] === sentinel,
+      `${page} 里的哨兵字面量必须只有本模块那一个（实际 ${JSON.stringify(literals)}）——`
+        + '一个页面带着别的模块的串，会把"关闭变体里没有它"变成偶然')
+  }
+  // 方向 ②：反过来，webadmin 里出现哨兵字面量的文件必须是**登记过的**落点。
+  //
+  // 两份判据脚本刻意各持一份期望（判据的期望独立于被测实现），所以它们是登记在案的
+  // "判据侧落点"：它们必须持有**全部**模块的串（漏一个模块就没在判它），且改命名规则时
+  // 必须跟着真源一起改 —— 否则 webadmin 侧两边自洽地留着旧串，跨面语义静默分裂。
+  const judgeSites = [checkerPath, featuresTestPath]
+  const allSentinels = MODULES.map(module => constants.featureSentinel(module)).sort()
+  for (const relativePath of judgeSites) {
+    const file = join(webadminRoot, relativePath)
+    check(existsSync(file), `登记在案的判据侧哨兵落点不存在：${relativePath}`)
+    if (!existsSync(file)) continue
+    const literals = sentinelLiteralsIn(readFileSync(file, 'utf8'))
+    check(JSON.stringify(literals) === JSON.stringify(allSentinels),
+      `${relativePath} 里的哨兵字面量必须恰好是全部 ${MODULES.length} 个模块的串`
+        + `（实际 ${JSON.stringify(literals)}，期望 ${JSON.stringify(allSentinels)}）`)
+  }
+  /** 递归列出目录下的文件（只用于"未登记落点"普查）。 */
+  const listFilesUnder = (dir, out = []) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) listFilesUnder(full, out)
+      else if (entry.isFile()) out.push(full)
+    }
+    return out
+  }
+  const registeredFiles = new Set([...registeredPages.keys()].map(page => join(webadminRoot, page)))
+  const judgeFiles = new Set(judgeSites.map(site => join(webadminRoot, site)))
+  for (const scanRoot of ['src', 'scripts']) {
+    const dir = join(webadminRoot, scanRoot)
+    if (!existsSync(dir)) continue
+    for (const file of listFilesUnder(dir)) {
+      if (registeredFiles.has(file) || judgeFiles.has(file)) continue
+      const literals = sentinelLiteralsIn(readFileSync(file, 'utf8'))
+      if (literals.length === 0) continue
+      check(false,
+        `${relative(root, file).split(sep).join('/')} 里出现了哨兵字面量 ${JSON.stringify(literals)}，`
+          + '但它不在登记表里 —— 新增落点必须同时登记（页面落点进 MODULE_EXPECTATIONS 的 pages，'
+          + '判据侧落点进本节的 judgeSites），否则命名规则变更时这一处会静默留在旧串上')
+    }
+  }
+
+  // ---- ④ 变体测试矩阵必须有调度点（P1-2）------------------------------------------
+  /**
+   * 取 Makefile 里某个目标的配方（到下一个顶层行/目标为止）。
+   * @param text - Makefile 内容。
+   * @param target - 目标名。
+   * @returns 配方文本（没有该目标 ⇒ null）。
+   */
+  const makeRecipeOf = (text, target) => {
+    const start = new RegExp(`^${target}:[^\\n]*\\n`, 'mu').exec(text)
+    if (start === null) return null
+    const rest = text.slice(start.index + start[0].length)
+    const end = rest.search(/^\S/mu)
+    return end === -1 ? rest : rest.slice(0, end)
+  }
+  const VARIANT_TARGET = 'webadmin-variant-tests'
+  const FEATURES_TARGET = 'webadmin-check-features'
+  const VARIANTS_SCRIPT = join('scripts', 'check-feature-variants.mjs')
+  const variantRecipe = makeRecipeOf(makefile, VARIANT_TARGET)
+  check(variantRecipe !== null, `server/Makefile 必须定义 ${VARIANT_TARGET} 目标（非缺省变体的单测矩阵）`)
+  check(variantRecipe !== null && variantRecipe.includes('npm run check:variant-tests'),
+    `${VARIANT_TARGET} 必须跑 \`webadmin/scripts/check-feature-variants.mjs\`（经 npm script `
+      + '`check:variant-tests`）—— 矩阵的实现在仓内脚本里，CI 执行面闭包跟得下去；'
+      + '写成 Makefile 里的 `for` 循环时闭包读不懂命令位（fail-closed 记红）')
+  check(makeRecipeOf(makefile, FEATURES_TARGET) !== null,
+    `server/Makefile 必须定义 ${FEATURES_TARGET} 目标（产物级变体判据）`)
+  // 矩阵从**唯一真源**读（真跑那个脚本模块；它在被 import 时零副作用）。
+  const variantsScriptPath = join(webadminRoot, VARIANTS_SCRIPT)
+  check(existsSync(variantsScriptPath), `变体矩阵脚本必须存在：server/webadmin/${VARIANTS_SCRIPT.split(sep).join('/')}`)
+  const variantsModule = existsSync(variantsScriptPath)
+    ? await import(pathToFileURL(variantsScriptPath).href)
+    : {}
+  const matrix = Array.isArray(variantsModule.VARIANT_MATRIX) ? variantsModule.VARIANT_MATRIX : []
+  check(matrix.length > 0, `${VARIANTS_SCRIPT} 的 VARIANT_MATRIX 不能为空（空矩阵 = 一条变体都没跑）`)
+  check(matrix.some(variant => variant !== DEFAULT_VARIANT),
+    `变体矩阵必须包含**非缺省**变体（实际 ${JSON.stringify(matrix)}）—— 缺省变体由上层 \`npm test\` 覆盖，`
+      + '矩阵只重复跑它等于什么都没加')
+  check(matrix.every(variant => MODULES.includes(variant) || variant === 'none'
+    || variant.split(',').every(module => MODULES.includes(module))),
+    `变体矩阵里有未知取值（实际 ${JSON.stringify(matrix)}）：合法取值是模块名的逗号子集或显式 none`)
+  // 矩阵脚本必须真的把变体喂给单测（**跑 npm test 且设 FEATURES**），否则"调度了"也只是空壳。
+  const variantsSource = existsSync(variantsScriptPath) ? readFileSync(variantsScriptPath, 'utf8') : ''
+  check(/spawnSync\(\s*'npm'[\s\S]{0,200}?\['test'\]/u.test(variantsSource)
+    && /FEATURES:\s*variant/u.test(variantsSource),
+    `${VARIANTS_SCRIPT} 必须真的跑 \`npm test\` 并把变体写进 \`FEATURES\` 环境`
+      + '（只打印矩阵不跑测试 = 调度点空转）')
+  for (const [target, recipe] of [['check', makeRecipeOf(makefile, 'check')]]) {
+    check(recipe !== null && recipe.includes(`$(MAKE) ${VARIANT_TARGET}`),
+      `\`make ${target}\`（发布门禁）必须调度 ${VARIANT_TARGET} —— 判据不进 check 就等于只在手动跑时存在`)
+    check(recipe !== null && recipe.includes(`$(MAKE) ${FEATURES_TARGET}`),
+      `\`make ${target}\`（发布门禁）必须调度 ${FEATURES_TARGET}（产物级变体判据）`)
+  }
+  // CI 侧：server job 必须真的起这两条（命令位，不是注释里提一句）。
+  const workflowText = readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8')
+  const jobText = (() => {
+    const lines = workflowText.split('\n')
+    const start = lines.findIndex(line => /^  server:\s*$/u.test(line))
+    if (start === -1) return null
+    let end = lines.length
+    for (let index = start + 1; index < lines.length; index += 1) {
+      if (/^  [A-Za-z0-9_-]+:\s*$/u.test(lines[index])) { end = index; break }
+    }
+    return lines.slice(start, end).join('\n')
+  })()
+  check(jobText !== null, 'ci.yml 里找不到 `server` job（变体调度点的 CI 侧落点）')
+  /**
+   * job 文本里是否有"命令位"调用某个 make 目标（跳过注释行与 `#` 之后的说明）。
+   * @param text - job 文本。
+   * @param target - make 目标名。
+   * @returns 是否命中。
+   */
+  const schedulesTarget = (text, target) => (text ?? '').split('\n').some((line) => {
+    const trimmed = line.trim()
+    if (trimmed.startsWith('#')) return false
+    return new RegExp(`(^|\\s)make\\s+${target}(\\s|$)`, 'u').test(trimmed)
+  })
+  check(schedulesTarget(jobText, VARIANT_TARGET),
+    `ci.yml 的 server job 必须调度 ${VARIANT_TARGET} —— 缺了它，变体回归只在本地手动跑时存在`
+      + '（CI 的 `npm test` 是缺省全开变体）')
+  check(schedulesTarget(jobText, FEATURES_TARGET),
+    `ci.yml 的 server job 必须调度 ${FEATURES_TARGET} —— 产物级变体判据此前只进本地 make check，`
+      + '判据存在但 CI 从不启动它')
+}
+
 for (const dir of scratch) rmSync(dir, { recursive: true, force: true })
 if (failures.length > 0) {
   process.stderr.write(`\nverify-ci-scripts: ${failures.length} 项断言失败\n`)
@@ -8105,4 +8466,12 @@ process.stdout.write('verify-ci-scripts: OK — ref 形态判定唯一真源(tag
   + '(注释/字符串字面量/体内重声明都不算:先扫代码位置的标识符、再括号配对取函数体;'
   + '静态代理:没被引用的串会被链接器一起丢掉) + 该判据**自带量具自检**'
   + '(合成正例 4 例必须接受 / 合成负例 5 例必须拒绝,含"删掉可执行引用只留注释")'
-  + ' + 契约文档必须存在且列出三个哨兵串)\n')
+  + ' + 契约文档必须存在且列出三个哨兵串)/'
+  + 'webadmin 变体接线(三处缺省值同源:真跑 webadmin/features.mjs 与 channel-constants.ts 后的值对拍 '
+  + 'Dockerfile **每一处** ARG 与 Makefile 的 `GO_TAGS ?=`;变体开关必须写在 `RUN npm ci` 之后'
+  + '(否则每个变体重跑全量依赖安装);**两个变体 build-arg 必须成对**——Dockerfile 里必须恰好一条'
+  + 'fail-loud 断言(`$FEATURES`/`$GO_TAGS` 并读 + `none` ⟺ 空 tag 集翻译 + 不一致 `exit 1`,'
+  + '位置在 `ARG FEATURES=` 之后与 `RUN npm run build` 之前),该谓词自带量具自检(1 正 3 负);'
+  + 'webadmin 侧哨兵落点登记——每个模块页各自声明并渲染'
+  + '真源派生的串、两份判据脚本各持全部串、其余文件出现哨兵字面量即红;'
+  + '变体测试矩阵的调度点三处缺一即红:Makefile 目标 + `make check` 调它 + CI server job 起它)\n')

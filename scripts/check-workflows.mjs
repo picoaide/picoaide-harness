@@ -757,8 +757,18 @@ const SELFTEST_SCANNER_ASSERTIONS = 5
 const SELFTEST_FATAL_PATH_ASSERTIONS = 6
 /** `selfTestWorkflowFileRegistry()` 至少执行的断言条数(4 个正反样本 + 1 条具名性)。 */
 const SELFTEST_WORKFLOW_FILE_REGISTRY_ASSERTIONS = 5
-/** `selfTestPinnedStepCoverage()` 至少执行的断言条数(1 条全命中 + 每条策略 1 条缺口)。 */
-const SELFTEST_PINNED_STEP_COVERAGE_ASSERTIONS = 1 + 8
+/**
+ * `selfTestPinnedStepCoverage()` 至少执行的断言条数(1 条全命中 + 每条策略 1 条缺口)。
+ *
+ * 2026-10-14：按上式复算 = 1 + `PINNED_STEP_POLICIES.length`。此前停在 `1 + 8`
+ * 是因为 R22 与 webadmin 变体两批新增策略时没有同批复算 —— 它是**下界**，所以只是悄悄变松
+ * （少两条策略也不报），不是假绿。收紧不是削弱判据，故同批更正。
+ *
+ * 2026-10-14 合并（四路收口）：`p1b-conditionalize` 的 `ci-check-go-build-tags` 与本批的
+ * `ci-webadmin-{variant-tests,check-features}` 同时进表 ⇒ 策略数 14 → **15**，本下界随式复算
+ * 到 `1 + 15`。合并两边都要保留（任一侧都不是"旧值覆盖"），所以这条常量按**并集**后的条数取。
+ */
+const SELFTEST_PINNED_STEP_COVERAGE_ASSERTIONS = 1 + 15
 /** `selfTestRequiredCiSteps()` 至少执行的断言条数(R21 fix-6 / E-03:6 条正反样本 + 词表对拍)。 */
 const SELFTEST_REQUIRED_CI_STEPS_ASSERTIONS = 7
 /** `selfTestPinnedEnvLayers()` 至少执行的断言条数(正向集合相等 + 反向未登记层 + 变异打坏)。 */
@@ -1133,7 +1143,8 @@ export function checkWorkflowText(name, text, options = {}) {
 //      允许放行,但必须在本文件的 SWALLOW_ALLOWLIST 里**逐条**登记 + 写明理由
 //      —— "整个文件豁免""整个 job 豁免"这种粒度这里不提供。
 //   2. [SK-7b] **`-timeout` 与 job 预算的序关系**:`go test … -timeout Xm` 必须满足
-//      `2X + 5 ≤ job 的 timeout-minutes`(由来见 checkGoTestTimeoutBudget 的长注释)。
+//      `2X + F ≤ job 的 timeout-minutes`(F = `CI_JOB_FIXED_OVERHEAD_MINUTES`,由来见
+//      checkGoTestTimeoutBudget 的长注释)。
 //   3. [SK-7c] **compact 单行 `- run:` 的退出码语义**:`|` 串联、`;`/`||` 末尾吞码、
 //      `!` 取反 —— 任何让"这一步的失败"传不出去的写法都要报错。
 //
@@ -3254,6 +3265,36 @@ const TRIGGER_NARROWING_KEYS = ['branches', 'branches-ignore', 'tags', 'tags-ign
 //      + `isSilentSuccessTail`):这里要的是"钉住的步骤必须真的能失败",不是再发明一套
 //      吞码语法;
 //   ⑤ 所在 job 不得是常量假 `if:`(job 被跳过 = 里面的步骤一样不跑)。
+/**
+ * webadmin 变体的两条判据步骤（`make <target>`）的**命令载荷判据**（2026-10-14 独立审计 P1）。
+ *
+ * 这两步的命令位形态极其简单（一个词 + 一个目标名），所以"判据面"能被打坏的地方只有一处：
+ * **同一行的附加参数**。`make -n <目标>`（`--dry-run`/`--just-print`/`-t`/`--touch`）会让这
+ * 一步**只打印、不执行**且恒退 0 —— 与 [SK-14⑦]（`--list` 让守卫运行步永久绿灯空转）完全同形；
+ * `-i`/`--ignore-errors`/`-k`/`--keep-going` 则让失败不再传出去（③ `continue-on-error` 的
+ * 等价形态）。因此：命令位执行的那个调用点必须**逐字**只有目标名，多一个词就红。
+ *
+ * 与 `PINNED_STEP_ARGV_POLICIES` 同一套纪律，但**不并进那张表**：那张表的锚点是脚本路径，
+ * 这两条策略的锚点是 make 目标名，共用 `pinnedStepExtraArgv()` 的"锚点之后全是参数"口径会
+ * 把目标名本身也读成参数（它按 `[^\s;&|(){}]*<锚点>` 找切点）。这里直接用 `executedCommands`
+ * 的 **命令位**结果，与 `match` 同源。
+ *
+ * @param target - make 目标名（逐字，与 `REQUIRED_CI_STEPS` 的 `argv` 同源）。
+ * @returns 载荷谓词（`null` = 通过）。
+ */
+function webadminVariantTargetPayload(target) {
+  return script => {
+    const calls = executedCommands(script).filter(entry => entry.command === 'make'
+      && (entry.argv[0] ?? '') === target)
+    if (calls.length === 0) return `命令位上找不到 \`make ${target}\``
+    const extra = calls.flatMap(entry => entry.argv.slice(1))
+    if (extra.length === 0) return null
+    return `它带了未登记的附加参数 \`${extra.join(' ')}\`（\`-n\`/\`--dry-run\`/\`--just-print\`/`
+      + '`-t`/`--touch` 会让这一步**只打印不执行**且恒退 0；`-i`/`--ignore-errors`/`-k`/'
+      + '`--keep-going` 会让失败不再传出去）'
+  }
+}
+
 /** 被钉住的判据步骤:**识别口径**与 `if:` 允许形态(登记表)。 */
 const PINNED_STEP_POLICIES = [
   {
@@ -3470,6 +3511,45 @@ const PINNED_STEP_POLICIES = [
       : '它没有带 `--expect-cut` —— 裁剪断言会退化成"只报告"，'
         + '关掉的模块包树还在依赖图里时这一步仍退出 0'),
   },
+  // ---- 2026-10-14 独立审计 P1：webadmin 变体的**两条判据步骤**也必须进"可执行性"表 ----
+  //
+  // 现场（审计实跑确认）：`ci.yml` 的 server job 里 `- run: make webadmin-variant-tests` /
+  // `- run: make webadmin-check-features` 两条步骤，第一版只登记了**存在性**（
+  // `verify-ci-scripts.mjs` 第 19 节的 `schedulesTarget()` 只按**文本**在 server job 里找
+  // `make <target>`，不看 `if:`）。于是给这两步各加一行 `if: false` 后，
+  // `check-workflows` **EXIT=0**（当时它枚举的"被钉住的判据步骤"里没有这两条）、
+  // `verify-ci-scripts` **EXIT=0**（文本还在）—— 正是本仓 [SK-14] 自己点名的形态：
+  // 判据文本还在、**这一步永远不会执行**。紧邻的 `npm test` 是钉住的，两条新判据步骤不是，
+  // 登记纪律在同一个 job 内不一致。
+  //
+  // 收口与 `ci-gofmt-check` / `ci-webadmin-npm-test` 同款：`REQUIRED_CI_STEPS` 的每条带
+  // `pinnedId` 指到本表 ⇒ `if:` / `continue-on-error` / `shell` / 所在 job 的常量假 `if:`
+  // 全部套用既有策略；`payload` 负责"判据面还在不在"。
+  //
+  // 诚实边界（跨文件闭包在哪里）：这两步的**判据本体**（4 个非缺省变体各跑一遍完整套件 /
+  // 5 次真构建的双侧断言）在 `server/Makefile` 的目标与 `server/webadmin/scripts/*.mjs` 里，
+  // 由 `verify-ci-scripts.mjs` 第 19 节另判（配方必须跑登记的 npm script、矩阵必须含非缺省
+  // 变体、命令位必须真的把变体喂进 `FEATURES`）。本表只回答"CI 这一步还在不在、还能不能执行"。
+  {
+    id: 'ci-webadmin-variant-tests',
+    label: '`make webadmin-variant-tests`（webadmin 变体单测矩阵调度步）',
+    // 识别口径 = **server job 里命令位真的执行那个 make 目标**（与 `REQUIRED_CI_STEPS` 的
+    // `job: 'server'` 同源）。
+    match: (script, item) => item?.jobId === 'server'
+      && executedCommands(script).some(entry => entry.command === 'make'
+        && (entry.argv[0] ?? '') === 'webadmin-variant-tests'),
+    ifPolicy: 'never',
+    payload: webadminVariantTargetPayload('webadmin-variant-tests'),
+  },
+  {
+    id: 'ci-webadmin-check-features',
+    label: '`make webadmin-check-features`（webadmin 产物级变体判据调度步）',
+    match: (script, item) => item?.jobId === 'server'
+      && executedCommands(script).some(entry => entry.command === 'make'
+        && (entry.argv[0] ?? '') === 'webadmin-check-features'),
+    ifPolicy: 'never',
+    payload: webadminVariantTargetPayload('webadmin-check-features'),
+  },
 ]
 /**
  * `if:` 允许形态的**登记值**。
@@ -3529,6 +3609,13 @@ const CI_JUDGEMENT_ARGV_PREFIXES = [
   // 它是 `node scripts/<脚本>` 形态，不在 `make check` / `go test` 这些既有词条里，
   // 不进词表就等于"新加的判据步骤"这个方向永远看不见它。
   ['node', 'scripts/check-go-build-tags.mjs'],
+  // 2026-10-14 独立审计 P1：webadmin 变体的两条判据步骤（非缺省变体单测矩阵 + 产物级双侧
+  // 判据）。它们既不是 `npm test` 也不是 `make check`，所以**必须**显式进词表 —— 与上面
+  // macOS 那条同一条理由：不进词表，存在性对账（[SK-23]）看不见它们，`if: false` / 删步骤
+  // 都不会产生任何观测差（实测：变异前这两条步骤加 `if: false` 后本守卫与
+  // `verify-ci-scripts` 双双 EXIT=0）。
+  ['make', 'webadmin-variant-tests'],
+  ['make', 'webadmin-check-features'],
 ]
 /**
  * **[SK-23] 必须存在的判据步骤：登记表 + 双向对账**（R21 fix-6 / E-03）。
@@ -3622,6 +3709,28 @@ const REQUIRED_CI_STEPS = [
       + ' 同 job 的 `go vet` / `go test` 都只跑发布态组合（全开），所以减配变体的编译面在别处'
       + '没有任何自动化。删掉这一步（或去掉 `--expect-cut` 让它退化成"只报告"、退出码恒 0）⇒'
       + ' "支持任意模块组合"重新变成没人看守的承诺，而 server job 照旧全绿',
+  },
+  {
+    file: 'ci.yml',
+    job: 'server',
+    argv: ['make', 'webadmin-variant-tests'],
+    // 与上面 `npm test` 同款：存在性（本表方向①）**不等于**可执行性（`[SK-14]`）。
+    pinnedId: 'ci-webadmin-variant-tests',
+    label: '`make webadmin-variant-tests`（webadmin 变体单测矩阵：4 个非缺省变体各跑一遍完整套件）',
+    why: '2026-10-14 独立审计 P1：`nav.test.ts` / `routes.test.ts` 是**按变体给期望**的，而 CI 的'
+      + ' `npm test` 与 `make check` 缺省都只跑全开变体 ⇒ 实测 M3（删掉 `nav.ts` 的开关过滤）时'
+      + '关闭变体会发布指向不存在路由的侧栏条目（点进去 404），CI 上无人拦。删掉这一步 / 给它加'
+      + ' `if: false` / 换掉目标名，都会让"关闭变体会坏"这一类回归重新变成没人看守的承诺',
+  },
+  {
+    file: 'ci.yml',
+    job: 'server',
+    argv: ['make', 'webadmin-check-features'],
+    pinnedId: 'ci-webadmin-check-features',
+    label: '`make webadmin-check-features`（webadmin 产物级双侧变体判据，真跑 5 次 vite build）',
+    why: '2026-10-14 独立审计 P1：这是"关闭的模块其页面代码不进 dist"的**唯一产物级**判据'
+      + '（源码图判据只看形态，形态对不等于产物对）。此前它只进本地 `make check`，CI 从不启动它 ——'
+      + '"判据存在但没人跑"与"判据被删"在 CI 上完全同义',
   },
 ]
 
@@ -7150,19 +7259,39 @@ function checkSwallowedExitCodes(file, document, blocks, allowlist, reported) {
 }
 
 /**
+ * `[SK-7b]` 里"**除 go test 之外**的固定开销"（分钟）—— 目前只有 `ci.yml` 的 `server` job
+ * 有 `go test -timeout`，所以这个数就是那个 job 的组成：
+ *
+ *   · 2026-09-19 立这条策略时是 5：PG 启动 / `npm ci` / gofmt / go vet / `npm test` /
+ *     `make build-server`；
+ *   · 2026-10-14 独立审计 P2-3：本片给同一个 job 挂上了两条 webadmin 变体判据
+ *     （`make webadmin-variant-tests` 实测 5m17s + `make webadmin-check-features` 实测
+ *     1m04s，4 vCPU 机器）⇒ 5 + 6.4 ≈ 11.4，向上取 12。
+ *
+ * **为什么必须改这个常量，而不是只改 job 的 `timeout-minutes`**：`2X + F` 是这条判据对
+ * "真挂的包能不能打出 goroutine dump"的**全部模型**。F 留在 5 时模型给出 35 min，于是
+ * 一个 40 min 的 job 预算会被判为"安全"，而真实最坏路径是 42.4 min ⇒ 挂起的包先撞 job
+ * 上限被整体取消，R2-SK-7 要防的那件事原样复现。固定开销变了而同批不改模型，就是本仓
+ * 反复点名的"算出来 ≠ 有判据"。改这里只可能让判据更严（F 变大 ⇒ 需要的预算更大）。
+ */
+const CI_JOB_FIXED_OVERHEAD_MINUTES = 12
+
+/**
  * [SK-7b] `go test … -timeout X` 与所在 job `timeout-minutes` 的序关系。
  *
- * 硬规则:`2X + 5 ≤ job 上限`(X 以分钟计),报错信息里写出算术。
+ * 硬规则:`2X + F ≤ job 上限`(X 以分钟计,F = {@link CI_JOB_FIXED_OVERHEAD_MINUTES}),
+ * 报错信息里写出算术。
  *
  * 为什么不是"X < job 上限"这种显然的判据 —— 本仓刚踩过(2026-09-19 第二轮审计 R2-SK-7,
  * 也是本策略的由来):单包 `-timeout 25m` + 其余包 ≈ 21 min 的最坏路径 ≈ 46 min,而 job
  * 上限 30 min ⇒ **挂起的那个包还没到自己的 -timeout,job 就被整体取消**了。产物因此从
  * `panic: test timed out after 25m0s` + goroutine dump + 用例名,退化成一句"gate 红、
- * 查不出原因"(被 cancel 的 step 不会留下 Go 的 dump)。现在的取值是 15m + job 45min:
- * 15(挂满) + 21(其余包) = 36 ≤ 45,且 2×15+5 = 35 ≤ 45。
+ * 查不出原因"(被 cancel 的 step 不会留下 Go 的 dump)。现在的取值是 15m + job 60min:
+ * 15(挂满) + 21(其余包) + 12(固定开销) = 48 ≤ 60,且 2×15+12 = 42 ≤ 60。
  *
  * 判据里的 `2X` = "挂满的那个包" + "其余包 ≈ 与之同量级"(实测最慢单包 299s,全量 ~21 min);
- * `+5` = PG 启动 / npm ci / gofmt / go vet / npm test / make build-server 的固定开销。
+ * `F` = 该 job 里**除 go test 之外**的全部固定开销(见常量注释 —— 2026-10-14 把本片新增的
+ * 两条 webadmin 变体判据算进去,此前写死的 `+5` 已不足以覆盖真实最坏路径)。
  * 没声明 `timeout-minutes` 的 job 也判失败:平台默认 360 min 只是兜底,不能拿它证明
  * "dump 一定打得出来"。
  *
@@ -7245,13 +7374,14 @@ function checkGoTestTimeoutBudget(file, document, blocks, notes) {
         const match = GO_DURATION.exec(value)
         hits += 1
         const minutes = timeoutMinutes(match[1], match[2])
-        const worst = 2 * minutes + 5
+        const worst = 2 * minutes + CI_JOB_FIXED_OVERHEAD_MINUTES
         const budget = numericMinutes(item.job?.['timeout-minutes'])
         const flagText = `-timeout ${value}`
         if (budget === undefined) {
           report(`${flagText} 所在 job 没有声明 timeout-minutes\n`
             + `  ⇒ 无法证明"挂起的包会被自己的 -timeout 打断并打出 goroutine dump"。\n`
-            + `  给 job 加显式预算:2×${formatMinutes(minutes)}+5=${formatMinutes(worst)} ≤ timeout-minutes。`)
+            + `  给 job 加显式预算:2×${formatMinutes(minutes)}+${CI_JOB_FIXED_OVERHEAD_MINUTES}=`
+            + `${formatMinutes(worst)} ≤ timeout-minutes。`)
           continue
         }
         // 下界(2026-09-19 第三轮审计 F2-2):`-timeout 0` 在 Go 里是**关闭超时**
@@ -7268,21 +7398,24 @@ function checkGoTestTimeoutBudget(file, document, blocks, notes) {
                 + 'goroutine dump,只剩 job 被整体取消 —— 正是本策略要防的"gate 红查不出原因"。'
               : '低于一分钟的全局测试超时会让正常慢的包被误杀,而不是拦住真挂的包。'}\n`
             + `  本仓最慢单包 250–300s 量级,合法区间是 ${GO_TEST_TIMEOUT_FLOOR_MINUTES}m ≤ X ≤ `
-            + `${formatMinutes((budget - 5) / 2)}m(本 job)。`)
+            + `${formatMinutes((budget - CI_JOB_FIXED_OVERHEAD_MINUTES) / 2)}m(本 job)。`)
           continue
         }
         if (worst <= budget) {
           notes.push(`${file} job ${item.jobId}: -timeout ${value}`
-            + ` ⇒ 2×${formatMinutes(minutes)}+5=${formatMinutes(worst)} ≤ job ${formatMinutes(budget)} ✓`
+            + ` ⇒ 2×${formatMinutes(minutes)}+${CI_JOB_FIXED_OVERHEAD_MINUTES}=`
+            + `${formatMinutes(worst)} ≤ job ${formatMinutes(budget)} ✓`
             + `(下界 ${GO_TEST_TIMEOUT_FLOOR_MINUTES}m ≤ ${formatMinutes(minutes)}m)`)
           continue
         }
         report(`${flagText} 与 job 预算的序关系不成立:`
-          + `2×${formatMinutes(minutes)}+5=${formatMinutes(worst)} > ${formatMinutes(budget)}(job 预算)。\n`
+          + `2×${formatMinutes(minutes)}+${CI_JOB_FIXED_OVERHEAD_MINUTES}=`
+          + `${formatMinutes(worst)} > ${formatMinutes(budget)}(job 预算)。\n`
           + '  ⇒ 挂起的那个包会先撞 job 上限被整体取消,`panic: test timed out` + goroutine dump + '
           + '用例名全部丢失,只剩"gate 红查不出原因"(2026-09-19 R2-SK-7 的现场:25m + 其余 '
           + '~21m 必然先撞 30min 的 job)。\n'
-          + `  把 -timeout 收到 ≤ ${formatMinutes((budget - 5) / 2)}m,或把 job 预算抬到 ≥ `
+          + `  把 -timeout 收到 ≤ ${formatMinutes((budget - CI_JOB_FIXED_OVERHEAD_MINUTES) / 2)}m,`
+          + '或把 job 预算抬到 ≥ '
           + `${formatMinutes(worst)}min。`)
       }
     }
@@ -12121,9 +12254,12 @@ export function selfTestPolicies() {
     '      - name: 单包 25m',
     '        run: go test ./... -count=1 -p 1 -timeout 25m',
   ])
+  // 2026-10-14：算术里的固定开销由写死的 `+5` 换成 `CI_JOB_FIXED_OVERHEAD_MINUTES`（= 12，
+  // 含本片新增的两条 webadmin 变体判据 6.4 min）⇒ 这条自检的期望串同批复算（25m 那条从
+  // `2×25+5=55` 变成 `2×25+12=62`）。断言本身没变松：仍然逐字要求报错写出算术。
   const budgetFailure = tags(tooLong, '[SK-7b]')
-  expect(budgetFailure.some(failure => failure.detail.includes('2×25+5=55 > 45')),
-    '[SK-7b] 自检:报错里没有写出算术(2×25+5=55 > 45)')
+  expect(budgetFailure.some(failure => failure.detail.includes('2×25+12=62 > 45')),
+    '[SK-7b] 自检:报错里没有写出算术(2×25+12=62 > 45)')
   expect(budgetFailure.some(failure => failure.detail.includes('单包 25m')),
     '[SK-7b] 自检:报错没有点名 step')
   expectGreen('b2-timeout-15m-ok', [

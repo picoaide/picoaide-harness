@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { ApiError, me, request } from '../api'
 import { setCurrentAdmin, type MeUser } from '../lib/rbac'
+import { FEATURE_ENABLED } from '../lib/features'
 import Apps from './app-center/Apps'
 
 // 打开次数趋势用 ChartLazy（懒加载 VChart，~182KB gz）。组件测试只断言"有图/没图"
@@ -685,7 +686,10 @@ describe('AppCenter 应用中心', () => {
     })
   })
 
-  it('路由接线:nav 的 /app-center 在 App 里确实有条路由(懒加载页面可渲染)', async () => {
+  // P3 变体：应用面关闭时 `/app-center` 路由在产物里不存在（页面 chunk 也不产出），
+  // 这条"整树渲染钉住 nav.to == Route path"的判据无从谈起 —— 那种形态由
+  // `src/lib/routes.test.ts` 的变体对拍断言。跳过条件写进用例名。
+  it.skipIf(!FEATURE_ENABLED.apps)('路由接线:nav 的 /app-center 在 App 里确实有条路由(懒加载页面可渲染)', async () => {
     // 光跑 build 只能证明 chunk 能解析,证不了 nav.to 与 Route path 是同一个字符串
     // —— 那条只有整树渲染才能钉住。App 自带 BrowserRouter(basename=/admin)。
     // 子路由(limits/settings)与 /app-platform 重定向见 app-center/AppCenterLayout.test.tsx。

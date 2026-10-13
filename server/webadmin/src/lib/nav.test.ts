@@ -1,7 +1,16 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { NAV_ENTRIES, isNavVisible, landingPath, visibleNav, type NavEntry } from './nav'
+import {
+  NAV_ENTRIES,
+  DECLARED_NAV_ENTRIES,
+  FEATURE_NAV_ENTRIES,
+  isNavVisible,
+  landingPath,
+  visibleNav,
+  type NavEntry,
+} from './nav'
+import { FEATURE_ENABLED, FEATURE_MODULES, FEATURES_VARIANT } from './features'
 import type { MeUser } from './rbac'
 
 // P2-43: nav 声明的 perms 必须被真正消费——服务端 /me 下发的 permissions
@@ -652,8 +661,31 @@ const PERM_ARG_POSITIVE_FIXTURES: PermArgPositiveFixture[] = [
   { rel: 'pages/GatewayFiles.tsx', arg: 'PERM_GATEWAY_WRITE', testFile: 'pages/GatewayFiles.test.tsx', testName: '写面收敛：持有 gateway:write 时删除/清理入口可见', kind: 'behavior' },
 ]
 
-/** nav gate 用到的权限点并集（来自 NAV_ENTRIES 的声明，不是另抄一份清单）。 */
-const NAV_GATED_PERMISSIONS = [...new Set(NAV_ENTRIES.flatMap((n) => n.perms ?? []))]
+/**
+ * nav gate 用到的权限点并集。**读声明表**（`DECLARED_NAV_ENTRIES`，含被关闭的模块），
+ * 不是读这份产物的 `NAV_ENTRIES`。
+ *
+ * P3 变体（2026-10-14）为什么必须这样：本节的用途是"新增权限点必须显式决定它有没有
+ * 管理端入口"。若用被变体过滤后的 `NAV_ENTRIES`，那么把某个模块关掉就会让它的权限点
+ * （`connector:read` / `market:read` / `capability:read`）从这条闸的视野里消失 ——
+ * 于是"关掉连接器"顺手把"新增权限点无人管"也一起关掉了，而这与变体毫无关系。
+ * "开启时必须齐全"那一侧由下面的「变体对拍」用例保证：声明表不是停车场。
+ */
+const NAV_GATED_PERMISSIONS = [...new Set(DECLARED_NAV_ENTRIES.flatMap((n) => n.perms ?? []))]
+
+/** 路径 → 所属模块（只有模块条目有）；变体期望由它派生，不另抄一份路径清单。 */
+const FEATURE_MODULE_BY_PATH = new Map(FEATURE_NAV_ENTRIES.map((entry) => [entry.to, entry.module] as const))
+
+/**
+ * 按当前变体过滤一组侧栏路径：属于**已关闭**模块的条目不在产物里。
+ * @param candidates - 期望的路径集合（全开变体下的形态）。
+ * @returns 该变体下应当可见的路径（保持入参顺序）。
+ */
+const withVariant = (candidates: readonly string[]): string[] =>
+  candidates.filter((path) => {
+    const module = FEATURE_MODULE_BY_PATH.get(path)
+    return module === undefined || FEATURE_ENABLED[module]
+  })
 
 /**
  * **刻意不进侧栏**的权限点（前向守卫的登记表）。
@@ -743,17 +775,49 @@ describe('权限点真源对拍(R4-D-3 · 读 server/internal/serverauth/rbac.go
 
   it('Go 权限点必须显式决定管理端入口（新增/删除权限点的前向守卫）', () => {
     // 新增一个权限点 ⇒ 本用例红，直到有人显式决定它属于哪一类：
-    //   ① 给某个 NAV_ENTRIES 当 gate；② 登记进 PERM_WITHOUT_NAV_ENTRY 并写明理由。
+    //   ① 给某个 nav 条目当 gate（`DECLARED_NAV_ENTRIES`，**含被关闭模块**的声明）；
+    //   ② 登记进 PERM_WITHOUT_NAV_ENTRY 并写明理由。
+    // 用声明表而不是这份产物的 `NAV_ENTRIES`：变体不得改变这条闸的视野（见上面的注释）。
     const unregistered = GO_ALL_PERMISSIONS.filter(
       (p) => !NAV_GATED_PERMISSIONS.includes(p) && !(p in PERM_WITHOUT_NAV_ENTRY),
     ).sort()
     expect(
       unregistered,
-      `Go 新增了权限点但没有管理端入口登记（改 NAV_ENTRIES 或补 PERM_WITHOUT_NAV_ENTRY）：${unregistered.join(', ')}`,
+      `Go 新增了权限点但没有管理端入口登记（改 lib/nav.ts 的条目或补 PERM_WITHOUT_NAV_ENTRY）：${unregistered.join(', ')}`,
     ).toEqual([])
     // 反向：登记表里不得留 Go 端已删除的权限点（删点后登记表必须同步收缩）。
     const stale = Object.keys(PERM_WITHOUT_NAV_ENTRY).filter((p) => !GO_ALL_PERMISSIONS.includes(p)).sort()
     expect(stale, `PERM_WITHOUT_NAV_ENTRY 里有 Go 端已不存在的权限点：${stale.join(', ')}`).toEqual([])
+  })
+
+  // -------------------------------------------------------------------------
+  // P3 变体（2026-10-14）：声明表 ↔ 这份产物的侧栏，两个方向都判
+  //
+  // 这一条是上一条的"另一半"：上一条让**声明表**（含被关闭模块）继续给权限点兜底，
+  // 这一条保证声明表不是"停车场"—— 开启的模块，它的条目必须逐条真的出现在侧栏里。
+  // 两条合起来 = 「开启时必须齐全，关闭时整块不在」。
+  // -------------------------------------------------------------------------
+  it('变体对拍：开启模块的条目逐条进侧栏，关闭模块的条目整条不在（声明表不是停车场）', () => {
+    const runtimePaths = new Set(NAV_ENTRIES.map((n) => n.to))
+    // ① 声明 → 产物：开启必须齐全、关闭必须没有。
+    for (const entry of FEATURE_NAV_ENTRIES) {
+      const expected = FEATURE_ENABLED[entry.module]
+      expect(
+        runtimePaths.has(entry.to),
+        `变体 ${FEATURES_VARIANT}：模块 ${entry.module} ${expected ? '开启' : '关闭'}，`
+          + `但侧栏条目 ${entry.to} ${expected ? '不在' : '仍在'}产物里`,
+      ).toBe(expected)
+    }
+    // ② 产物 → 声明：侧栏里不得出现声明表之外的东西（反向也钉住）。
+    const declaredPaths = new Set(DECLARED_NAV_ENTRIES.map((n) => n.to))
+    const stray = [...runtimePaths].filter((p) => !declaredPaths.has(p)).sort()
+    expect(stray, `侧栏里有声明表之外（或已删除）的条目：${stray.join(', ')}`).toEqual([])
+    // ③ 非空自证 + 逐模块必须都有声明（模块开关塌成"全都没有"时不许全绿）。
+    for (const module of FEATURE_MODULES) {
+      const declared = FEATURE_NAV_ENTRIES.filter((e) => e.module === module)
+      expect(declared.length, `模块 ${module} 没有任何侧栏声明（开关与声明脱节）`).toBeGreaterThan(0)
+    }
+    expect(NAV_ENTRIES.length).toBe(DECLARED_NAV_ENTRIES.length - FEATURE_NAV_ENTRIES.filter((e) => !FEATURE_ENABLED[e.module]).length)
   })
 })
 
@@ -958,15 +1022,26 @@ describe('导航权限过滤(P2-43)', () => {
   it('多权限点条目命中任一即可见(能力中心 market:read | capability:read)', () => {
     // capability:read 同时 gate「能力中心」与「应用中心」(读权限复用同一点,
     // 写入要 capability:write);market:read 只 gate 能力中心 —— 下面两条断言正是这条边界。
-    expect(paths({ role: 'auditor', permissions: ['capability:read'] })).toEqual(['/capabilities', '/app-center'])
-    expect(paths({ role: 'auditor', permissions: ['market:read'] })).toEqual(['/capabilities'])
+    // **期望按变体给**（`withVariant` 从 FEATURE_NAV_ENTRIES 派生路径→模块，不另抄清单）：
+    // 关掉 skills/apps 时这两条自然落到空集，边界本身不变。
+    expect(paths({ role: 'auditor', permissions: ['capability:read'] }))
+      .toEqual(withVariant(['/capabilities', '/app-center']))
+    expect(paths({ role: 'auditor', permissions: ['market:read'] }))
+      .toEqual(withVariant(['/capabilities']))
+    // 自证：全开变体下这组期望必须真的是两条（否则上面的 filter 塌成恒空集）。
+    if (FEATURE_MODULES.every((m) => FEATURE_ENABLED[m])) {
+      expect(withVariant(['/capabilities', '/app-center'])).toEqual(['/capabilities', '/app-center'])
+    }
   })
 
   it('应用中心页:capability:read 可见、普通员工不可见', () => {
-    const entry = NAV_ENTRIES.find((n) => n.to === '/app-center')!
+    // 可见性规则读**声明**条目（与变体无关）：变体只决定它在不在侧栏，不改变权限语义。
+    const entry = FEATURE_NAV_ENTRIES.find((e) => e.to === '/app-center')!
     expect(isNavVisible(entry, superAdmin)).toBe(true)
     expect(isNavVisible(entry, { role: 'auditor', permissions: ['capability:read'] })).toBe(true)
     expect(isNavVisible(entry, employee)).toBe(false)
+    // 变体那一侧：关闭时该条目不得出现在侧栏（声明还在，产物里没有）。
+    expect(NAV_ENTRIES.some((n) => n.to === '/app-center')).toBe(FEATURE_ENABLED.apps)
   })
 
   it('网关文件页:gateway:read 可见,只读角色(无该权限点)不可见', () => {

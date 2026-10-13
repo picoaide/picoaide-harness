@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
 import { me, request } from '../../api'
 import { setCurrentAdmin, type MeUser } from '../../lib/rbac'
+import { FEATURE_ENABLED, FEATURES_VARIANT } from '../../lib/features'
 
 // ---------------------------------------------------------------------------
 // 应用中心(2026-09-19 合并)的**结构接线**测试:子导航两项、两个子路由、
@@ -91,7 +92,14 @@ async function renderAppAt(path: string) {
   await screen.findByRole('link', { name: '应用' }, { timeout: 15_000 }).catch(() => null)
 }
 
-describe('应用中心(合并后)的子导航与子路由', () => {
+// P3 变体：本套用例全部经整棵 `<App/>` 走 `/admin/app-center/*` 路由 —— 应用面被关闭时
+// 这些路由**在产物里根本不存在**（页面 chunk 也不产出，见
+// docs/decisions/2026-10-14-webadmin-feature-variant.md）。那种形态下"路由不存在"由
+// `src/lib/routes.test.ts` 的变体对拍断言，这里按开关跳过（跳过条件写在用例名里，
+// 不静默少跑：变体标识一起打印出来）。
+const APPS_ON = FEATURE_ENABLED.apps
+
+describe.skipIf(!APPS_ON)(`应用中心(合并后)的子导航与子路由 [变体 ${FEATURES_VARIANT}]`, () => {
   it('子导航三项:应用 / 运营看板 / 限制项(「设置」已随基域配置面删除)', async () => {
     await renderAppAt('/admin/app-center')
 

@@ -159,6 +159,27 @@ webadmin 这两条路要么由同一个解析器在镜像构建期解析私有�
 | `apps` | `packages/host/wasm-apps-host/src/index.ts` 的 `apply()` |
 | `connectors` | `packages/host/connectors/src/index.ts` 的 `apply()` |
 
+**webadmin 侧的落点**（同一批串的第二种消费面；2026-10-14 P3 第三片补登记）：管理端的产物裁剪
+用**同一个**哨兵串判"关闭的模块其页面代码进没进 dist"，所以它也有落点、也必须由
+`featureSentinel(module)` 派生：
+
+| 模块 | webadmin 落点（**每个模块页各自一处**） |
+| --- | --- |
+| `skills` | `server/webadmin/src/pages/CapabilityCenter.tsx` |
+| `apps` | `server/webadmin/src/pages/app-center/{AppCenterLayout,Apps,OpensBoard,Limits}.tsx` |
+| `connectors` | `server/webadmin/src/pages/Connectors.tsx` |
+
+两条落点纪律：
+
+1. **逐页**，不是"每个模块一个文件"：内容面判的是"这个文件的代码进没进产物"，而模块页被
+   **静态**引用时被拉进产物的是那个具体的文件（2026-10-14 独立审计 M6：apps 的哨兵当时只在
+   `AppCenterLayout.tsx` 上，被拉进来的是 `Apps.tsx` ⇒ 关闭变体的产物里带着应用中心代码，
+   而当时的 5 个变体判据全绿）。页表 = `server/webadmin/scripts/check-feature-chunks.mjs` 的
+   `MODULE_EXPECTATIONS[*].pages`，与 `App.tsx` 被守卫的 `import()` **双向对拍**。
+2. **落点表本身有判据**：`scripts/verify-ci-scripts.mjs` 第 19 节把 webadmin 侧每个落点与
+   `featureSentinel()` 的返回值对拍（声明 + 真渲染），并扫"哨兵字面量出现在登记表之外的文件"
+   ⇒ 命名规则变更时两侧不可能各自自洽地留在旧串上。
+
 三条纪律（**每一条都对应一个已经踩过的失效形态**）：
 
 1. **哨兵必须写在该模块真正被使用的那条路径上**（模块注册/装配时写入日志或登记表的那一处），

@@ -176,8 +176,19 @@ const REGISTERED_GUARD_ENTRIES = new Map([
   // 的 `ci-check-go-build-tags`，理由：该判据此前**不在任何自动化里**，只在人手敲
   // `make -C server check-tags` 时生效 —— 见 docs/decisions/2026-10-14-server-build-tags.md §11-1）。
   // 摘要按本表上方的纪律在同一个改动里同步（取值来自 `--print-digests` 的复算结果）。
-  ['check:workflows', { script: 'node scripts/check-workflows.mjs', argvTail: [], digest: 'c2db38d198fd43b703851ef944da52fb6c17de3b94f679ab6268cf8e8b1c2f6e' }],
-  ['check:ci-scripts', { script: 'node scripts/verify-ci-scripts.mjs', argvTail: [], digest: '1251b7fcfaf871b2369a311224f1b7b177fd7327a6fa1c356a32c5ba7509efb1' }],
+  // 2026-10-14：`check:workflows` 补两条变体判据步骤的可执行性登记（`REQUIRED_CI_STEPS` /
+  // 判据词表 / `PINNED_STEP_POLICIES` + 载荷），并把 `[SK-7b]` 的固定开销常量提为
+  // `CI_JOB_FIXED_OVERHEAD_MINUTES`（45→60 min 预算的同批模型更正）；`check:ci-scripts`
+  // 第 19 节新增"两个变体 build-arg 必须成对"（Dockerfile fail-loud 断言）与量具自检。
+  // 两条摘要均按 `--print-digests` 复算后同批更新（改判据必须显式出现在 diff 里）。
+  //
+  // 2026-10-14 合并（四路收口）：以上两批改动分别来自 `p1b-conditionalize` 与
+  // `p3-webadmin-variant`，而合并后的这两个脚本是**两边内容的并集**（策略表 15 条、
+  // 词表/登记表各自多出对方没有的条目）⇒ 摘要不能取任何一侧的旧值，只能在合并后的
+  // 工作树上重新复算（下面两个值就是这么来的；由 `check-guard-parser-integrity` 与
+  // `verify-check-workspaces` 各自独立复算对拍）。
+  ['check:workflows', { script: 'node scripts/check-workflows.mjs', argvTail: [], digest: 'a2362e82d4478d766f6790e990534f103b2a47c841144b3a85d443a8f1a9ff01' }],
+  ['check:ci-scripts', { script: 'node scripts/verify-ci-scripts.mjs', argvTail: [], digest: '8b27a1ff2e367413f1c2aeba7a7f7fec185bccd42689f4cff66852dc7c7b9f03' }],
   ['check:patch-resolutions', { script: 'node scripts/verify-patch-resolutions.mjs', argvTail: [], digest: '6dcde2281311235a57722608d91e6a1fa59734411ad65cda76ea2bdc43145c83' }],
   ['check:patch-pin', { script: 'node scripts/check-patch-pin.mjs', argvTail: [], digest: 'a8fe5b45df5dfadd7a87332b31f9e14c4a6722a41f21cf0f0d9afa6450a3ba84' }],
   ['check:patches', { script: 'node scripts/verify-patches.mjs', argvTail: [], digest: '22131d86472ff930f22687192b07216c5cf74ab594d0091a6766e661a2c24683' }],
