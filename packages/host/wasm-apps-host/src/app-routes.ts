@@ -131,6 +131,16 @@ export function registerAppRoutes(ctx: Context, fence: HostLocalRouteFence): () 
   // （wasm-apps.ts 的 publishApp/validateApp/listCatalog/readAppRows…）—— 不经 HTTP，
   // 因此不需要浏览器持有性证明，也不会把员工令牌交给任何调用方。
   // 语言按**每次调用**解析（hostLocale 是上面的函数，不在模块级冻结）。
-  const disposeTools = registerWasmAppTools(ctx, { locale: () => hostLocale(), aiRowsConsent })
-  return () => { disposeRoute(); disposeTools() }
+  //
+  // `tools` 服务经 `ctx.inject` 取，**不写进行级 `export const inject`**（与
+  // `src/index.ts` 的 `browserSurface` 同一条理由，那段注释是这条约定的真源）：
+  // 纯 Node 宿主（组合冒烟、单测、无头嵌入）里 `tools` 可能整行缺席，而本插件在桌面
+  // 组合里是**必需行**（`desktop/src/startup-rows.ts`）—— 写进行级 inject 会让那种
+  // 组合里的行停在 PENDING，把"工具没注册"升格成"启动门禁红"。
+  // 回调在服务出现时才跑；它返回的 disposer 由 Cordis 收进这个子 fiber，`tools` 消失
+  // 或插件卸载时自动回收（`registerWasmAppTools` 要求的"从插件 fiber 里调用并回收"
+  // 仍然成立，且不会与下面那句重复回收）。
+  ctx.inject(['tools'], toolsCtx =>
+    registerWasmAppTools(toolsCtx, { locale: () => hostLocale(), aiRowsConsent }))
+  return disposeRoute
 }
