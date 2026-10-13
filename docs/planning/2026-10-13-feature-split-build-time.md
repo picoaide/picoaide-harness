@@ -52,6 +52,7 @@
 2. **`main()` 里的调用必须是字面量**：`server/cmd/server/main_assembly_criteria_test.go:47` 用 AST 要求 `seedDemoApps(wasmCtx, db, *dataDir)` 这一句留在 `main()`。⇒ 装配不能包进不可达构造。
 3. **`-tags` 的传参与 flag 顺序被钉住**：`scripts/check-workflows.mjs:3382-3397` 要求 `go vet` 的 `argv[1]` 逐字 `./...` ⇒ 只能写 `go vet ./... -tags=…`。共 14 个构建/测试入口要同改（`server/Makefile` ×6、`server/Dockerfile` ×3、`server/scripts/build-demo-apps.sh`、`.github/workflows/ci.yml` ×3 间接 1）。
 4. **tag 组合下的测试会静默不跑**：CI 只有一个 `go test` 步（`ci.yml:1025-1046`），`scripts/wasm/check-go-test-json.mjs` 只判"报告里出现的用例"。⇒ 必须新增"变体矩阵跑测试"的判据，否则减配变体的代码永不被测。
+5. **关闭态不得用 nil handler 表达**：gin 的 `addRoute` 只断言 `len(handlers) > 0`（源码核证见 §9），传 nil 会**照常注册**，症状是每个请求 panic→Recovery→500 —— 既不是约定的 404，也躲开了"路由消失声明表"的视线。必须走 `registerXxx` 的**提前 return**（既有唯一范例：`server/internal/router/router.go:136-138` 的 `if d.Wasm == nil { return }`）。
 
 ### 3.2 客户端侧的两条硬约束
 
@@ -77,7 +78,7 @@
 
 | # | 耦合 | 证据 | 处置口径 |
 |---|---|---|---|
-| 1 | `/readyz` 是应用中心资产 | `server/cmd/server/main.go:745-747`（`d.Ready == nil` 直接 panic）；唯一生产来源 `main.go:259` 的 `wasmPlat.Checker.Handler()` | 基础侧提供替身探针；`apps` 关闭时不得因此拒启 |
+| 1 | `/readyz` 是应用中心资产 | `server/cmd/server/main.go:745-747`（`d.Ready == nil` 直接 panic）；唯一生产来源 `main.go:259` 的 `wasmPlat.Checker.Handler()`；**`readyz` 整包位于 `server/internal/wasmapp/readyz/`，基础侧（`cmd/server/main.go`、`internal/router`、`internal/serverauth`、`internal/serverstore`）零 import，只有 `cmd/server/wasmapp*.go` 引用它** | 基础侧提供替身探针（`readyz` 需随模块或搬到中性包）；`apps` 关闭时不得因此拒启 |
 | 2 | 权限点 ↔ 路由双向判据 | `server/cmd/server/audit_r13ge_permset_test.go:72`（`reservedPermissions` 当前空表）；`server/webadmin/src/lib/nav.test.ts:665-678` 四向对拍读 `server/internal/serverauth/rbac.go` | **保留权限点 + 登记**（权限模型不随变体变） |
 | 3 | 渠道字段 `app_origin_scheme` 属应用中心 | `scripts/ci-channels.sh:770-772`（必需字段）；服务端 `main.go:463`（fail-loud） | 随 `apps` 变体放宽：关闭时不再强制 |
 | 4 | Dockerfile 跨模块取文件 | `server/Dockerfile:88` 把 `skills/app-builder/scripts/pack-assets.mjs` 拷给演示应用构建（:81 注释自陈"是同一个文件"）；`scripts/ci-build-channel-images.sh:228-229` 断言该技能文件存在 | 把该脚本搬到中性位置（演示应用工具链），技能侧引用同一份；四方对拍判据同步 |
@@ -133,7 +134,7 @@
 ## 9. 未核实项（不得当结论用）
 
 - 本轮所有结论来自**静态阅读**：未跑构建、未跑测试；"某判据会不会红"属推断；
-- gin 对 nil handler 的确切行为未实跑（推断：注册期不 panic、请求期 panic→Recovery→500，比整片不注册更隐蔽）；
+- ~~gin 对 nil handler 的行为未核实~~ → **已由源码核证**（gin v1.12.0：`gin.go:367` 的 `addRoute` 只断言 `len(handlers) > 0`；`routergroup.go:241-249` 的 `combineHandlers` 无 nil 元素校验）⇒ nil handler **会被正常注册**，症状是请求期 panic → Recovery → 500，而路由表、`/readyz`、`/server-info`、webadmin 导航全都正常。**仍未做运行期实测**（源码级结论）；
 - electron-builder 26 对应用根 matcher 的行为与静态阅读不完全一致 ⇒ 依赖 `files` 排包的人**必须以实测产物为准**；
 - `verify-packaged-runtime.ts`（2800+ 行）只核了四张清单表与三处引用点，其余判据群未读；
 - `deepseek-harness/` 子模块未做全量扫描。
