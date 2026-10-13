@@ -26,10 +26,27 @@
  *   - 去掉 `settle` 里 rename 之前那次 `anchoredLibraryPathStillHolds` ⇒ 用例 1 红；
  *   - 去掉 `ensureLibraryTempRoot` 的锚定（回到字符串拼路径）⇒ 用例 2 红；
  *   - 去掉 `anchorLibraryPath` 里的挂载点判据 ⇒ 用例 3 红（有 `mount` 权限时）。
+ *
+ * ## 概率性 → 确定性：S2-03 反向对照的年龄边界（本轮修复）
+ *
+ * 反向对照（"同形状的真目录照常被清扫"）用 `sweepStaleSkillTemps(skills, 0, …)`，
+ * 把年龄判据正压在 0 上。而 `staleAge` 用 `Date.now()`（**整毫秒**、向下取整）减
+ * `st.mtimeMs`（**亚毫秒**）：同一个整毫秒内写下的目录会算出**负年龄**，被读成
+ * "不陈旧"并**静默**跳过（`removed = 0`、日志为空 `[]`）。
+ *
+ * 实测（本机 4 vCPU）：满载 600 次里 115 次返回 0（19.2%）、7.0%（另一轮）；
+ * **空载 0/400** —— 所以它在本地（空载）绿、在 CI（4 vCPU 跑满）红，与
+ * "同一 SHA 一次全绿两次红"的形态一致。同族的 `skill-remove-window.spec.ts`
+ * 早就被迫用 `-60_000` 绕开这一档。
+ *
+ * 修法在实现侧：年龄不可能为负，截断只可能低估年龄 ⇒ 负值按 0ms 龄计
+ * （`Math.max(0, now - st.mtimeMs)`）。**没有删除或放宽任何判据**；反向对照一字未动，
+ * 另加一条把该边界**显式构造**出来的确定性判据（钉住整毫秒 + `utimes` 造亚毫秒 mtime），
+ * 旧实现下它 10/10 必红、新实现下 10/10 必绿（满载同样）。
  */
 import { execFileSync } from 'node:child_process'
 import { existsSync, renameSync, symlinkSync } from 'node:fs'
-import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as tar from 'tar'
@@ -121,14 +138,19 @@ async function skillArchive(name: string, marker: string): Promise<Buffer> {
   }
 }
 
-/** `mount --bind`（需要 CAP_SYS_ADMIN；不可用时用例退化成"机制不可用"的如实报告）。 */
-function bind(source: string, target: string): boolean {
+/** `mount --bind`（需要 CAP_SYS_ADMIN）；失败时把**真实原因**带出来（不是猜的）。 */
+function bind(source: string, target: string): { ok: boolean, reason: string } {
   try {
-    execFileSync('mount', ['--bind', source, target], { stdio: 'ignore' })
+    execFileSync('mount', ['--bind', source, target], { stdio: 'pipe' })
     mounts.push(target)
-    return true
-  } catch {
-    return false
+    return { ok: true, reason: '' }
+  } catch (cause) {
+    // 环境不具备时**必须**把原因打出来：CI 上 `mount` 以非 root 跑，失败原因
+    // 是真实的（"must be superuser…"），而旧实现只印一句猜的"需要 CAP_SYS_ADMIN"，
+    // 排查时拿不到任何证据。
+    const stderr = (cause as { stderr?: Buffer | string }).stderr
+    const text = (stderr === undefined ? '' : stderr.toString()).trim().split('\n')[0]
+    return { ok: false, reason: text === undefined || text === '' ? (cause as Error).message : text }
   }
 }
 
@@ -242,11 +264,12 @@ describe('R19A-S2-03：挂载点形态的"库内目录"⇒ 拒收（库外唯一
     await writeFile(join(vault, 'payload', 'backup', 'SKILL.md'), skillMd('victim', 'VAULT'))
     await writeFile(join(vault, 'payload', 'backup', 'only-copy.txt'), 'ONLY-COPY\n')
     await mkdir(join(skills, '.skill-tmp', 'install-boom'), { recursive: true })
-    const mounted = bind(join(vault, 'payload'), join(skills, '.skill-tmp', 'install-boom'))
-    console.log('[S2-03] bind mount 可用 =', mounted)
+    const mountAttempt = bind(join(vault, 'payload'), join(skills, '.skill-tmp', 'install-boom'))
+    const mounted = mountAttempt.ok
+    console.log('[S2-03] bind mount 可用 =', mounted, mounted ? '' : `| 原因 = ${mountAttempt.reason}`)
     if (!mounted) {
       // 本环境没有 CAP_SYS_ADMIN：如实报告"这条判据在本环境咬不到"，不假装通过。
-      console.log('[S2-03] 跳过：本环境无法建立 bind mount（需要 CAP_SYS_ADMIN）')
+      console.log('[S2-03] 跳过：本环境无法建立 bind mount —— ', mountAttempt.reason)
       expect(mounted).toBe(false)
       return
     }
@@ -266,9 +289,11 @@ describe('R19A-S2-03：挂载点形态的"库内目录"⇒ 拒收（库外唯一
     await mkdir(join(skills, '.skill-tmp', 'install-boom'), { recursive: true })
     await mkdir(join(vault, 'payload'), { recursive: true })
     await writeFile(join(vault, 'payload', 'user-data.txt'), 'USER-DATA\n')
-    const mounted = bind(join(vault, 'payload'), join(skills, '.skill-tmp', 'install-boom'))
-    console.log('[S2-03/G2] bind mount 可用 =', mounted)
+    const mountAttempt = bind(join(vault, 'payload'), join(skills, '.skill-tmp', 'install-boom'))
+    const mounted = mountAttempt.ok
+    console.log('[S2-03/G2] bind mount 可用 =', mounted, mounted ? '' : `| 原因 = ${mountAttempt.reason}`)
     if (!mounted) {
+      console.log('[S2-03/G2] 跳过：本环境无法建立 bind mount —— ', mountAttempt.reason)
       expect(mounted).toBe(false)
       return
     }
@@ -293,6 +318,35 @@ describe('R19A-S2-03：挂载点形态的"库内目录"⇒ 拒收（库外唯一
     console.log('[S2-03/反向] removed =', removed, '| 日志 =', JSON.stringify(lines))
     expect(removed).toBe(1)
     expect(existsSync(join(skills, '.skill-tmp', 'install-plain'))).toBe(false)
+  })
+
+  it('阈值 0 的边界：同一毫秒内的亚毫秒 mtime 不得被静默跳过（把上一条从"概率性"钉成"确定性"）', async () => {
+    const base = await tempRoot('r19v-bind-ms-')
+    const skills = join(base, 'skills')
+    const entry = join(skills, '.skill-tmp', 'install-plain')
+    await mkdir(entry, { recursive: true })
+    await writeFile(join(entry, 'x'), 'x')
+    // 上一条（反向对照）**曾经是概率性的**：`staleAge` 用 `Date.now()`（整毫秒、向下
+    // 取整）减 `st.mtimeMs`（亚毫秒），同一毫秒内写下的目录会算出**负年龄**，
+    // 被读成"不陈旧"并静默跳过 ⇒ `removed = 0`、日志为空。实测（本机 4 vCPU 满载）
+    // 600 次里 115 次 = 19.2%；空载 0/400；把采样与 mtime 钉在同一个整毫秒里 100% 复现。
+    //
+    // 这里把那个边界**显式构造**出来（不靠负载碰运气）：采样时钟钉在整毫秒 T，
+    // 条目 mtime 设为 T + 0.5ms（亚毫秒、同一整毫秒）⇒ 旧实现年龄恒为 -0.5ms。
+    // 阈值 0 的语义是"全都陈旧"，因此这条必须是"照常清扫"，不是"跳过"。
+    const pinned = Date.now()
+    await utimes(entry, pinned / 1000, (pinned + 0.5) / 1000)
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(pinned)
+    const { log, lines } = recordingLog()
+    let removed = -1
+    try {
+      removed = await sweepStaleSkillTemps(skills, 0, undefined, log)
+    } finally {
+      clock.mockRestore()
+    }
+    console.log('[S2-03/边界] removed =', removed, '| 日志 =', JSON.stringify(lines))
+    expect(removed, '阈值 0 = "全都陈旧"：同一毫秒内的条目必须照常清扫，不得静默跳过').toBe(1)
+    expect(existsSync(entry), '条目必须真的被删掉').toBe(false)
   })
 })
 

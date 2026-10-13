@@ -124,7 +124,10 @@ describe('R21-A1-05 删除面窗口：锚定之后、rm 之前被换掉 ⇒ 拒�
     hooks.armed = true
 
     // 阈值取负：诱饵是在注入那一刻（`sweepStaleSkillTemps` 已取过 `now` 之后）建出来的，
-    // 它的 `age = now - mtimeMs` 可能 ≤ 0 —— 用 0 会被年龄闸门静默跳过（判据失去输入）。
+    // 它的 `age = now - mtimeMs` 必然是负的。这一档此前会被年龄闸门**静默跳过**
+    // （判据失去输入）；实现侧现在把负年龄按 0ms 龄计（`staleAge` 的钳位，见
+    // `skill-install.ts` 注释与 `skill-library-anchor-escape.spec.ts` 的 S2-03 边界判据）。
+    // 这里仍取负阈值："全都陈旧"的语义更直白，也不依赖那层钳位。
     const removed = await sweepStaleSkillTemps(f.skillsDir, -60_000, undefined, recordingLog())
 
     // 注入真的发生了（两条都必须成立，否则本用例什么都没证明）。
@@ -145,7 +148,10 @@ describe('R21-A1-05 删除面窗口：锚定之后、rm 之前被换掉 ⇒ 拒�
     const f = await fixture()
     hooks.armed = false
     // 阈值取负：诱饵是在注入那一刻（`sweepStaleSkillTemps` 已取过 `now` 之后）建出来的，
-    // 它的 `age = now - mtimeMs` 可能 ≤ 0 —— 用 0 会被年龄闸门静默跳过（判据失去输入）。
+    // 它的 `age = now - mtimeMs` 必然是负的。这一档此前会被年龄闸门**静默跳过**
+    // （判据失去输入）；实现侧现在把负年龄按 0ms 龄计（`staleAge` 的钳位，见
+    // `skill-install.ts` 注释与 `skill-library-anchor-escape.spec.ts` 的 S2-03 边界判据）。
+    // 这里仍取负阈值："全都陈旧"的语义更直白，也不依赖那层钳位。
     const removed = await sweepStaleSkillTemps(f.skillsDir, -60_000, undefined, recordingLog())
     expect(removed).toBe(1)
     expect(existsSync(join(f.skillsDir, SKILL_TEMP_DIR, 'install-x'))).toBe(false)
