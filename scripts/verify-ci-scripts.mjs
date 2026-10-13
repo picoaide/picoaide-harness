@@ -15,7 +15,7 @@
  *      且失败信息**只报字段名不回显取值**(取值就是客户品牌,输出进公开日志)
  *   4. 逐渠道打包:官方保留完整日志、渠道输出被抑制、失败只报中性信息
  *   5. 产物归集到 client-assets/<channel>/,没产出即失败
- *   6. 更新服务器(R2)发布:每渠道独立目录、清单内容、保留最近 3 版、
+ *   6. 更新服务器(R2)发布:每渠道独立目录、清单内容、保留最近 2 版(最新 + 上一个)、
  *      缓存头(资产 immutable / 清单 no-cache)、清单最后写、缺 secrets 跳过、
  *      产物不全 fail-loud —— 这些出错都是静默的,只能在发版时才发现
  *   7. `--body` 只能是纯路径(2026-09-24 发布链阻断:`fileb://` 前缀在新 AWS CLI 上
@@ -37,7 +37,7 @@
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash, createHmac } from 'node:crypto'
 import { crc32, deflateSync } from 'node:zlib'
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -4002,9 +4002,10 @@ console.log('VERIFY-OK ' + process.env.DSH_BUILD_CHANNEL)
     check(typeof manifest.published_at === 'string' && manifest.published_at.endsWith('Z'), `${channel}: 清单需要 UTC 发布时间`)
   }
 
-  // 保留策略:最近 3 个版本(2.6.0/2.6.1/2.7.0),最旧的 2.5.0 被清掉。
+  // 保留策略:最近 2 个版本(2.6.1/2.7.0),更旧的 2.5.0 与 2.6.0 都被清掉。
   check(!existsSync(join(store, 'official', 'releases', '2.5.0')), '超出保留窗口的旧版本应被清理')
-  check(existsSync(join(store, 'official', 'releases', '2.6.0')), '保留窗口内的版本不得误删')
+  check(!existsSync(join(store, 'official', 'releases', '2.6.0')),
+    'KEEP=2 ⇒ 次新只留一个,第 2 新的旧版本也必须被清理')
   check(existsSync(join(store, 'official', 'releases', '2.6.1')), '保留窗口内的版本不得误删')
 
   // 缓存头:**逐对象**断言(2026-09-24 审计 C-23)。
@@ -5306,6 +5307,39 @@ exec "${concFakeAws}" "$@"
 }
 
 // ---- 7. 品牌渠道产物私密中转(不经公开 artifact) ----
+
+/**
+ * 假 aws 的 `s3api list-objects-v2` 分支(孤儿前缀清扫用)。
+ *
+ * 输出必须与真 CLI 的 `--query 'Contents[].[Key,LastModified]' --output text` **同形**:
+ * 每行 `<键>\t<LastModified ISO8601>`。LastModified 由文件 mtime 派生 —— 用例用
+ * `utimesSync` 把对象"做旧"来构造"超过阈值的历史残留",所以这个映射关系是判据的一部分
+ * (若假实现自己编一个时间,清扫的年龄判据在本地就测不出东西)。
+ *
+ * 三个中转夹具共用这一份:各写一个形状不同的假实现,等于把"清扫按什么时间判"变成三份口径。
+ */
+const fakeListObjectsV2Case = storeExpr => `  "s3api list-objects-v2")
+    if [ -n "\${FAKE_AWS_LIST_FAIL:-}" ]; then
+      # 故障注入:列表失败(端点不可达 / 权限不足)。清扫必须**出声但不阻断发布** ——
+      # 静默失败正是这类残留能攒下来的原因,而发布本身不该被一次清理失败带红。
+      echo "list-objects-v2 failed: _transfer/" >&2
+      exit 1
+    fi
+    prefix=""
+    for ((i = 2; i < \${#args[@]}; i++)); do
+      [ "\${args[$i]}" = "--prefix" ] && prefix="\${args[$((i + 1))]}"
+    done
+    if [ -d "${storeExpr}/\${prefix}" ]; then
+      while IFS= read -r file; do
+        [ -n "$file" ] || continue
+        key="\${file#${storeExpr}/}"
+        ts="$(node -e 'const fs = require("node:fs"); process.stdout.write(new Date(fs.statSync(process.argv[1]).mtimeMs).toISOString())' "$file")"
+        printf '%s\\t%s\\n' "$key" "$ts"
+      done < <(find "${storeExpr}/\${prefix}" -type f | LC_ALL=C sort)
+    fi
+    ;;
+`;
+
 {
   const work = tempDir('ci-transfer-')
   const stage = join(work, 'client-assets')
@@ -5397,7 +5431,7 @@ case "$cmd" in
           done ;;
     esac
     ;;
-esac
+${fakeListObjectsV2Case('$store')}esac
 `)
   execFileSync('chmod', ['+x', fakeAws])
 
@@ -5585,7 +5619,7 @@ case "\${args[0]:-} \${args[1]:-}" in
           done ;;
     esac
     ;;
-esac
+${fakeListObjectsV2Case('$store')}esac
 `)
   execFileSync('chmod', ['+x', attemptAws])
   const brandFiles = [
@@ -5795,7 +5829,7 @@ case "\${args[0]:-} \${args[1]:-}" in
     fi
     ;;
   "s3 rm") prefix="\${args[2]}"; rm -rf "$store/\${prefix#s3://*/}" ;;
-esac
+${fakeListObjectsV2Case('$store')}esac
 `)
   execFileSync('chmod', ['+x', fakeAws])
   // 只有 mac 的 dmg —— 另外两个平台的 job 没有产出(或产物没进中转前缀)。
@@ -5934,6 +5968,128 @@ esac
   check(pulledThree.status !== 0, '声明三端时缺平台必须失败(对照组:证明齐全判据仍然有牙)')
   check((pulledThree.stderr ?? '').includes('缺少平台'), '对照组失败信息应说明「缺少平台」')
   check((pulledThree.stderr ?? '').includes('Linux'), '对照组应点名缺的平台(前缀里只有 win+mac ⇒ 缺的是 Linux)')
+}
+
+// ---- 7d. 孤儿前缀清扫:按对象年龄清 _transfer/ 的历史残留(2026-10-13) ----
+//
+// 现场:run 中途失败/被取消时销毁步根本没跑,历史上把 attempt 编进前缀的旧格式同样没人删,
+// 而这些对象是**客户安装包**、桶是公开读的 —— "取回后立即销毁"对它们不成立。修法是按
+// 对象 LastModified 的年龄扫(缺省 24h),所以判据必须同时钉住三件事:
+//   ① 陈旧的孤儿要真被删(不然等于没有这条清理);
+//   ② **活着的 run 的产物不许被删**(三个平台 job 并发 push,年龄判据是它唯一的安全边界);
+//   ③ **本次 BASE 永不删**(即便对象是旧的 —— 前缀排除是硬条件,不看年龄)。
+{
+  const work = tempDir('ci-orphan-')
+  const stage = join(work, 'client-assets')
+  const out = join(work, 'release-artifacts')
+  const list = join(work, 'channels.list')
+  const store = join(work, 'store')
+  writeFileSync(list, 'official\nexample-brand\n')
+  mkdirSync(join(work, 'channels', 'example-brand'), { recursive: true })
+  writeFileSync(join(work, 'channels', 'example-brand', 'channel.json'), JSON.stringify({
+    schema: 1,
+    channel_id: 'example-brand',
+    identity: { display_name: 'Example Brand', short_name: 'Example' },
+    desktop: { product_name: 'Example Brand', slug: 'Example-Brand' },
+  }))
+
+  const fakeAws = join(work, 'aws')
+  writeFileSync(fakeAws, `#!/usr/bin/env bash
+set -euo pipefail
+store="${store}"
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --endpoint-url) shift 2 ;;
+    --only-show-errors) shift ;;
+    --recursive) shift ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+case "\${args[0]:-} \${args[1]:-}" in
+  "s3 cp")
+    src="\${args[2]}"; dst="\${args[3]}"
+    key="\${dst#s3://*/}"; key="\${key%/}"
+    mkdir -p "$store/$key"; cp -a "$src/." "$store/$key/"
+    ;;
+  "s3 rm") prefix="\${args[2]}"; rm -rf "$store/\${prefix#s3://*/}" ;;
+${fakeListObjectsV2Case('$store')}esac
+`)
+  execFileSync('chmod', ['+x', fakeAws])
+
+  const RUN = '4242'
+  // 与脚本同源的 token 派生(HMAC(R2_SECRET_ACCESS_KEY, RUN) 的前 16 位):
+  // "本次 BASE 永不删"这条判据必须打在**真实派生**的前缀上,自己编一个前缀等于没测。
+  const token = createHmac('sha256', R2_CREDENTIALS.R2_SECRET_ACCESS_KEY)
+    .update(RUN).digest('hex').slice(0, 16)
+  const currentPrefix = `${RUN}-${token}`
+  const brandArtifact = 'Example-Brand-2.7.0-x64-Setup.exe'
+
+  const age = (hours, key) => {
+    const file = join(store, key)
+    mkdirSync(dirname(file), { recursive: true })
+    writeFileSync(file, 'x')
+    const when = new Date(Date.now() - hours * 3600e3)
+    utimesSync(file, when, when)
+  }
+  const staleOrphan = `_transfer/9001-deadbeefdeadbeef/ch-1/${brandArtifact}`
+  const freshOrphan = `_transfer/9002-feedfacefeedface/ch-1/${brandArtifact}`
+  const staleOnCurrent = `_transfer/${currentPrefix}/ch-1/${brandArtifact}`
+
+  const transfer = (mode, extra = [], env = {}) => spawnSync('bash', [
+    transferScript, mode, '--list', list, ...extra,
+  ], {
+    cwd: work,
+    encoding: 'utf8',
+    env: {
+      PATH: `${work}:${process.env.PATH ?? ''}`,
+      HOME: process.env.HOME ?? '',
+      GITHUB_RUN_ID: RUN,
+      GITHUB_RUN_ATTEMPT: '1',
+      ...R2_CREDENTIALS,
+      ...env,
+    },
+  })
+
+  // ① 缺省阈值:陈旧孤儿删除、新鲜对象与本次前缀都留下。
+  age(72, staleOrphan)
+  age(0.5, freshOrphan)
+  age(72, staleOnCurrent)
+  const cleaned = transfer('clean')
+  check(cleaned.status === 0, `clean 应成功,实际退出 ${String(cleaned.status)}: ${cleaned.stderr ?? ''}`)
+  check(!existsSync(join(store, staleOrphan)), '超过阈值的孤儿中转对象必须被清扫(它是公开读桶里的客户安装包)')
+  check(existsSync(join(store, freshOrphan)), '年龄在阈值内的中转对象不得被删(并发 push 的平台 job 靠这条活着)')
+  check(existsSync(join(store, staleOnCurrent)), '本次 BASE 下的对象永不参与清扫(哪怕它很旧)')
+  check((cleaned.stdout ?? '').includes('孤儿前缀清扫'), '清扫必须打印一行结果(静默清理等于不可观测)')
+  // 公开面纪律:清扫的输出里不得出现对象键(键里是 slug 派生的安装包名)。
+  const cleanVisible = `${cleaned.stdout ?? ''}${cleaned.stderr ?? ''}`
+    .split('\n').filter(line => !line.startsWith('::add-mask::')).join('\n')
+  check(!cleanVisible.includes('Example-Brand'), '清扫日志不得回显品牌文件名')
+  check(!cleanVisible.includes('_transfer/9001'), '清扫日志不得回显对象键')
+
+  // ② 阈值 0 + 预演:只报数量,一个都不删(补做存量清理时的第一步)。
+  const dry = transfer('clean', ['--orphan-max-age-hours', '0', '--orphan-dry-run'])
+  check(dry.status === 0, '预演应成功')
+  check((dry.stdout ?? '').includes('预演'), '预演必须显式说明"未删"')
+  check(existsSync(join(store, freshOrphan)), '预演不得删任何对象')
+  check(existsSync(join(store, staleOrphan)) === false, '上一次真实清扫已经删掉的陈旧对象不应复活')
+
+  // ③ 阈值 0 真删:除本次 BASE 外全清(存量补做清理的口径)。
+  const flush = transfer('clean', ['--orphan-max-age-hours', '0'])
+  check(flush.status === 0, '阈值 0 的真实清理应成功')
+  check(!existsSync(join(store, freshOrphan)), '阈值 0 时新鲜孤儿也应被清掉(补做存量的语义)')
+  check(existsSync(join(store, staleOnCurrent)), '阈值 0 也不得删本次 BASE 下的对象')
+
+  // ④ 非法阈值:必须是显式失败(不许静默退化成缺省值)。
+  const badAge = transfer('clean', ['--orphan-max-age-hours', 'abc'])
+  check(badAge.status !== 0, '非法阈值必须失败')
+  check((badAge.stderr ?? '').includes('orphan-max-age-hours'), '失败信息必须点名参数')
+
+  // ⑤ 列表失败:出声但不阻断(清理是收尾步,不是发布判据)。
+  const listFail = transfer('clean', [], { FAKE_AWS_LIST_FAIL: '1' })
+  check(listFail.status === 0, '清扫的列表失败不得让 clean 变红(它是尽力而为的收尾步)')
+  check((listFail.stderr ?? '').includes('::warning::') && (listFail.stderr ?? '').includes('孤儿前缀清扫'),
+    '列表失败必须打印 ::warning:: 说明"本次不清扫"(静默跳过 = 以为清干净了)')
 }
 
 // ---- 8. 敏感路径不得入库(忽略规则是唯一防线,补一条硬守卫) ----
@@ -6201,7 +6357,7 @@ exit 0
   publish('beta', '2.7.2')
   check(published('2.7.2'), '本次刚发布的 2.7.2 绝不能被保留策略删掉(旧实现会:预发布排在正式版之前)')
   const afterA = readdirSync(releasesDir).sort()
-  check(afterA.length === 3, `保留窗口应仍是 3 个版本($VER + 2 个次新),实际 ${afterA.length}: ${afterA.join(', ')}`)
+  check(afterA.length === 2, `保留窗口应仍是 2 个版本($VER + 1 个次新),实际 ${afterA.length}: ${afterA.join(', ')}`)
   check(afterA.includes('2.7.2'), `保留窗口必须含本次版本,实际 ${afterA.join(', ')}`)
   // latest.json 的下载地址必须指向**真实存在**的资产(旧实现指向刚被删掉的目录)。
   const manifestA = JSON.parse(readFileSync(join(store, 'beta', 'latest.json'), 'utf8'))
@@ -6221,7 +6377,7 @@ exit 0
   publish('beta', '2.7.0')
   check(published('2.7.0'), '补发旧版本时,本次刚上传的 2.7.0 也不能被删')
   const afterB = readdirSync(releasesDir).sort()
-  check(afterB.length === 3, `保留窗口应仍是 3 个版本,实际 ${afterB.length}: ${afterB.join(', ')}`)
+  check(afterB.length === 2, `保留窗口应仍是 2 个版本,实际 ${afterB.length}: ${afterB.join(', ')}`)
   check(afterB.includes('2.7.0'), `保留窗口必须含本次版本,实际 ${afterB.join(', ')}`)
 }
 
@@ -7378,5 +7534,8 @@ process.stdout.write('verify-ci-scripts: OK — ref 形态判定唯一真源(tag
   + '归档边界版本与 git 真值对拍;并锚到 ci-build-channel-images.sh 的三 tag 与'
   + 'serverstore 反向对账**真的驱动 fail-loud 分支**)/'
   + 'clean 的旧格式前缀清扫(缺 GITHUB_RUN_ID ⇒ 显式跳过,绝不退化成删掉所有 local-* 前缀)/'
+  + '孤儿前缀清扫(按对象 LastModified 年龄清 _transfer/ 残留:陈旧孤儿真删、'
+  + '阈值内的新鲜对象与**本次前缀**绝不删、预演不删、阈值 0 可补做存量、'
+  + '非法阈值 fail-loud、列表失败只出 ::warning:: 不阻断发布;并钉住清扫日志不回显对象键)/'
   + '渠道交付平台收窄(desktop.platforms:镜像装配丢弃未声明平台 + 声明了却没有产物即 fail-loud 并点名;'
   + 'R2 中转 push 不上传未声明平台、pull 的齐全判据只要求声明平台,并用三端对照组证明判据仍有牙)\n')

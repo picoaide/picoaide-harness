@@ -45,10 +45,10 @@ default directory"; only an explicit `off` / `none` / `-` / `disabled` disables 
 "empty" would make a pure intranet machine send outbound requests. Both misreadings have real costs, so
 the semantics have to be explicit.
 
-**Why only 3 versions are kept.** Each channel **keeps only the 3 most recent versions** on the update
-server: image archives are large (hundreds of MB up to the GB range, since they contain installers for
-the three platforms), and the retention policy keeps the rollback anchors (the previous one and the one
-before that) fetchable without letting storage and distribution costs grow without bound. Older versions
+**Why only 2 versions are kept.** Each channel **keeps only the 2 most recent versions** (latest plus
+the previous one) on the update server: image archives are large (GB-range, since they contain the
+installers for all three platforms) and the update server's free tier is 10 GB — the retained count times
+the channel count *is* the footprint. One previous version is enough for a rollback; older versions
 come from the [GitHub Releases](https://github.com/picoaide/picoaide-harness/releases) page (the public
 channels' complete archive).
 
@@ -182,7 +182,7 @@ from this server** (this criterion) while **the server checks the update server 
 
 | Symptom | Criterion | Recovery |
 |---|---|---|
-| The target version is past the retention window (404) | the download returns 404 | Each channel **keeps only the 3 most recent versions**: take it from GitHub Releases (public channels only), or roll back to an old image tag kept on this host |
+| The target version is past the retention window (404) | the download returns 404 | Each channel **keeps only the 2 most recent versions** (latest + previous): take it from GitHub Releases (public channels only), or roll back to an old image tag kept on this host |
 | Re-publishing the same version still serves the old bytes | the downloaded sha256 does not match the new `SHA256SUMS` | The zip and `SHA256SUMS` under `<channel>/releases/<version>/` are **immutable long-cache** objects: after overwriting the same version, the edge may still serve the old bytes. Either publish under a new version number, or add a cache-busting parameter and verify again |
 | The internal mirror's manifest is reported as "update check unavailable" | the log shows `manifest channel "…" != this server's channel "…"` | The internal `latest.json`'s `channel_id` must match this deployment's channel — this check exists to prevent cross-channel upgrades; do not bypass it |
 | A pure intranet machine still makes outbound requests | packet capture / firewall logs | `PICOAI_UPDATE_ENDPOINT` was left empty instead of `off`: empty means the default public directory |

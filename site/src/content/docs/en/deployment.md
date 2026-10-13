@@ -139,7 +139,7 @@ Key fields in `latest.json`:
 | `client.version` | Client version shipped inside this image (same origin as the server) |
 | `published_at` | When this version was published (UTC) |
 
-- Each channel **keeps only the 3 most recent versions** on the update server; older ones come from
+- Each channel **keeps only the 2 most recent versions** (latest + previous) on the update server; older ones come from
   the [GitHub Releases](https://github.com/picoaide/picoaide-harness/releases) page (the public
   channels' history);
 - GitHub Releases carry **only public channels** (official / pre-release) images and `SHA256SUMS`;

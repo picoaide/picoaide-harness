@@ -51,10 +51,10 @@ GitHub Release **仍然发布**，但内容物变了，两者定位不同：
 | | R2 `release.picoaide.com` | GitHub Release |
 |---|---|---|
 | 发布物 | **镜像 tar 压缩包**（所有渠道一致）+ `latest.json` | **镜像 tar 压缩包**（同一个文件，长期存档） |
-| 版本范围 | **只留最近 3 个版本**（§3） | **全部历史版本永久保留** |
+| 版本范围 | **只留最近 2 个版本**（§3） | **全部历史版本永久保留** |
 | 变更说明 | 不承载 | 发布说明（`docs/releases/<tag>.md`） |
 | 谁读它 | 机器：服务端 `updatecheck`、客户端升级、部署下载 | 人：审计、查变更、取旧版本镜像 |
-| 为什么需要 | 升级与回滚要快、要稳定 | R2 只留 3 版 → 更老的镜像只能从这里取；同时保留人类可读的版本历史 |
+| 为什么需要 | 升级与回滚要快、要稳定 | R2 只留 2 版 → 更老的镜像只能从这里取；同时保留人类可读的版本历史 |
 
 **这两条不能互相替代**：R2 是"热"分发面（有保留窗口），GitHub Release 是"冷"存档 + 变更记录。
 删掉 GitHub Release 会导致老版本镜像永久失传、版本历史无处可查。
@@ -149,13 +149,23 @@ CI 目前**只支持 `beta` 与 `official`**：渠道由 tag 形态推导（含 
 
 ---
 
-## 3. 保留策略：R2 只留最近 3 个版本
+## 3. 保留策略：R2 只留最近 2 个版本
 
-**定案（2026-09-10）**：每个渠道目录只保留**最近 3 个版本**的 `releases/<v>/`，更旧的整目录删除。
-`latest.json` 始终指向最新版，不受影响。
+**定案（2026-09-10，2026-10-13 收紧 3 → 2）**：每个渠道目录只保留**最近 2 个版本**的
+`releases/<v>/`（= 最新版 + 上一个版本），更旧的整目录删除。`latest.json` 始终指向最新版，
+不受影响。
 
-理由：单版本镜像 tar ~500MB（**内含客户端包**），3 版 ≈ 1.5GB/渠道 —— 可接受；
-不设上限的话一年下来单渠道就是上百 GB。3 个版本足够覆盖"回滚一级 / 灰度观察"的实际需要。
+理由：单版本渠道包**内含三平台客户端安装包**，实测 `v2.8.3-beta.1` 的
+`picoaide-server-2.8.3-beta.1-amd64.zip` = 1,248,847,268 B，其中 1.22 GB 就是
+`Setup.exe` / `.dmg` / `.AppImage` 三件（服务端本体只占 ~69 MB）—— 于是
+`KEEP × 渠道数` 直接决定占用：4 渠道 × 3 版 ≈ 15 GB、× 2 版 ≈ 10 GB，而 R2 免费额度是
+10 GB ⇒ **3 版必然超**。回滚只需要"退回上一版"这一格：客户侧升级序列本来就把升级前镜像
+固化成渠道 tag（`docs/deploy/AI-DEPLOY.md` §6 第 0 步，稳定 1–2 天才清理），更老的版本以
+GitHub Release（公开渠道）与本地镜像 tag 作为长期存档。
+
+> 真源是 `scripts/ci-publish-update-server.sh` 的 `KEEP=`（现在 `KEEP=2`）。改它必须同批改
+> 本节的数字、`AGENTS.md` 的 CI 段与 `scripts/verify-ci-scripts.mjs` 的三处保留断言 ——
+> 判据面与文档漂移在本仓是登记在案的假绿类别（只改脚本会留下"文档说 3 版、脚本删到 2 版"）。
 
 **旧版本下不到怎么办 —— GitHub Release 是长期存档（见 §11）**：
 R2 存**热版本**（升级与回滚用，快），GitHub Release 存**全部历史版本的镜像包**（审计与旧版本
@@ -164,7 +174,7 @@ R2 存**热版本**（升级与回滚用，快），GitHub Release 存**全部�
 | 需求 | 取哪边 |
 |---|---|
 | 客户检查更新 / 升级 | R2 `latest.json` + `releases/<最新v>/` |
-| 回滚到上一个版本 | R2（在 3 个热版本窗口内，直接下 tar） |
+| 回滚到上一个版本 | R2（在 2 个热版本窗口内，直接下 tar） |
 | 回滚到更老的版本 / 审计 | GitHub Release 附件（永久，同一个镜像 tar） |
 
 > ⚠️ **回滚镜像会连带回滚"客户端可升级到哪个版本"**（2026-09-12 补）：
@@ -178,7 +188,7 @@ R2 存**热版本**（升级与回滚用，快），GitHub Release 存**全部�
 > 客户端契约变更（例如 0061/0062 余额字段、DSH 会话格式世代），必须同时通知客户
 > **不要降级客户端**，并按 `docs/deploy/AI-DEPLOY.md` §7 的口径处理。
 
-**清理方法**（发布时执行，删"第 4 新及更早"的目录）：
+**清理方法**（发布时执行，删超出保留窗口的目录：`KEEP=2` ⇒ 第 3 新及更早）：
 
 > **不要手敲这段逻辑 —— 直接跑发布脚本**（它自带保留策略，且与发布同一个事务顺序：
 > 先上传、**校验完整性**、再清理、最后写 `latest.json`）：
@@ -193,7 +203,7 @@ R2 存**热版本**（升级与回滚用，快），GitHub Release 存**全部�
 ```bash
 CH=official                 # ← 目标渠道 id（渠道目录名）
 VER=<本次刚发布的版本号，不带 v>   # **必填**：本次版本永不参与淘汰
-KEEP=3
+KEEP=2                      # 与 scripts/ci-publish-update-server.sh 的 KEEP= 同源
 # 关键三点（2026-09-12 审计 P1-2 的现场结论，缺任何一条都会删掉刚发布的版本）：
 #   ① 用 `grep -vxF "$VER"` 把本次版本从待淘汰集合里**精确**排除
 #      （`-x` 整行匹配：`2.7.2` 不能误伤 `2.7.20` / `2.7.2-beta.1`）；
@@ -374,8 +384,8 @@ $aws s3api put-object --bucket "$R2_BUCKET" \
 $aws s3 cp "$DIR/latest.json" "s3://$R2_BUCKET/$CH/latest.json" \
   --content-type application/json --cache-control 'no-cache'
 
-# 3) 清理到只剩最近 3 个版本（见 §3：必须排除本次版本，用版本序 sort -V 不能用字典序）
-KEEP=3
+# 3) 清理到只剩最近 2 个版本（见 §3：必须排除本次版本，用版本序 sort -V 不能用字典序）
+KEEP=2
 versions="$($aws s3 ls "s3://$R2_BUCKET/$CH/releases/" | awk '{print $2}' | sed 's#/##' \
   | grep -E '^[0-9]' | grep -vxF "$VER" || true)"
 printf '%s\n' "$versions" | sort -rV | tail -n +"$KEEP" | while read -r old; do
@@ -505,6 +515,27 @@ tag 运行时三平台 job 各自产出安装包，release job 汇总后构建�
 
 由此有一条硬约束：**R2 凭据缺失 + 本次含品牌渠道 = 流水线直接失败**（中转与发布
 脚本都会拦），因为 R2 是品牌渠道唯一的分发面；静默跳过等于"客户零交付而全绿"。
+
+**孤儿前缀清扫（2026-10-13）**：销毁步只在 run 正常走到 release job 时才执行 ——
+run 中途失败/被取消时，中转对象会留在**公开读**的桶里（内容就是客户安装包）。
+所以 `ci-channel-transfer.sh` 的 `push`/`clean` 两条路径都会顺手扫一遍
+`_transfer/`：**按对象 LastModified 的年龄**（缺省 24h）删掉超龄对象，且**永不**碰
+本次 run 自己的前缀。年龄阈值是唯一的安全边界（活着的 run 的产物只有分钟级年龄，
+三个平台 job 并发 push 也不会互删），不需要"当前 run 是谁"这个无法自证的事实。
+
+- 阈值：`--orphan-max-age-hours N` 或 `TRANSFER_ORPHAN_MAX_AGE_HOURS`（命令行优先）；
+- 清理失败**不阻断发布**（它是收尾步），但一定打印 `::warning::` —— 静默失败正是
+  这类残留能攒下来的原因；
+- **补做存量清理**（历史遗留的一次性动作，需要 R2 + aws 两组凭据）：
+
+  ```bash
+  R2_ACCOUNT_ID=… R2_BUCKET=… R2_SECRET_ACCESS_KEY=… \
+  AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=… AWS_DEFAULT_REGION=auto \
+    bash scripts/ci-channel-transfer.sh clean --list channels.list --orphan-max-age-hours 0 --orphan-dry-run
+  # 先看预演报出的对象数，再去掉 --orphan-dry-run 真删
+  ```
+
+  阈值 `0` = 除本次 run 的前缀外，`_transfer/` 下的对象全清（这就是"存量清理"的语义）。
 
 ### 10.2 桶是**公开读**的：渠道 id 就是公开路径前缀
 

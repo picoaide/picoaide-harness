@@ -159,7 +159,7 @@ const MINIMUM_REQUIRED_GUARDS = [
 const REGISTERED_GUARD_ENTRIES = new Map([
   ['check:layout', { script: 'node scripts/verify-layout.mjs', argvTail: [], digest: '7f5f2073b0eec7fd0ea9ff47d86ba0b1e85bdbc3673544ed5680a20da6dd5cdc' }],
   ['check:workflows', { script: 'node scripts/check-workflows.mjs', argvTail: [], digest: '4752f083dafb3efa6658b7a7707c606ef814d6c014dac3804057b33a4246cd57' }],
-  ['check:ci-scripts', { script: 'node scripts/verify-ci-scripts.mjs', argvTail: [], digest: 'c8af3909dec15fec1abd0bbd43d2778b1def67d184bedab9f677ed7370bdb3b7' }],
+  ['check:ci-scripts', { script: 'node scripts/verify-ci-scripts.mjs', argvTail: [], digest: 'c75c9026838cb08534d1de0f13e1a2ae8da7ebb95257e90daa8852d626bc6991' }],
   ['check:patch-resolutions', { script: 'node scripts/verify-patch-resolutions.mjs', argvTail: [], digest: '6dcde2281311235a57722608d91e6a1fa59734411ad65cda76ea2bdc43145c83' }],
   ['check:patch-pin', { script: 'node scripts/check-patch-pin.mjs', argvTail: [], digest: 'a8fe5b45df5dfadd7a87332b31f9e14c4a6722a41f21cf0f0d9afa6450a3ba84' }],
   ['check:patches', { script: 'node scripts/verify-patches.mjs', argvTail: [], digest: '22131d86472ff930f22687192b07216c5cf74ab594d0091a6766e661a2c24683' }],
