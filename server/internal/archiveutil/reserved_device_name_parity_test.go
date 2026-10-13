@@ -56,9 +56,17 @@ import (
 // 两个候选：包目录相对（`go test ./internal/archiveutil/`）与仓库根相对
 // （在仓库根跑 `go test ./server/internal/archiveutil/` 时 cwd 不变，仍是包目录；
 // 保留仓库根相对只是为了容忍"从别处拉起测试二进制"的调用方式）。
+//
+// P0-b 把这两份客户端规则源搬出了 enterprise 包：
+//
+//	`enterprise/src/{skill-name-rules,archive-util}.ts`
+//	  → `capability-center/src/host/{skill-name-rules,archive-util}.ts`
+//
+// 旧家已不存在，两份文件逐字节相同（搬迁未改内容）；路径常量必须跟着搬，
+// 否则本判据会退化成假红（"读不到源码 = 仓库结构事故"）。
 const (
-	clientSkillNameRulesRel = "packages/host/enterprise/src/skill-name-rules.ts"
-	clientArchiveUtilRel    = "packages/host/enterprise/src/archive-util.ts"
+	clientSkillNameRulesRel = "packages/host/capability-center/src/host/skill-name-rules.ts"
+	clientArchiveUtilRel    = "packages/host/capability-center/src/host/archive-util.ts"
 )
 
 func readClientSource(t *testing.T, rel string) string {
