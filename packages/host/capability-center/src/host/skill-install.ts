@@ -1361,19 +1361,20 @@ export async function sweepStaleSkillTemps(
     // 交给 `age >= maxAgeMs`，于是 `maxAgeMs === 0`（"全都陈旧"）这一档把它读成
     // "不陈旧"并**静默**跳过（`staleAge` 返回 `undefined` 时一个字都不打）。
     //
-    // 这不是理论边界，而是实测的：
-    //  · `tests/skill-library-anchor-escape.spec.ts` 的 S2-03 反向对照
-    //    （"同形状的真目录照常被清扫"）用 `maxAgeMs = 0` 正好压在 0 上 ——
-    //    本机 4 vCPU 满载下 600 次里 115 次返回 0（19.2%），日志为空 `[]`；
-    //    空载时 0/400；把采样时钟与亚毫秒 mtime 钉在同一个整毫秒里则 100% 复现。
-    //  · 同族的 `tests/skill-remove-window.spec.ts` 早已被迫用 `-60_000` 绕开这一档
-    //    （那里注释写着"用 0 会被年龄闸门静默跳过（判据失去输入）"）。
+    // 边界是**可确定性构造**的（不靠负载碰运气）：把采样时钟钉在整毫秒 T、`utimes`
+    // 把条目 mtime 设为 T + 0.5ms ⇒ 旧实现恒 `age = -0.5ms`、恒静默跳过。
+    // `tests/skill-library-anchor-escape.spec.ts` 的 S2-03 反向对照用 `maxAgeMs = 0`
+    // 正好压在 0 上；同族的 `tests/skill-remove-window.spec.ts` 早已被迫用 `-60_000`
+    // 绕开这一档（那里注释写着"用 0 会被年龄闸门静默跳过（判据失去输入）"）。
     //
     // 截断只可能**低估**年龄（`floor(now) <= now`），所以负值一律按 0ms 龄计。
-    // 这不改任何生产语义：缺省阈值 24h 下 `0 >= 24h` 仍为假（未来时间戳照旧不清扫，
-    // 方向仍是 fail-safe）；阈值 ≤ 0 的语义本来就是"全都陈旧"
-    // （`skill-remove-window.spec.ts` 依赖它 —— 那里的诱饵在 `now` 采样**之后**才
-    // 建出来，年龄必然是负的，钳到 0 才能继续作为判据的输入）。
+    // 钳位只归一化"同一毫秒内"这一档误差，**不改方向** —— 两半各有判据：
+    //  · **未来时间戳照旧不清扫**（fail-safe 的那一半）：缺省 24h 下 `0 >= 24h` 仍为假
+    //    （判据："缺省 24h 的 fail-safe 半边：未来时间戳不得被清扫"）。把这一行写成
+    //    `Math.abs(...)`/反写减法就会开始删未来时间戳的用户可见条目，那条判据会红；
+    //  · **阈值 ≤ 0 的"全都陈旧"照旧成立**：`skill-remove-window.spec.ts` 依赖它 ——
+    //    那里的诱饵在 `now` 采样**之后**才建出来，年龄必然是负的，钳到 0 才能继续
+    //    作为判据的输入（判据："阈值 0 的边界：同一毫秒内的亚毫秒 mtime 不得被静默跳过"）。
     const age = Math.max(0, now - st.mtimeMs)
     return age >= maxAgeMs ? age : undefined
   }
