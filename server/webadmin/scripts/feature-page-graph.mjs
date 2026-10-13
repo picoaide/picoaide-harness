@@ -76,8 +76,25 @@ const STATEMENT_RE = /(?:^|\n)[ \t]*(import|export)\b([\s\S]*?)\bfrom[ \t]*['"](
 /** 副作用导入：`import '<spec>'`（无 `from`，单独抽，避免吞掉下一条语句）。 */
 const BARE_IMPORT_RE = /(?:^|\n)[ \t]*import[ \t]*['"]([^'"]+)['"]/gu
 
-/** 动态导入：`import('<spec>')`。 */
-const DYNAMIC_IMPORT_RE = /\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/gu
+/**
+ * 动态导入：`import('<spec>')` —— 单引号 / 双引号 / **反引号**三种都认。
+ *
+ * 为什么必须含反引号（2026-10-14 补）：打包器（esbuild/rollup）三种引号都认，而本判据此前
+ * 只认前两种 ⇒ ``import(`./app-center/Apps`)`` 这样一条**静态可解析**的隐藏入口在源码图上
+ * 完全不可见，正是 R1 要拦的形态（那条边真会被折进引用方的 chunk）。**静态** import 不需要
+ * 这一条：以反引号书写的静态 import 本身就是语法错误，能藏入口的只有动态导入。
+ *
+ * 开闭引号用**反向引用**（`\1`）配平，不用 `['"`]…['"`]` 那样的字符类：后者会把
+ * `import("x')` 这种引号不配对的文本当成一条边（噪声边）。
+ *
+ * 关于"会不会把普通字符串里的 `import(` 误判进来"：本判据的扫描面**本来就是源码文本**
+ * （见文件头"扫描面是源码文本"一段），`const s = "import('./X')"` 在旧正则下**同样**会成边
+ * —— 扩到反引号没有新增这一类假阳性，新增的只有"反引号包裹"这一种，而它恰恰是唯一
+ * "既过打包器、又绕开本判据"的写法。残余边界（认账在 `docs/decisions/2026-10-14-webadmin-feature-variant.md`
+ * §8）：带插值的模板串（`` import(`./x/${y}`) ``）解析不到文件，按"解析不到的说明符"丢弃
+ * （与裸包名同一条路），不产生假边、但也不覆盖那种写法。
+ */
+const DYNAMIC_IMPORT_RE = /\bimport\s*\(\s*(['"`])([^'"`]+)\1\s*\)/gu
 
 /**
  * 一个 import 边。
@@ -156,7 +173,7 @@ function parseImportEdges(file, source, packageRoot, appFile) {
     push(match[3], false, match.index)
   }
   for (const match of source.matchAll(BARE_IMPORT_RE)) push(match[1], false, match.index)
-  for (const match of source.matchAll(DYNAMIC_IMPORT_RE)) push(match[1], true, match.index)
+  for (const match of source.matchAll(DYNAMIC_IMPORT_RE)) push(match[2], true, match.index)
   return edges
 }
 

@@ -45,6 +45,26 @@
  * （"判据自己缩面了"），而不是悄悄少判一个文件。缺了这两条，新增一个模块页时形态表会被
  * 强制更新、这张产物表却不会 —— 新页面的泄漏正好落进上面第三条通道的盲区。
  *
+ * ## **判定体自己也要有量具**（判据的判据，退出码 2 的另一半）
+ *
+ * 前面那三条通道判的是**产物**；而"产物 ⟺ 变体"这件事只有一个判定体：`judge()`。
+ * `checkPreconditions` 只能证明**量具还在**（哨兵串写没写、页表全不全、vite 在不在），
+ * 它证明不了**判定体还在**。现场（2026-10-14 独立审计）：把 `judge()` 改成 `return []`
+ * —— 前置检查全过、源码图全过、5 次构建照跑 —— 而 `npm run check:features` 打印 ✅5/5、
+ * 退出码 0。也就是说，判定体被掏空时，这套门禁的**每一条**都还是绿的（一个"永远说
+ * 没问题"的量具比没有量具更坏：它把"没判"伪装成"判过了"）。
+ *
+ * 修法是给判定体配**合成样本**：不依赖真构建，直接构造 dist 形状的输入喂给 `judge()`，
+ * 断言**正样本无问题**且**每个负样本都被点名**（负样本各注入一类偏差：缺/多哨兵串、
+ * 缺/多页面 chunk、空 dist、缺核心页 chunk）。任何一条不成立 ⇒ 退出码 2 —— 因为那时
+ * 失效的是**判据**，不是产物；把它记成 1 会让人去查产品代码，查不到东西。
+ *
+ * 为什么样本数要有**下界常量**：判据的判据同样会被人"顺手删两个样本"（删到零条时自检
+ * 恒绿，判定体被掏空又回到上面的现场）。`SELFTEST_MIN_SAMPLES` / `SELFTEST_MIN_RED_SAMPLES`
+ * 是**棘轮**：只允许被"变多"越过，删样本 / 删负样本当场红。
+ *
+ * 自检跑在**任何真构建之前**：判据坏了要 1 秒内知道，而不是跑完 5 次构建（分钟级）之后。
+ *
  * ## 用法与退出码
  *
  * ```bash
@@ -53,10 +73,14 @@
  * node scripts/check-feature-chunks.mjs --quiet      # 只打印结论行
  * ```
  *
- * 退出码：0 = 矩阵全部符合预期；1 = 有不符合项（含源码图上的泄漏 —— 那一类在构建之前就红）；
- * 2 = **判据自身**读不到输入 / 量具缺失 / 页表与守卫不对拍（源文件里没有哨兵串、页面源文件
- * 找不到、vite 不可执行）—— 2 与 1 分开，是为了让"判据坏了/表缩面了"与"产品错了"在 CI
- * 日志里可区分。
+ * 退出码（**1 与 2 是两个不同的人去看**）：
+ *
+ *   · 0 = 矩阵全部符合预期；
+ *   · 1 = **产物与变体不符**（产品代码错了：关闭的模块仍有代码进 dist，或开启的模块没进；
+ *     含源码图上的泄漏 —— 那一类在构建之前就红）⇒ 去看 `src/`；
+ *   · 2 = **判据自身失效**（`judge()` 自检不过 / 读不到输入 / 量具缺失 / 页表与守卫不对拍：
+ *     源文件里没有哨兵串、页面源文件找不到、vite 不可执行）⇒ 去看这个脚本与 `src/` 的
+ *     哨兵/页表，不要去查产品代码 —— 那时"产品错了没有"这件事**还没被判**。
  */
 
 import { spawnSync } from 'node:child_process'
@@ -254,6 +278,23 @@ function runBuild(variant, outDir) {
 }
 
 /**
+ * 资源文件名集合 → 动态 chunk 基名集合。
+ *
+ * Vite 的动态 chunk 名形如 `<模块文件名>-<hash>.js`；取 `-hash.js` 之前的基名。
+ * 单独抽出来是给 {@link syntheticDist} 用的：合成样本必须走**同一条**派生规则，
+ * 否则"样本长得像 dist"就成了一句没人检查的话（读产物的规则改了、样本没改 ⇒ 自检恒绿）。
+ * @param assetFiles - `assets/` 下的文件名（不含目录）。
+ * @returns chunk 基名集合。
+ */
+function chunkBasenamesOf(assetFiles) {
+  return new Set(
+    assetFiles
+      .filter((name) => name.endsWith('.js'))
+      .map((name) => name.replace(/-[A-Za-z0-9_-]{6,}\.js$/u, '').replace(/\.js$/u, '')),
+  )
+}
+
+/**
  * 读一次构建产物：全部文件的文本内容 + chunk 文件名集合。
  * @param outDir - 产物目录。
  * @returns `{ text, chunkBasenames, assetFiles }`。
@@ -269,13 +310,7 @@ function readDist(outDir) {
   const assetFiles = files
     .filter((p) => p.includes(`${sep}assets${sep}`))
     .map((p) => p.slice(p.lastIndexOf(sep) + 1))
-  // Vite 的动态 chunk 名形如 `<模块文件名>-<hash>.js`；取 `-hash.js` 之前的基名。
-  const chunkBasenames = new Set(
-    assetFiles
-      .filter((name) => name.endsWith('.js'))
-      .map((name) => name.replace(/-[A-Za-z0-9_-]{6,}\.js$/u, '').replace(/\.js$/u, '')),
-  )
-  return { text, chunkBasenames, assetFiles }
+  return { text, chunkBasenames: chunkBasenamesOf(assetFiles), assetFiles }
 }
 
 /**
@@ -323,6 +358,172 @@ function judge(matrixEntry, enabled, dist) {
 }
 
 /**
+ * 合成样本条数**下限**（棘轮；见文件头"判定体自己也要有量具"）。
+ *
+ * 取值 = `SELFTEST_SAMPLES` 的当前实测条数，只允许被"变多"越过。为什么要有这条地板：
+ * 逐样本断言是"对每条样本判一次"，样本被删光时那个循环**一次都不执行** ⇒ 自检恒绿，
+ * 判定体被掏空又回到审计现场。所以 `>=` 判据与逐样本断言**分开写**（掏空逐样本断言
+ * 不能顺手掏空这条地板）。
+ */
+const SELFTEST_MIN_SAMPLES = 7
+
+/** 负样本（注入了偏差、必须被 `judge()` 点名）的条数下限，与上一条同口径。 */
+const SELFTEST_MIN_RED_SAMPLES = 6
+
+/** 合成 chunk 名里的伪哈希（形状与 Vite 产出一致，供 {@link chunkBasenamesOf} 剥掉）。 */
+const SYNTHETIC_CHUNK_HASH = 'AbCd1234'
+
+/**
+ * 期望表里某个模块的那一项。
+ * @param module - 模块名。
+ * @returns `{ module, sentinel, pages }`（找不到 ⇒ 抛错：样本自己引用了不存在的模块）。
+ */
+function expectationOf(module) {
+  const found = MODULE_EXPECTATIONS.find((entry) => entry.module === module)
+  if (found === undefined) throw new Error(`自检样本引用了不存在的模块：${module}`)
+  return found
+}
+
+/**
+ * 造一个"与该变体一致"的 dist 形状样本（不碰磁盘、不跑构建）。
+ *
+ * 形状与 {@link readDist} 的返回**逐字段同形**，chunk 基名走同一条
+ * {@link chunkBasenamesOf} —— 判定体的输入契约变了，这些样本也必须跟着变，否则自检会
+ * 变成"拿旧形状喂新判定体"的假绿。
+ * @param enabled - `Set<string>` 该变体下开启的模块。
+ * @returns `{ text, chunkBasenames, assetFiles }`。
+ */
+function syntheticDist(enabled) {
+  const assetFiles = [`${CORE_PAGE_CHUNK}-${SYNTHETIC_CHUNK_HASH}.js`]
+  let text = ''
+  for (const expectation of MODULE_EXPECTATIONS) {
+    if (!enabled.has(expectation.module)) continue
+    text += `<div data-feature-sentinel="${expectation.sentinel}"></div>`
+    for (const page of expectation.pages) {
+      assetFiles.push(`${chunkBasenameOf(page)}-${SYNTHETIC_CHUNK_HASH}.js`)
+    }
+  }
+  return { text, chunkBasenames: chunkBasenamesOf(assetFiles), assetFiles }
+}
+
+/**
+ * 自检样本表：**一个正样本 + 六个负样本**，负样本各注入一类偏差（对应 `judge()` 的
+ * 每一条断言）。`mutate === null` 即正样本。
+ *
+ * 期望是**结构性**的（正样本必须零问题、负样本必须被点名），不是"必须恰好报 N 项" ——
+ * 后者会把"判定体多报了一条"这种改进也判红；这里要钉住的是"判定体还看得见偏差"。
+ *
+ * @type {{ name: string, variant: string, mutate: ((dist: object) => void) | null, why: string }[]}
+ */
+const SELFTEST_SAMPLES = [
+  {
+    name: '正样本：全开变体与产物一致',
+    variant: FULL_VARIANT,
+    mutate: null,
+    why: '判定体把正确产物判红（量具坏了，会天天误报产品错）',
+  },
+  {
+    name: '负样本①：已开启模块缺哨兵串',
+    variant: FULL_VARIANT,
+    mutate: (dist) => { dist.text = dist.text.replace(expectationOf('apps').sentinel, '') },
+    why: '内容面的"开启侧必须存在"整条失效',
+  },
+  {
+    name: '负样本②：已关闭模块多出哨兵串',
+    variant: 'skills,connectors',
+    mutate: (dist) => { dist.text += `<div data-feature-sentinel="${expectationOf('apps').sentinel}"></div>` },
+    why: '内容面看不见"关闭的模块其页面代码进了 dist"',
+  },
+  {
+    name: '负样本③：已开启模块缺页面 chunk',
+    variant: FULL_VARIANT,
+    mutate: (dist) => {
+      const missing = `${chunkBasenameOf(expectationOf('apps').pages[0])}-${SYNTHETIC_CHUNK_HASH}.js`
+      dist.assetFiles = dist.assetFiles.filter((name) => name !== missing)
+    },
+    why: '结构面的"开启侧必须存在"整条失效',
+  },
+  {
+    name: '负样本④：已关闭模块多出页面 chunk',
+    variant: 'skills,connectors',
+    mutate: (dist) => {
+      dist.assetFiles.push(`${chunkBasenameOf(expectationOf('apps').pages[0])}-${SYNTHETIC_CHUNK_HASH}.js`)
+    },
+    why: '结构面看不见"关闭的模块仍产出了它的页面 chunk"',
+  },
+  {
+    name: '负样本⑤：空 dist',
+    variant: FULL_VARIANT,
+    mutate: (dist) => { dist.assetFiles = []; dist.text = '' },
+    why: '反空转失效 ⇒ 关闭侧的全部"不存在"断言可以被一次失败构建满足',
+  },
+  {
+    name: '负样本⑥：缺核心页 chunk',
+    variant: FULL_VARIANT,
+    mutate: (dist) => {
+      dist.assetFiles = dist.assetFiles.filter((name) => !name.startsWith(`${CORE_PAGE_CHUNK}-`))
+    },
+    why: '反空转的另一半失效 ⇒ 分不清"模块被裁掉"与"这次构建什么都没产出"',
+  },
+]
+
+/**
+ * **判定体的自检**（判据的判据）：合成样本喂给 `judge()`，断言正样本零问题、每个负样本
+ * 都被点名，且样本数不低于地板。
+ *
+ * 为什么这里不复用 `readDist`：那要真构建（分钟级）才能拿到输入，而这条自检必须在**任何
+ * 真构建之前**跑完 —— 判据坏了要 1 秒内知道。
+ * @returns {string[]} 问题清单（空 = 判定体在量、且量具没被删）。
+ */
+function judgeSelftestProblems() {
+  const problems = []
+  const negatives = SELFTEST_SAMPLES.filter((sample) => sample.mutate !== null)
+  const positives = SELFTEST_SAMPLES.filter((sample) => sample.mutate === null)
+  // ---- 地板（与逐样本断言分开：见 SELFTEST_MIN_SAMPLES 的说明）------------------
+  if (SELFTEST_SAMPLES.length < SELFTEST_MIN_SAMPLES) {
+    problems.push(
+      `自检样本只剩 ${SELFTEST_SAMPLES.length} 条 < 下限 ${SELFTEST_MIN_SAMPLES}`
+        + '（判据的判据被删样本；删样本必须同时改这里的下限并写明理由）',
+    )
+  }
+  if (negatives.length < SELFTEST_MIN_RED_SAMPLES) {
+    problems.push(
+      `负样本只剩 ${negatives.length} 条 < 下限 ${SELFTEST_MIN_RED_SAMPLES}`
+        + '（没有偏差注入，"判定体还在"就成了没人检查的话）',
+    )
+  }
+  if (positives.length === 0) problems.push('一个正样本都没有（判定体可以被"永远报错"满足）')
+  // ---- 逐样本 ------------------------------------------------------------------
+  for (const sample of SELFTEST_SAMPLES) {
+    try {
+      const enabled = new Set(sample.variant === NONE_VARIANT ? [] : sample.variant.split(','))
+      const dist = syntheticDist(enabled)
+      if (sample.mutate !== null) sample.mutate(dist)
+      // 变异只动 `assetFiles` / `text`；chunk 派生面按产物口径重算（同 `readDist`）。
+      dist.chunkBasenames = chunkBasenamesOf(dist.assetFiles)
+      const found = judge({ label: sample.name, variant: sample.variant }, enabled, dist)
+      if (sample.mutate !== null && found.length === 0) {
+        problems.push(
+          `自检「${sample.name}」：注入了偏差（${sample.why}）却一项都没被 judge() 检出 —— `
+            + '判定体的这一条断言失效了（改判定体必须同批改本样本，并说明为什么这条断言不该再成立）',
+        )
+      }
+      if (sample.mutate === null && found.length > 0) {
+        problems.push(
+          `自检「${sample.name}」：正样本（与变体一致的产物）被判出 ${found.length} 项：`
+            + `${found.join('；')} —— 量具坏了，先修判据再修产品`,
+        )
+      }
+    } catch (error) {
+      // 合成样本自己抛错（表形状变了、模块名对不上……）也必须归到"判据自身失效"（退出码 2）：
+      // 让异常冒到 node 顶层会得到退出码 1，那会被读成"产品错了"，与本文的口径冲突。
+      problems.push(`自检「${sample.name}」跑不起来：${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  return problems
+}
+
+/**
  * 入口。
  * @returns 退出码。
  */
@@ -330,6 +531,21 @@ function main() {
   const argv = process.argv.slice(2)
   const keep = argv.includes('--keep')
   const quiet = argv.includes('--quiet')
+
+  // **第一步**：判定体自己的量具（不跑构建，毫秒级）。放在前置检查之前 —— 判定体坏了的话，
+  // 后面每一步"通过"都没有意义（一个 `return []` 的判定体会让整套矩阵打印 ✅）。
+  const selftest = judgeSelftestProblems()
+  if (selftest.length > 0) {
+    process.stderr.write(
+      'check-feature-chunks: judge() 自检未通过（退出码 2 —— 失效的是**判据**，不是产物）\n',
+    )
+    for (const problem of selftest) process.stderr.write(`  · ${problem}\n`)
+    process.stderr.write(
+      '  口径：退出码 2 = 判据自身失效（自检/量具/页表对拍），退出码 1 = 产物与变体不符；'
+        + '先修判据（本脚本的 judge() / SELFTEST_SAMPLES）再谈产品。\n',
+    )
+    return 2
+  }
 
   const preconditions = checkPreconditions()
   if (preconditions.length > 0) {
