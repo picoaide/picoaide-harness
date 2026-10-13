@@ -19,6 +19,8 @@ import { extractFile, listPackage } from '@electron/asar'
 import { FuseVersion, FuseV1Options, flipFuses, getCurrentFuseWire } from '@electron/fuses'
 import AdmZip from 'adm-zip'
 import { normalizeAsarEntry, toAsarEntryPath } from './asar-entry-path.ts'
+import { readChannelVariantManifest, type ChannelVariantManifest } from './channel-variant.ts'
+import { FEATURE_MODULE_SURFACES } from '../src/channel-features.ts'
 import { asarLayoutLogLine, assertMacBundleConsistency } from './mac-bundle-consistency.ts'
 import { packagedAppId } from './channel-build.ts'
 import {
@@ -1361,6 +1363,15 @@ function assertRelativeImportsPresent(
 
 /** `@picoaide/*` 在归档/产物里的条目前缀（三张清单表都用这个写法）。 */
 const WORKSPACE_SCOPE_PREFIX = 'node_modules/@picoaide/'
+/**
+ * 自有包的**包名前缀**（不带 `node_modules/`）。
+ *
+ * 与 {@link WORKSPACE_SCOPE_PREFIX} 是两个不同的东西，混用会静默失效：前者拼的是
+ * **归档/产物内的路径**（`node_modules/@picoaide/x/…`），后者拼的是**包名**（`@picoaide/x`，
+ * 也就是 `REQUIRED_WORKSPACE_PACKAGE_COVERAGE[*].package` 前面要补的那一段）。
+ * 变体裁剪的清单里存的是**包名**，所以两处都要用到，不能只留一个。
+ */
+const WORKSPACE_PACKAGE_PREFIX = '@picoaide/'
 
 /** 反向 oracle 的定位标签（错误消息前缀）。 */
 const WORKSPACE_COVERAGE_LABEL = 'dsh-plugin-desktop: first-party workspace runtime surface'
@@ -1407,6 +1418,14 @@ export interface WorkspaceSurfaceCensus {
   readonly perPackage: ReadonlyMap<string, readonly string[]>
   /** 从产物里解析出的 `@picoaide/*` specifier 条数（防空转的前置量）。 */
   readonly resolvedSpecifiers: number
+  /**
+   * 被功能模块变体裁掉的那些 specifier 条数（全开构建恒为 0）。
+   *
+   * 只用于把非空转下限**按声明削减**：裁掉一个模块，产物里属于它的 specifier
+   * 本来就该少几条。用"产物自己算出被裁掉的条数"作为削减量是**安全**的 ——
+   * 判据空转（解析出 0 条）时削减量也是 0，下限原样保留 ⇒ 照旧红。
+   */
+  readonly prunedSpecifiers: number
 }
 
 /**
@@ -1659,12 +1678,13 @@ function workspaceEntryTarget(manifest: WorkspacePackageManifest, subpath: strin
  * @returns 普查结果（供测试断言规模，避免"空转即通过"）。
  */
 export function assertRequiredEntriesCoverWorkspaceSurface(
-  manifest: readonly string[] = effectivePackagedRuntimeEntries(),
+  manifest: readonly string[] = effectiveVariantEntries(packagedRuntimeVariantView()),
   productRoot: string = desktopProductRoot(),
-  floors: readonly WorkspacePackageCoverageFloor[] = REQUIRED_WORKSPACE_PACKAGE_COVERAGE,
+  floors: readonly WorkspacePackageCoverageFloor[] = packagedRuntimeVariantView().floors,
   minResolvedSpecifiers: number = MIN_RESOLVED_WORKSPACE_SPECIFIERS,
+  prunedPackages: readonly string[] = packagedRuntimeVariantView().prunedPackages,
 ): WorkspaceSurfaceCensus {
-  const census = collectWorkspaceSurface(productRoot)
+  const census = collectWorkspaceSurface(productRoot, prunedPackages)
   const known = new Set(manifest)
 
   const missing = census.required.filter(required => !known.has(required.entry))
@@ -1691,10 +1711,15 @@ export function assertRequiredEntriesCoverWorkspaceSurface(
       + `${dead.map(floor => floor.package).join(', ')}（包已删除/改名 ⇒ 同步这张表）`,
     )
   }
-  if (census.resolvedSpecifiers < minResolvedSpecifiers) {
+  // 非空转下限按**声明**削减：被裁掉的模块本来就带走了若干条 specifier。
+  // 削减量来自产物自己（`census.prunedSpecifiers`），所以判据空转（解析出 0 条）时
+  // 削减量同样是 0、下限原样保留 ⇒ 该红还是红（方向的单调性保持）。
+  const effectiveMin = Math.max(0, minResolvedSpecifiers - census.prunedSpecifiers)
+  if (census.resolvedSpecifiers < effectiveMin) {
     throw new Error(
       `${WORKSPACE_COVERAGE_LABEL}: 只从产物里解析出 ${census.resolvedSpecifiers} 条 @picoaide/* specifier `
-      + `（下限 ${minResolvedSpecifiers}）—— 产物没构建或判据已空转，不能当成通过`,
+      + `（下限 ${effectiveMin}${census.prunedSpecifiers === 0 ? '' : ` = ${minResolvedSpecifiers} − 变体裁掉的 ${census.prunedSpecifiers}`}）`
+      + '—— 产物没构建或判据已空转，不能当成通过',
     )
   }
   return census
@@ -1716,8 +1741,9 @@ export function assertRequiredEntriesCoverWorkspaceSurface(
  * @param floors - 每包下限（缺省 = `REQUIRED_WORKSPACE_PACKAGE_COVERAGE`）。
  */
 export function assertWorkspacePackageCoverage(
-  manifest: readonly string[] = effectivePackagedRuntimeEntries(),
-  floors: readonly WorkspacePackageCoverageFloor[] = REQUIRED_WORKSPACE_PACKAGE_COVERAGE,
+  manifest: readonly string[] = effectiveVariantEntries(packagedRuntimeVariantView()),
+  floors: readonly WorkspacePackageCoverageFloor[] = packagedRuntimeVariantView().floors,
+  manifestFloor: number = packagedRuntimeVariantView().manifestFloor,
 ): void {
   const flat = new Set<string>(REQUIRED_PACKAGED_RUNTIME_ENTRIES)
   const violations: string[] = []
@@ -1737,9 +1763,11 @@ export function assertWorkspacePackageCoverage(
     }
   }
   // 全局下限同样只允许上调：它兜"整段删除"这类批量形态与 @picoaide 之外的条目。
-  if (manifest.length < REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR) {
+  // 变体构建传的是**按声明削减过**的下限（`packagedRuntimeVariantView().manifestFloor`）：
+  // 削减量只等于"被关闭模块本来就占着的那几条"，其余余量一条都不放开。
+  if (manifest.length < manifestFloor) {
     violations.push(
-      `生效清单共 ${manifest.length} 条 < 下限 ${REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR}`,
+      `生效清单共 ${manifest.length} 条 < 下限 ${manifestFloor}`,
     )
   }
   if (violations.length > 0) {
@@ -1756,10 +1784,23 @@ export function assertWorkspacePackageCoverage(
  * 导出它是为了让 `tests/verify-packaged-runtime.spec.ts` 能直接对合成产物夹具断言
  * 派生结果（而不是复制一份派生逻辑 —— 复制出来的那份会替假条目背书）。
  * @param productRoot - 产物根（桌面包根）。
+ * @param prunedPackages - 本次变体裁掉的包名（全开构建传空数组）。它们**既不在
+ *   `packages` 也不在 `required` 里** —— 反向 oracle 的两个方向都必须按"这次构建
+ *   真正的产物面"判，否则会要求给一个已经不随包的模块登记条目（假红），
+ *   或把"随包但没登记"的检查对着一个不随包的目录做（空转）。
  * @returns 普查结果。
  */
-export function collectWorkspaceSurface(productRoot: string): WorkspaceSurfaceCensus {
+export function collectWorkspaceSurface(
+  productRoot: string,
+  prunedPackages: readonly string[] = [],
+): WorkspaceSurfaceCensus {
   const scopeRoot = join(productRoot, 'node_modules', '@picoaide')
+  const pruned = new Set(prunedPackages)
+  /** 该产物条目是否属于被本次变体裁掉的包（`@picoaide/x` 与 `@picoaide/x/...` 都算）。 */
+  const isPrunedEntry = (entry: string): boolean =>
+    [...pruned].some(name => entry === name || entry.startsWith(`${name}/`))
+  /** 目录名（`dsh-connectors`）→ 该包是否被本次变体裁掉。 */
+  const isPrunedPackageDir = (dir: string): boolean => pruned.has(`${WORKSPACE_PACKAGE_PREFIX}${dir}`)
   if (!existsSync(scopeRoot)) {
     throw new Error(
       `${WORKSPACE_COVERAGE_LABEL}: 找不到 ${scopeRoot} —— workspace 依赖未安装或未构建，判据不能空转`,
@@ -1769,6 +1810,7 @@ export function collectWorkspaceSurface(productRoot: string): WorkspaceSurfaceCe
     .filter(entry => entry.isDirectory() || entry.isSymbolicLink())
     .map(entry => entry.name)
     .filter(name => existsSync(join(scopeRoot, name, 'package.json')))
+    .filter(name => !isPrunedPackageDir(name))
     .sort()
   if (packages.length === 0) {
     throw new Error(`${WORKSPACE_COVERAGE_LABEL}: ${scopeRoot} 下没有任何自带 package.json 的包`)
@@ -1804,9 +1846,12 @@ export function collectWorkspaceSurface(productRoot: string): WorkspaceSurfaceCe
   const artifacts = [
     ...listProductFiles(join(productRoot, 'lib')).map(relative => `lib/${relative}`),
     ...listProductFiles(scopeRoot).map(relative => `${WORKSPACE_SCOPE_PREFIX}${relative}`),
-  ].filter(entry => /\.(?:js|cjs|mjs)$/u.test(entry))
+  ]
+    .filter(entry => !isPrunedEntry(entry))
+    .filter(entry => /\.(?:js|cjs|mjs)$/u.test(entry))
 
   const resolved = new Set<string>()
+  const prunedSpecifiers = new Set<string>()
   for (const artifact of artifacts) {
     const absolute = join(productRoot, artifact)
     const source = readFileSync(absolute, 'utf8')
@@ -1823,6 +1868,10 @@ export function collectWorkspaceSurface(productRoot: string): WorkspaceSurfaceCe
       const target = workspaceEntryTarget(manifest, subpath)
       if (target === undefined) continue
       resolved.add(specifier)
+      if (isPrunedPackageDir(name)) {
+        prunedSpecifiers.add(specifier)
+        continue
+      }
       add(name, target, `产物里的真实 specifier ${specifier}（来自 ${artifact}）`)
     }
   }
@@ -1832,7 +1881,13 @@ export function collectWorkspaceSurface(productRoot: string): WorkspaceSurfaceCe
   for (const name of packages) {
     perPackage.set(name, entries.filter(item => item.package === name).map(item => item.entry))
   }
-  return { packages, required: entries, perPackage, resolvedSpecifiers: resolved.size }
+  return {
+    packages,
+    required: entries,
+    perPackage,
+    resolvedSpecifiers: resolved.size,
+    prunedSpecifiers: prunedSpecifiers.size,
+  }
 }
 
 /**
@@ -1899,7 +1954,9 @@ function tryListArchive(
     )
   }
   const present = new Set(entries.map(normalizeArchiveEntry))
-  const missing = REQUIRED_PACKAGED_RUNTIME_ENTRIES.filter(entry => !present.has(entry))
+  // 变体裁剪视图（全开构建 = 三张表的裸形态，逐元素相同）—— 见 `packagedRuntimeVariantView`。
+  const view = packagedRuntimeVariantView()
+  const missing = view.flat.filter(entry => !present.has(entry))
   if (missing.length > 0) {
     throw new Error(
       `dsh-plugin-desktop: packaged runtime at ${archivePath} is missing required ASAR entries: ${missing.join(', ')}`,
@@ -1911,8 +1968,15 @@ function tryListArchive(
   //   * 每包覆盖棘轮：构建无关，删掉任何一条即红（含"删条目 + 加假条目"抵消总数）；
   //   * 产物反向覆盖：产物里真实需要的入口（声明面 + `@picoaide/*` specifier）
   //     必须都在清单里 —— 抓"产物多出一个没被覆盖的入口"与"清单路径拼写被改坏"。
+  // 两条都**不带参数**调用：变体折叠在各自的缺省参数里（`packagedRuntimeVariantView()`），
+  // 于是"归档分支必须真的调用这两条 oracle"的接线判据（tests/verify-packaged-runtime.spec.ts）
+  // 字面量原样成立 —— 接线判据不该因为一次参数化而放宽。
   assertWorkspacePackageCoverage()
   assertRequiredEntriesCoverWorkspaceSurface()
+  // **承重判据**（2026-10-13 P2）：关闭的功能模块必须整包不在归档里；全开变体则必须
+  // 看得见每一个模块（量具自检）。放在反向 oracle 之后：那一对先回答"清单与产物
+  // 是否互相覆盖"，这一条回答"本次声明关掉的东西是不是真的没了"。
+  assertFeatureModulePresence(present, archivePath, view.manifest)
   // 反向断言（2026-09-22）：包里不得出现自有源码 / sourcemap / 开发期产物。
   // 放在这里而不是 `files` 里 —— `files` 是声明，这里是**证据**：任何一条排除规则
   // 写错（例如「仅根级」那种单星号写法）都会在这一步把坏包拦下来，而不是发到客户机上。
@@ -2056,6 +2120,225 @@ export const REQUIRED_PROFILE_PATCH_ANCHORS: readonly string[] = [
 ]
 
 /**
+ * 一次构建的**变体裁剪视图**：三张必需表 + 每包下限表按功能模块开关折过之后的形态。
+ *
+ * 为什么要"折"而不是"改表"：三张表是**仓库的静态清单**，`scripts/verify-inventories.mjs`
+ * 与 `tests/verify-packaged-runtime.spec.ts` 用它们对拍磁盘上的包集（全量口径）。
+ * 把某个包从表里**删掉**会让"包还在、表里没有"这种真正的漂移也变得合法。
+ * 所以表保持全量，**按变体折叠**发生在读取侧 —— 与 `scripts/check-workspaces.mjs`
+ * 的 `PACKAGES` 表不随渠道收窄是同一条口径。
+ *
+ * 全开构建（`manifest === undefined`）时本视图的每一栏都与裸表**逐元素相同**，
+ * 因此 afterPack 的所有既有判据在官方渠道上逐条不变。
+ */
+export interface PackagedRuntimeVariantView {
+  /** 本次构建的变体清单（全开时为 undefined）。 */
+  readonly manifest: ChannelVariantManifest | undefined
+  /** 被裁掉的包名（全开时为空）。 */
+  readonly prunedPackages: readonly string[]
+  /** 扁平必需清单（变体折叠后）。 */
+  readonly flat: readonly string[]
+  /** 导出映射必需表（变体折叠后）。 */
+  readonly asarExports: readonly RequiredExport[]
+  /** profile 锚点表（变体折叠后）。 */
+  readonly anchors: readonly string[]
+  /** 每包下限表（变体折叠后）。 */
+  readonly floors: readonly WorkspacePackageCoverageFloor[]
+  /** 生效清单总下限（变体折叠后；= 全量下限 − 被裁掉模块的生效条目数）。 */
+  readonly manifestFloor: number
+}
+
+/**
+ * 把三张必需表 + 每包下限表按变体清单折叠（**唯一折叠点**）。
+ *
+ * `manifestFloor` 的算法必须与 `assertWorkspacePackageCoverage` 的计数口径**同源**：
+ * 那边数的是"三张表的并集"里属于该包的条目数，所以这里也按并集削减 —— 按单张表
+ * 削减会让 connectors 这种"扁平表 0 条、导出表 6 条"的包算错（少削减 0 条 ⇒ 变体
+ * 构建会因为总下限而假红）。
+ * @param manifest - 变体清单。**三态**：不传 = 读 `temp/channel-variant.json`
+ *   （生产形态）；传 `undefined` / `null` = **显式声明"这次按全开算"**（测试与
+ *   人工复核用）。
+ *   JS 的缺省参数在实参为 `undefined` 时也会生效，所以"显式全开"必须有一个
+ *   不同的取值 —— 否则开发机上恰好躺着一份变体清单时（变体构建进行中，这是**正常**
+ *   状态），"全开基线"的用例会静默改成测变体路径，而它看上去仍然全绿。
+ * @returns 折叠后的视图。
+ */
+export function packagedRuntimeVariantView(
+  manifest?: ChannelVariantManifest | null,
+): PackagedRuntimeVariantView {
+  const resolved = manifest === undefined ? readChannelVariantManifest() : manifest ?? undefined
+  return buildVariantView(resolved)
+}
+
+/**
+ * {@link packagedRuntimeVariantView} 的正体（清单已解析完毕，不再碰磁盘）。
+ * @param resolved - 已解析的清单（全开时为 undefined）。
+ * @returns 折叠后的视图。
+ */
+function buildVariantView(
+  resolved: ChannelVariantManifest | undefined,
+): PackagedRuntimeVariantView {
+  const manifest = resolved
+  const prunedPackages = manifest?.packages ?? []
+  if (prunedPackages.length === 0) {
+    return {
+      manifest,
+      prunedPackages,
+      flat: REQUIRED_PACKAGED_RUNTIME_ENTRIES,
+      asarExports: REQUIRED_ASAR_EXPORTS,
+      anchors: REQUIRED_PROFILE_PATCH_ANCHORS,
+      floors: REQUIRED_WORKSPACE_PACKAGE_COVERAGE,
+      manifestFloor: REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR,
+    }
+  }
+  const pruned = new Set(prunedPackages)
+  // 三张表里的条目一律是**归档内路径**（`node_modules/<包名>/…`）；清单里存的是包名。
+  const belongs = (entry: string): boolean =>
+    [...pruned].some(name => entry === `node_modules/${name}` || entry.startsWith(`node_modules/${name}/`))
+  const flat = REQUIRED_PACKAGED_RUNTIME_ENTRIES.filter(entry => !belongs(entry))
+  const asarExports = REQUIRED_ASAR_EXPORTS.filter(required => !belongs(required.archivePath))
+  const anchors = REQUIRED_PROFILE_PATCH_ANCHORS.filter(entry => !belongs(entry))
+  const floors = REQUIRED_WORKSPACE_PACKAGE_COVERAGE
+    .filter(floor => !pruned.has(`${WORKSPACE_PACKAGE_PREFIX}${floor.package}`))
+  // 削减量 = 并集里属于被裁包**且确实在表里**的条目数（三张表之间的重复只算一次）。
+  const union = new Set<string>([
+    ...REQUIRED_PACKAGED_RUNTIME_ENTRIES,
+    ...REQUIRED_ASAR_EXPORTS.map(required => required.archivePath),
+    ...REQUIRED_PROFILE_PATCH_ANCHORS,
+  ])
+  const removed = [...union].filter(belongs).length
+  return {
+    manifest,
+    prunedPackages,
+    flat,
+    asarExports,
+    anchors,
+    floors,
+    manifestFloor: REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR - removed,
+  }
+}
+
+/** 变体视图里三张表的并集（= `effectivePackagedRuntimeEntries()` 的折叠版）。 */
+export function effectiveVariantEntries(view: PackagedRuntimeVariantView): string[] {
+  return [...new Set([
+    ...view.flat,
+    ...view.asarExports.map(required => required.archivePath),
+    ...view.anchors,
+  ])]
+}
+
+/** 功能模块的产物落点前缀（`node_modules/<包名>/`）——缺席判据的唯一拼法。 */
+function featureModuleArchivePrefix(pkg: string): string {
+  return `node_modules/${pkg}/`
+}
+
+/**
+ * **功能模块缺席判据（承重）**：关闭的模块，它的包**一条都不许出现在产物里**；
+ * 全开变体则必须**看得见每一个模块**（量具自检）。
+ *
+ * ## 为什么这条判据必须存在，且必须双侧
+ *
+ * 设计稿的不变量 1 是"模块关闭 ⇒ 它的代码不进产物"。2026-10-13 的实测把这条
+ * 不变量的**真开关**定位到 `packages/host/desktop/package.json` 的 `dependencies`
+ * （asar 里 `@picoaide/*` 的集合恰好等于它）。也就是说：**声明关了、清单没摘**，
+ * 产物里照样有整包，而且**没有任何既有判据会红** —— 三张必需表是全量的，缺了才红、
+ * 多了不红。
+ *
+ * ## 为什么不用哨兵串
+ *
+ * `channel-constants.ts` 的 `featureSentinel()` 是**副证**：实测过未引用的字符串、
+ * 以及"被调用但返回值被丢弃"的路径，都会被链接器/打包器丢掉 ⇒ **"产物里没有这个
+ * 串"不能推出"模块被裁掉了"**。所以这里判的是**文件集合**，不是字符串存在性。
+ *
+ * ## 为什么不用手拼 `/`
+ *
+ * 归档内路径的分隔符是平台原生的（`@electron/asar` 的 `listPackage()` 在 Windows 上
+ * 报 `\`）。本仓为此专门有 `scripts/asar-entry-path.ts`（2026-09-12 Windows 实测的
+ * 事故）。所以这里的入参是**已经归一化过**的条目集合（`normalizeAsarEntry()` 的结果），
+ * 前缀一律用 `/` 拼 —— 那是归一化之后的形状，不是平台相关的路径。
+ *
+ * @param entries - 归一化后的归档条目集合（`normalizeAsarEntry()` 的结果）。
+ * @param where - 归档路径（报错定位用）。
+ * @param manifest - 变体清单（缺省读 `temp/channel-variant.json`）。
+ * @throws 关闭的模块仍在产物里，或全开变体里看不到某个模块的包时。
+ */
+export function assertFeatureModulePresence(
+  entries: ReadonlySet<string>,
+  where: string,
+  manifest?: ChannelVariantManifest | null,
+): void {
+  const resolved = manifest === undefined ? readChannelVariantManifest() : manifest ?? undefined
+  const pruned = new Set(resolved?.packages ?? [])
+  const problems: string[] = []
+  for (const surface of FEATURE_MODULE_SURFACES) {
+    for (const pkg of surface.packages) {
+      const prefix = featureModuleArchivePrefix(pkg)
+      const present = [...entries].some(entry => entry === prefix.slice(0, -1) || entry.startsWith(prefix))
+      if (pruned.has(pkg)) {
+        if (present) {
+          problems.push(
+            `${pkg} 仍随包（features.${surface.module}=false 声明它被关闭）—— `
+            + '它就是"声明关了、代码还在"的形态：依赖清单没摘干净（pack-app-root 的变体裁剪），'
+            + '或验证侧用了全量清单',
+          )
+        }
+        continue
+      }
+      if (!present) {
+        problems.push(
+          `${pkg} 在产物里 0 条 —— 量具自检失败：这个包**没有被任何变体关闭**，`
+          + '它必须随包；看不到它就说明清单/冻结面漂移，此时"关闭变体里没有它"这条判据恒真、不承重',
+        )
+      }
+    }
+  }
+  if (problems.length > 0) {
+    throw new Error(
+      `dsh-plugin-desktop: feature-module presence check failed at ${where}:
+  ${problems.join('\n  ')}`,
+    )
+  }
+}
+
+/**
+ * 物理布局（`asar: false`）上的同一条缺席判据。
+ *
+ * 这里**一次 stat 就够**：模块的包是一个目录（`node_modules/<pkg>/`），目录在
+ * 就等于包在。asar 那一侧才需要扫条目 —— 那里"包目录"不是一个 stat 能回答的东西。
+ * 两条布局共用同一个清单来源、判据语义相同（本仓已登记过"两套布局各维护一份判据
+ * 必然漂移"的教训）。
+ * @param appRoot - 物理应用根。
+ * @param exists - 物理探针。
+ * @param view - 变体视图。
+ * @throws 关闭的模块仍在树上，或全开变体看不到某个模块的包时。
+ */
+function assertFeatureModuleDirs(
+  appRoot: string,
+  exists: FileProbe,
+  view: PackagedRuntimeVariantView,
+): void {
+  const pruned = new Set(view.prunedPackages)
+  const problems: string[] = []
+  for (const surface of FEATURE_MODULE_SURFACES) {
+    for (const pkg of surface.packages) {
+      const present = exists(join(appRoot, ...featureModuleArchivePrefix(pkg).split('/')))
+      if (pruned.has(pkg)) {
+        if (present) problems.push(`${pkg} 仍随包（features.${surface.module}=false 声明它被关闭）`)
+        continue
+      }
+      if (!present) {
+        problems.push(`${pkg} 在产物里不存在 —— 量具自检失败（它没有被任何变体关闭，必须随包）`)
+      }
+    }
+  }
+  if (problems.length > 0) {
+    throw new Error(
+      `dsh-plugin-desktop: feature-module presence check failed at ${appRoot}:\n  ${problems.join('\n  ')}`,
+    )
+  }
+}
+
+/**
  * 逐条断言 profile 锚点在包内（asar 与物理两种布局共用同一张表）。
  *
  * 抽成函数是为了让两套布局用**同一份判据**：任一侧单独维护必然漂移，而漂移的
@@ -2066,8 +2349,9 @@ export const REQUIRED_PROFILE_PATCH_ANCHORS: readonly string[] = [
 export function assertProfilePatchAnchors(
   present: (entry: string) => boolean,
   where: string,
+  anchors: readonly string[] = packagedRuntimeVariantView().anchors,
 ): void {
-  const missing = REQUIRED_PROFILE_PATCH_ANCHORS.filter(entry => !present(entry))
+  const missing = anchors.filter(entry => !present(entry))
   if (missing.length > 0) {
     throw new Error(
       `dsh-plugin-desktop: packaged runtime at ${where} is missing profile patch anchors: `
@@ -2086,9 +2370,10 @@ export function assertProfilePatchAnchors(
 function verifyUnpackedPackageResolution(
   archivePath: string,
   asarEntries?: ReadonlySet<string>,
+  requiredExports: readonly RequiredExport[] = packagedRuntimeVariantView().asarExports,
 ): void {
   const entries = asarEntries ?? new Set(listPackage(archivePath, { isPack: false }).map(normalizeArchiveEntry))
-  for (const required of REQUIRED_ASAR_EXPORTS) {
+  for (const required of requiredExports) {
     if (!entries.has(required.archivePath)) {
       throw new Error(
         `dsh-plugin-desktop: packaged runtime at ${archivePath} is missing required package export ${required.specifier} (${required.archivePath})`,
@@ -2348,13 +2633,14 @@ function verifyPhysicalRuntime(
   exists: FileProbe,
   readEntry: PackageEntryReader,
 ): void {
-  const missing = REQUIRED_PACKAGED_RUNTIME_ENTRIES.filter(entry => !exists(join(appRoot, entry)))
+  const view = packagedRuntimeVariantView()
+  const missing = view.flat.filter(entry => !exists(join(appRoot, entry)))
   if (missing.length > 0) {
     throw new Error(
       `dsh-plugin-desktop: packaged runtime at ${appRoot} is missing required entries: ${missing.join(', ')}`,
     )
   }
-  const missingExports = REQUIRED_ASAR_EXPORTS.filter(required => !exists(join(appRoot, required.archivePath)))
+  const missingExports = view.asarExports.filter(required => !exists(join(appRoot, required.archivePath)))
   if (missingExports.length > 0) {
     throw new Error(
       `dsh-plugin-desktop: packaged runtime at ${appRoot} is missing required package exports: ${missingExports.map(entry => entry.archivePath).join(', ')}`,
@@ -2366,6 +2652,7 @@ function verifyPhysicalRuntime(
   // 不使用的兜底形态（`asar: false` 才走到），真实泄漏面（asar）在 `tryListArchive`
   // 里逐条判。profile 锚点则两种布局都判（它们只需要 `exists`）。
   assertProfilePatchAnchors(entry => exists(join(appRoot, entry)), appRoot)
+  assertFeatureModuleDirs(appRoot, exists, view)
   verifyWebBrandAssets(entry => readEntry(appRoot, entry), appRoot)
 }
 

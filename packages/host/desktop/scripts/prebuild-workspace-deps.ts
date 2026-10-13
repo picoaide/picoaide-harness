@@ -51,6 +51,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isDirectInvocation } from './direct-invocation.mjs'
+import { channelVariantDirFor, readChannelVariantManifest } from './channel-variant.ts'
 
 /** 构建产物目录(相对包根):lib/ 是各包 tsdown/tsc 的 outDir;desktop 另有 build/(brand-prepare)。 */
 const OUTPUT_DIRS = ['lib', 'build']
@@ -548,6 +549,33 @@ export function stalenessReason(
   return oldestMtime(outputs) >= newestInput ? null : 'inputs newer than oldest output'
 }
 
+/**
+ * 本次变体下**可以安全跳过**的包目录 → 该包属于哪个变体（空 Map = 全开构建）。
+ *
+ * "安全"是承重的限定词：只有当**没有任何保留包**把该目录列进 `deps` 时才可跳过。
+ * 反例就在本表里 —— `browser` 的 `deps` 含 `packages/host/connectors`（它的 tsc 与
+ * 运行期惰性 require 都读 connectors 的 `lib/`）⇒ 即便渠道关掉了连接器，
+ * prebuild 也必须照常产出那份 `lib/`，否则保留包自己构建失败。反正它会随
+ * staging `package.json` 的依赖裁剪而不进 asar。
+ * @param desktopRoot - dsh-plugin-desktop 包根（清单落点由它派生）。
+ * @returns 目录 → 变体标识。
+ */
+export function variantPrunedDirs(desktopRoot: string): ReadonlyMap<string, string> {
+  const manifest = readChannelVariantManifest(channelVariantDirFor(desktopRoot))
+  if (manifest === undefined) return new Map()
+  const needed = new Set<string>()
+  for (const pkg of WORKSPACE_PACKAGES) {
+    if (manifest.directories.includes(pkg.dir)) continue
+    for (const dep of pkg.deps ?? []) needed.add(dep)
+  }
+  const result = new Map<string, string>()
+  for (const dir of manifest.directories) {
+    if (needed.has(dir)) continue
+    result.set(dir, manifest.variant)
+  }
+  return result
+}
+
 /** 预构建 desktop 自身 + enterprise/account-card/branding/其余自研插件包。
  *
  * `desktopRoot` 是 dsh-plugin-desktop 包根(调用方一直传这个);仓库根由它上溯三级
@@ -556,9 +584,22 @@ export function stalenessReason(
 export function prebuildWorkspaceDeps(desktopRoot: string): void {
   const repoRoot = resolve(desktopRoot, '..', '..', '..')
   const force = process.env.DSH_PREBUILD === 'force' || process.argv.includes('--force')
+  const variantSkip = variantPrunedDirs(desktopRoot)
   const skipped: string[] = []
+  const variantSkipped: string[] = []
   for (const pkg of WORKSPACE_PACKAGES) {
     const key = workspaceKey(pkg)
+    // 功能模块变体（2026-10-13，P2）：被关闭的模块**不再随包**，三个 `dist:*` 默认
+    // 先跑本函数 ⇒ 不跳过就会去构建一个不进产物的包（白付一次 tsdown）。
+    // `variantPrunedDirs()` 只在**没有**保留包把它当构建输入时才把它列进来：
+    // `browser` 的 tsc 与运行期惰性 require 都读 `connectors` 的 `lib/`
+    // （见本表第 2 条的注释），跳过它会让保留包构建失败 —— 那种"省一次构建"换来
+    // 一次红是本末倒置。真正让模块不进产物的是 staging `package.json` 的依赖裁剪
+    // （`pack-app-root.mjs`），不是这里。
+    if (variantSkip.has(pkg.dir)) {
+      variantSkipped.push(`${key} (变体 ${variantSkip.get(pkg.dir)} 关闭了该模块)`)
+      continue
+    }
     const reason = stalenessReason(repoRoot, pkg)
     if (!force && reason === null) {
       skipped.push(key)
@@ -569,6 +610,12 @@ export function prebuildWorkspaceDeps(desktopRoot: string): void {
     console.log(`[prebuild] ${key}: building${reason === null ? ' (forced)' : ` (${reason})`}`)
     const args = pkg.workspace === null ? ['run', 'build'] : ['workspace', pkg.workspace, 'build']
     run(args, desktopRoot, `${key} build`)
+  }
+  if (variantSkipped.length > 0) {
+    console.log(
+      `[prebuild] 变体裁剪，跳过: ${variantSkipped.join(', ')}`
+      + '（这些模块不随包；保留包若把它当构建输入就不会列在这里 —— 见 variantPrunedDirs）',
+    )
   }
   if (skipped.length > 0) {
     console.log(`[prebuild] up to date, skipped: ${skipped.join(', ')} (DSH_PREBUILD=force 可强制重建)`)

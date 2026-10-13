@@ -33,6 +33,12 @@ import {
   type ChannelBuildContext,
   type ChannelBuildOptions,
 } from './channel-build.ts'
+import {
+  applyChannelVariant,
+  defaultChannelVariantDir,
+  readChannelVariantManifest,
+  type ChannelVariantManifest,
+} from './channel-variant.ts'
 import { SPEECH_MODEL_PAYLOAD_DIR } from './verify-packaged-runtime.ts'
 import { BUNDLED_RUNTIMES_PAYLOAD_DIR } from './verify-packaged-runtime.ts'
 
@@ -63,6 +69,15 @@ export interface ChannelPrepareOptions extends ChannelBuildOptions {
    * 未来的交叉打包留的口子 —— 目标与载荷不一致时 `fetch-bundled-runtimes.mjs` 会拒。
    */
   readonly runtimeTarget?: string
+  /**
+   * 变体清单（`temp/channel-variant.json`）的落点（测试接缝；缺省
+   * {@link defaultChannelVariantDir}）。
+   *
+   * 与 `appDir`（`build/`，**会进 asar**）是**两个**目录，不能合并：清单是打包
+   * 工具中间产物，落进 `build/` 就会被暂存层整目录复制进包（见 `pack-app-root.mjs`
+   * 的 `PACK_APP_ROOT_FORBIDDEN_ENTRIES`）。
+   */
+  readonly variantDir?: string
 }
 
 /**
@@ -74,13 +89,18 @@ export function defaultChannelAppDir(): string {
 }
 
 /**
- * 打包前按渠道派生品牌素材并就位渠道配置。
+ * 打包前按渠道派生品牌素材并就位渠道配置**与功能模块变体**。
  *
  * 幂等：重复调用只做同样的写操作；官方渠道会把渠道构建留下的
  * `build/channel.json` 删掉（残留比"没生效"更糟 —— 官方包会带上客户品牌）。
+ *
+ * 变体那一步（2026-10-13，P2）挂在这里而不是各打包脚本里：本函数是"打包输入就位"
+ * 的**唯一入口**，四个打包脚本（`package-dir/linux/mac/win` 与 `release-mac`）
+ * 都经它。挂在调用点就会漏一个 —— 而漏掉的后果是"声明关了模块、产物里照样有"。
  * @param options - 环境、仓库根与应用资源目录（测试可覆盖）。
  * @returns 本次构建的渠道上下文（调用方继续用它生成 electron-builder 参数）。
- * @throws 渠道 id/slug/appId 非法、渠道包不可解析、或 `channel_id` 与所选渠道不一致。
+ * @throws 渠道 id/slug/appId 非法、渠道包不可解析、`channel_id` 与所选渠道不一致，
+ *   或本次声明关闭了尚不支持裁剪的功能模块。
  */
 export async function prepareChannelPackaging(
   options: ChannelPrepareOptions = {},
@@ -91,10 +111,28 @@ export async function prepareChannelPackaging(
   // 应当秒级失败，而不是先花两秒渲染图标再报错。两步都失败即抛错，不会有
   // "打包照常进行"的中间态。
   stageChannelProfile(context, appDir)
+  // 变体清单紧随其后（同一个"渠道声明的就位"语义）：全开构建在这里**删掉**上一次
+  // 变体留下的清单，所以后面的暂存 / 验证一律走全开路径 —— 官方与全开变体的
+  // 打包输入逐字节等价于引入变体之前。
+  applyChannelVariant(context, options.variantDir ?? defaultChannelVariantDir())
   await prepareBrandAssets({ context, outputDir: appDir })
   await prepareSpeechModelPayload(context, appDir, options.speechModel)
   await prepareBundledRuntimesPayload(appDir, options.runtimes, options.runtimeTarget)
   return context
+}
+
+/**
+ * 本次构建的变体清单（**只读**；全开构建返回 `undefined`）。
+ *
+ * 打包脚本与冒烟探针用它回答"这次构建声明关了哪些模块"，而不是各自再读一遍
+ * `channel.json`（那就是第二份派生规则）。
+ * @param dir - 落点（缺省 {@link defaultChannelVariantDir}）。
+ * @returns 清单；全开时为 `undefined`。
+ */
+export function currentChannelVariant(
+  dir: string = defaultChannelVariantDir(),
+): ChannelVariantManifest | undefined {
+  return readChannelVariantManifest(dir)
 }
 
 /**

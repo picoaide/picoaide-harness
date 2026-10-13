@@ -28,6 +28,9 @@
  * @module dsh-plugin-desktop/startup-rows
  */
 
+import { closedFeatureModules, prunedFeatureRows, type FeatureSwitches } from './channel-features.ts'
+import { readDesktopChannelProfile } from './desktop-channel.ts'
+
 /**
  * `FiberState.ACTIVE`。
  *
@@ -101,6 +104,47 @@ export const REQUIRED_DESKTOP_ROWS = [
   'picoaide-foot-menu',
 ] as const
 
+/**
+ * 本次运行**真的该激活**的必需行（= {@link REQUIRED_DESKTOP_ROWS} 减去被关闭模块的行）。
+ *
+ * 为什么必需（2026-10-13，P2）：变体化之后"某行不在组合里"成为**正常**形态 ——
+ * 模块的包不随包了，它的 `cordis.patch.yml` 也就不会被加载、那几行自然不存在。
+ * 如果断言仍按全量清单判，变体版客户端会**在启动时**把这些正常的裁剪报成
+ * "必需行没激活"并走致命路径（`src/main.ts` 的 `reportFatalStartupFailure`）——
+ * 即"关掉一个面板"变成"客户端打不开"。
+ *
+ * 反过来说，清单里的其余行一条都不放宽：本函数只做减法，减掉的是**声明里显式关掉
+ * 的模块**对应的行（`features.<module> === false`），其它任何"行不见了"照旧抛错。
+ * 全开（官方渠道 / 没写 `features`）时返回的数组与 {@link REQUIRED_DESKTOP_ROWS}
+ * **逐个元素相同**。
+ *
+ * `features` 缺省取自**随包渠道包**（`build/channel.json`，`stageChannelProfile()` 写入）。
+ * @param features - 功能模块开关（测试注入；缺省读随包渠道包）。
+ * @returns 本次运行必须 ACTIVE 的行 id。
+ */
+export function requiredDesktopRows(features?: FeatureSwitches): readonly string[] {
+  const pruned = new Set(prunedFeatureRows(features ?? readDesktopChannelProfile()?.features))
+  return pruned.size === 0 ? REQUIRED_DESKTOP_ROWS : REQUIRED_DESKTOP_ROWS.filter(id => !pruned.has(id))
+}
+
+/**
+ * 本次运行被模块开关摘掉的行 id（排障与自检用；全开时为空）。
+ * @param features - 功能模块开关（缺省读随包渠道包）。
+ * @returns 被摘掉的行 id（顺序 = {@link REQUIRED_DESKTOP_ROWS} 的顺序）。
+ */
+export function prunedDesktopRows(features?: FeatureSwitches): readonly string[] {
+  return prunedFeatureRows(features ?? readDesktopChannelProfile()?.features)
+}
+
+/**
+ * 本次运行被关掉的模块名（`features` 里显式 `false` 的那些；全开时为空）。
+ * @param features - 功能模块开关（缺省读随包渠道包）。
+ * @returns 模块名列表。
+ */
+export function closedDesktopFeatureModules(features?: FeatureSwitches): string[] {
+  return closedFeatureModules(features ?? readDesktopChannelProfile()?.features)
+}
+
 /** Loader 条目里本模块读取的最小形状（避免把上游 Loader 类型引进来）。 */
 export interface LoaderEntryLike {
   options?: { id?: string }
@@ -127,7 +171,7 @@ export interface InactiveRow {
  */
 export function inactiveRequiredRows(
   entries: Iterable<LoaderEntryLike>,
-  required: readonly string[] = REQUIRED_DESKTOP_ROWS,
+  required: readonly string[] = requiredDesktopRows(),
 ): InactiveRow[] {
   const byId = new Map<string, LoaderEntryLike>()
   for (const entry of entries) {
@@ -259,7 +303,7 @@ export function assertRequiredClientEntries(
  */
 export function assertRequiredRowsActive(
   ctx: StartupAuditContext,
-  required: readonly string[] = REQUIRED_DESKTOP_ROWS,
+  required: readonly string[] = requiredDesktopRows(),
 ): void {
   const entries = ctx.loader?.entries()
   if (entries === undefined) {
