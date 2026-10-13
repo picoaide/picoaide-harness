@@ -102,7 +102,14 @@ export const FEATURE_NAV_ENTRIES: FeatureNavEntry[] = [
 /**
  * **这份产物**的侧栏（被关闭的模块整条不在）。
  *
- * 判定走 {@link isFeatureEnabled}（数据面）；被关闭的模块连条目带图标都不进产物。
+ * 判定走 {@link isFeatureEnabled}（数据面）：被关闭模块的条目**不会出现在侧栏里**。
+ *
+ * ⚠️ **但"不在侧栏里"不等于"字符串不进产物"**（2026-10-14 独立审计 P2-4 的措辞更正）：
+ * 过滤发生在**运行期**（下面是 `.filter()` 调用），所以 `FEATURE_NAV_ENTRIES` 里的
+ * 路径 / 标签 / 图标**仍然会被打进 chunk**（实测 `FEATURES=none` 的产物里
+ * `grep -rl '/connectors' assets/` 命中 `assets/index-*.js`）。真裁剪面（编译期、由产物
+ * 字节判据咬住）= **模块页 chunk** + **`<Route>`**，不是这几个字符串。
+ * 想看渲染面为什么必须留着声明数据，见 `DECLARED_NAV_ENTRIES` 与 `nav.test.ts` 的权限点前向守卫。
  */
 export const NAV_ENTRIES: NavEntry[] = [
   ...CORE_NAV_ENTRIES_HEAD,

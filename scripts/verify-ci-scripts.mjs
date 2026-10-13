@@ -8111,23 +8111,30 @@ exit 0
 
   // ---- ① 三处缺省值必须同源（P2-4）------------------------------------------------
   /**
-   * 取 Dockerfile 里某个 `ARG <name>=<默认值>` 的默认值。
+   * 取 Dockerfile 里某个 `ARG <name>=<默认值>` 的**全部**默认值（按出现顺序）。
+   *
+   * 2026-10-14（P2-5 收口）：`ARG GO_TAGS=` 现在出现**两次** —— webadmin stage 要拿它做
+   * fail-loud 断言（下面 ②b），Go stage 拿它喂 `go build -tags=`。旧口径（`exec` 只取第一条）
+   * 在"两处缺省值漂移"时不会有任何红灯：webadmin stage 写 `none`、Go stage 写全开照样过，
+   * 而那正是半通镜像的一种。所以改成取**全集** + 逐条相等。
    * @param name - ARG 名。
-   * @returns 默认值（没有该 ARG ⇒ null）。
+   * @returns 默认值数组（没有该 ARG ⇒ 空数组）。
    */
-  const dockerArgDefault = (name) => {
-    const match = new RegExp(`^ARG\\s+${name}=(.*)$`, 'mu').exec(dockerfile)
-    return match === null ? null : match[1].trim()
-  }
-  const dockerFeatures = dockerArgDefault('FEATURES')
-  const dockerGoTags = dockerArgDefault('GO_TAGS')
+  const dockerArgDefaults = (name) =>
+    [...dockerfile.matchAll(new RegExp(`^ARG\\s+${name}=(.*)$`, 'gmu'))].map(match => match[1].trim())
+  const dockerFeatures = dockerArgDefaults('FEATURES')
+  const dockerGoTags = dockerArgDefaults('GO_TAGS')
   const makeGoTags = (/^GO_TAGS\s*\?=\s*(.*)$/mu.exec(makefile) ?? [])[1]?.trim() ?? null
-  check(dockerFeatures === DEFAULT_VARIANT,
-    `server/Dockerfile 的 \`ARG FEATURES=\` 缺省值必须 = ${DEFAULT_VARIANT}（实际 ${String(dockerFeatures)}）`
-      + ' —— 镜像的 webadmin 变体与 Go 变体是同一个串的两种编码，缺省不一致就是半通状态')
-  check(dockerGoTags === makeGoTags && makeGoTags === DEFAULT_VARIANT,
-    'server/Dockerfile 的 `ARG GO_TAGS=` 缺省值必须与 server/Makefile 的 `GO_TAGS ?=` 逐字相同、'
-      + `且 = ${DEFAULT_VARIANT}（Dockerfile ${String(dockerGoTags)} / Makefile ${String(makeGoTags)}）`)
+  check(dockerFeatures.length >= 1 && dockerFeatures.every(value => value === DEFAULT_VARIANT),
+    `server/Dockerfile 的**每一处** \`ARG FEATURES=\` 缺省值都必须 = ${DEFAULT_VARIANT}`
+      + `（实际 ${JSON.stringify(dockerFeatures)}）—— 镜像的 webadmin 变体与 Go 变体是同一个串的`
+      + '两种编码，缺省不一致就是半通状态')
+  check(dockerGoTags.length >= 2 && new Set(dockerGoTags).size === 1 && dockerGoTags[0] === makeGoTags
+    && makeGoTags === DEFAULT_VARIANT,
+    'server/Dockerfile 的 `ARG GO_TAGS=` 必须**每一处**（webadmin stage 与 Go stage 各一处）都与'
+      + ' server/Makefile 的 `GO_TAGS ?=` 逐字相同、'
+      + `且 = ${DEFAULT_VARIANT}（Dockerfile ${JSON.stringify(dockerGoTags)} / Makefile ${String(makeGoTags)}）`
+      + ' —— 只判第一处时，两处漂移（webadmin 侧裁了、Go 侧没裁）不会有任何红灯')
   check(/^FEATURES\s*\?=.*GO_TAGS/mu.test(makefile),
     'server/Makefile 必须把 webadmin 的 FEATURES 从 GO_TAGS **机械翻译**出来'
       + '（`FEATURES ?= $(if $(strip $(GO_TAGS)),$(GO_TAGS),none)` 那一行）—— 两个变量各自手填时，'
@@ -8145,6 +8152,102 @@ exit 0
       'server/Dockerfile 的 `ARG FEATURES=` / `ENV FEATURES=$FEATURES` 必须写在 `RUN npm ci` **之后**、'
         + '`RUN npm run build` **之前** —— ENV 是构建链上的一层，写在依赖安装之前时每换一个变体都会让'
         + '它之后的全部层失效（实测：每个变体重跑一次全量 `npm ci`，含外网下载）')
+  }
+
+  // ---- ②b 两个变体 build-arg 必须**成对**：Dockerfile 里那条 fail-loud 断言（P2-5 收口）----
+  //
+  // 现场（2026-10-14 独立审计 P2-5）：`ARG FEATURES=`（webadmin stage）与 `ARG GO_TAGS=`
+  // （Go stage）此前**各自独立、无派生关系**，而 Dockerfile 里 Go stage 的注释又把
+  // `--build-arg GO_TAGS=`（空 = 三个模块全关）单独写成合法姿势 ⇒
+  // `docker build --build-arg GO_TAGS=apps,connectors .` 直接得到"服务端裁了、管理端全开"的
+  // 半通镜像（管理员点得进菜单、每个请求 404），而两侧判据都只看自己那半边 ⇒ 全绿。
+  // 决策文档 §6/§7.2 已把这条认账为"靠『只覆盖一个变量的入口纪律』"，但纪律只存在于散文里，
+  // 任何地方都没有红灯。
+  //
+  // 判据：Dockerfile 里必须**恰好一条**这样的 `RUN` 断言 —— 同时读 `$FEATURES` 与 `$GO_TAGS`、
+  // 做 `none` ⟺ 空 tag 集的翻译、不一致时 `exit 1`；且它必须落在 `ARG FEATURES=` **之后**、
+  // `RUN npm run build` **之前**（fail-loud 要在管理端构建之前发生，而不是构建完才发现）。
+  // 断言本身在构建期执行（实测：只传 GO_TAGS 或只传 FEATURES 都 EXIT=1、成对或缺省都通过、
+  // 且 `npm ci` 层跨变体仍命中缓存）—— 本判据保证它**不会**被后来的人删掉/改成恒真。
+  {
+    /** Dockerfile 里每个 `RUN` 指令的完整文本（含 `\` 续行）。 */
+    const dockerRunBlocks = [...dockerfile.matchAll(/^RUN[ \t]+((?:[^\n]*\\\n)*[^\n]*)$/gmu)]
+      .map(match => match[1])
+    /**
+     * "变体一致性断言"的问题清单（空 = 通过）。纯函数：量具自检直接喂合成样本。
+     * @param body - `RUN` 指令文本。
+     * @returns 问题说明数组。
+     */
+    const variantGuardProblems = (body) => {
+      if (!/\$\{?FEATURES\}?/u.test(body) || !/\$\{?GO_TAGS\}?/u.test(body)) {
+        return ['它没有同时读 `$FEATURES` 与 `$GO_TAGS`']
+      }
+      const problems = []
+      if (!/none/u.test(body) || !/=\s*""/u.test(body)) {
+        problems.push('它没有做 `none` ⟺ 空 tag 集的翻译（webadmin 用显式 `none` 表示三个全关，'
+          + 'Go 用空串；少了这一步，`make docker-image GO_TAGS=` 这条正常入口会被自己的断言拒掉）')
+      }
+      if (!/!=/u.test(body) || !/exit\s+1/u.test(body)) {
+        problems.push('它不一致时不会失败（缺 `!=` 比较或 `exit 1`）—— 那就只是一段打印')
+      }
+      return problems
+    }
+    const guardBlocks = dockerRunBlocks.filter(body => variantGuardProblems(body).length === 0)
+    const candidateBlocks = dockerRunBlocks.filter(body =>
+      /\$\{?FEATURES\}?/u.test(body) && /\$\{?GO_TAGS\}?/u.test(body))
+    check(guardBlocks.length === 1,
+      'server/Dockerfile 必须**恰好一条**"变体 build-arg 一致性"的 fail-loud `RUN`'
+        + `（同时读两个 build-arg + \`none\` 翻译 + 不一致时 \`exit 1\`；命中 ${guardBlocks.length} 条；`
+        + `同时读两个变量的 RUN 共 ${candidateBlocks.length} 条`
+        + (candidateBlocks.length === 0 ? ''
+          : `，问题：${candidateBlocks.map((body, at) =>
+            `#${at + 1} ${variantGuardProblems(body).join('、')}`).join('；')}`)
+        + '）。理由：只覆盖一个 build-arg 会造出半通镜像（页面在、接口 404）而两侧判据全绿')
+    const guardBody = guardBlocks[0] ?? ''
+    if (guardBody !== '') {
+      const argFeaturesAt = dockerfile.search(/^ARG\s+FEATURES=/mu)
+      const npmBuildAt = dockerfile.search(/^RUN npm run build\s*$/mu)
+      const guardAt = dockerfile.indexOf(guardBody)
+      check(argFeaturesAt >= 0 && guardAt > argFeaturesAt && npmBuildAt > guardAt,
+        'server/Dockerfile 的变体一致性断言必须在 `ARG FEATURES=` **之后**、`RUN npm run build` '
+          + '**之前** —— 写在构建之后时"半通镜像"已经建出来了（只是没被使用），'
+          + '而写在 `ARG FEATURES=` 之前时它读到的还是缺省值')
+    }
+    // ---- 量具自检：合成样本必须落在判据的两侧（与第 18 节 ⑨ 同一手法）----
+    // 上面那三条判据全在纯函数/文本匹配里，把 `variantGuardProblems` 掏空成 `return []`
+    // 会让任意 RUN 都算"断言"、把 `exit 1` 检查放宽到恒真也不会被真 Dockerfile 发现
+    // （真的那条本来就是绿的）。样本给出下限。
+    const GUARD_SAMPLES = [
+      {
+        name: '正例（与 Dockerfile 同形）',
+        body: 'set -eu; \\\n    expect="$FEATURES"; \\\n    if [ "$expect" = "none" ]; then expect=""; fi; \\\n'
+          + '    if [ "$expect" != "$GO_TAGS" ]; then echo x >&2; exit 1; fi',
+        ok: true,
+      },
+      {
+        name: '变异①：删掉 exit 1（不一致也只打印）',
+        body: 'expect="$FEATURES"; if [ "$expect" = "none" ]; then expect=""; fi; '
+          + 'if [ "$expect" != "$GO_TAGS" ]; then echo x >&2; fi',
+        ok: false,
+      },
+      {
+        name: '变异②：只读一个变量（另一半永远是缺省值）',
+        body: 'if [ "$FEATURES" != "skills,apps,connectors" ]; then exit 1; fi',
+        ok: false,
+      },
+      {
+        name: '变异③：没有 none 翻译（正常入口会被自己的断言拒掉）',
+        body: 'if [ "$FEATURES" != "$GO_TAGS" ]; then exit 1; fi',
+        ok: false,
+      },
+    ]
+    for (const sample of GUARD_SAMPLES) {
+      const problems = variantGuardProblems(sample.body)
+      check((problems.length === 0) === sample.ok,
+        `量具自检「${sample.name}」：期望${sample.ok ? '通过' : '报错'}，实际`
+          + `${problems.length === 0 ? '通过' : `报错(${problems.join('、')})`}`
+          + ' —— 这条谓词被改松/改紧了（改判据请同批改本样本并写明理由）')
+    }
   }
 
   // ---- ③ webadmin 侧哨兵落点必须登记且与真源同源（P2-6）----------------------------
@@ -8365,7 +8468,10 @@ process.stdout.write('verify-ci-scripts: OK — ref 形态判定唯一真源(tag
   + '(合成正例 4 例必须接受 / 合成负例 5 例必须拒绝,含"删掉可执行引用只留注释")'
   + ' + 契约文档必须存在且列出三个哨兵串)/'
   + 'webadmin 变体接线(三处缺省值同源:真跑 webadmin/features.mjs 与 channel-constants.ts 后的值对拍 '
-  + 'Dockerfile 两个 ARG 与 Makefile 的 `GO_TAGS ?=`;变体开关必须写在 `RUN npm ci` 之后'
-  + '(否则每个变体重跑全量依赖安装);webadmin 侧哨兵落点登记——每个模块页各自声明并渲染'
+  + 'Dockerfile **每一处** ARG 与 Makefile 的 `GO_TAGS ?=`;变体开关必须写在 `RUN npm ci` 之后'
+  + '(否则每个变体重跑全量依赖安装);**两个变体 build-arg 必须成对**——Dockerfile 里必须恰好一条'
+  + 'fail-loud 断言(`$FEATURES`/`$GO_TAGS` 并读 + `none` ⟺ 空 tag 集翻译 + 不一致 `exit 1`,'
+  + '位置在 `ARG FEATURES=` 之后与 `RUN npm run build` 之前),该谓词自带量具自检(1 正 3 负);'
+  + 'webadmin 侧哨兵落点登记——每个模块页各自声明并渲染'
   + '真源派生的串、两份判据脚本各持全部串、其余文件出现哨兵字面量即红;'
   + '变体测试矩阵的调度点三处缺一即红:Makefile 目标 + `make check` 调它 + CI server job 起它)\n')

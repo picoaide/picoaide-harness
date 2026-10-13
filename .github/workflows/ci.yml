@@ -902,12 +902,26 @@ jobs:
     needs: changes
     if: needs.changes.result != 'success' || needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
-    # 45 min 的依据(2026-09-19,R2-SK-7):happy path ≈ 26 min 测试 + PG 启动/
-    # npm ci/gofmt/go vet/npm test/make build-server ≈ 5 min ⇒ 留 ~1.4× 余量;
-    # 且覆盖"单包挂满 15m + 其余 ~21m ≈ 36 min"的最坏路径,使 -timeout 的
-    # goroutine dump 一定能打出来(取 30 min 时这两条都不成立:余量仅 ~13%,
-    # runner 稍慢即同提交红,真挂则无 dump)。
-    timeout-minutes: 45
+    # 60 min 的依据(2026-09-19 立,R2-SK-7;2026-10-14 重算)。同一套算式,只是把
+    # 本片新增的两条 webadmin 变体判据算进固定开销 —— 45 min 是按旧账算的,挂上新步骤后
+    # happy path 已到 37.4 min(余量仅 1.20×,低于注释自己的 1.4× 口径),最坏路径 42.4 min
+    # 只剩 ~6%,runner 稍慢或某个包多花几分钟就会先撞 job 上限被整体取消,退化成
+    # "gate 红、查不出原因"。
+    #
+    #   · happy path ≈ 26 min(go test -p 1 全量) + 5 min(PG 启动 / npm ci / gofmt /
+    #     go vet / `npm test` / `make build-server`) + 6.4 min(新增两条变体判据;本机 4 vCPU
+    #     实测两轮:空载 4m36s + 51s ≈ 5.5 min,审计当日带负载 5m17s + 1m04s ≈ 6.4 min ——
+    #     按**慢的那一轮**算) ≈ 37.4 min ⇒ 60/37.4 ≈ **1.60×** 余量(≥ 注释口径的 1.4×);
+    #   · 最坏路径 = 单包挂满 15m + 其余 ~21m + 6.4 ≈ **42.4 min** ≤ 60 ⇒ 留 ~17.6 min,
+    #     使 `-timeout 15m` 的 `panic: test timed out` + goroutine dump + 用例名一定能打出来
+    #     (取 45 min 时这条路只剩 2.6 min);
+    #   · 与 [SK-7b] 的序关系:2×15+12 = 42 ≤ 60 ✓(该策略的固定开销常量与本节同批由 5 改成 12,
+    #     否则判据自己的模型还是旧账 —— 见 `check-workflows.mjs` 的 `CI_JOB_FIXED_OVERHEAD_MINUTES`)。
+    # 变体判据是分钟级的,本可以拆成独立 job 并行;没有拆是因为它需要 `server/webadmin`
+    # 的 node_modules(server job 已 `npm ci`),拆出去要再装一遍依赖,收益被吃掉。
+    # 代价(认账):真挂的 job 从 45 min 起到 60 min 才被取消 —— 但那时单个包的 `-timeout 15m`
+    # 早已先到点并打出 dump,这条正是 R2-SK-7 要的形态。
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: server

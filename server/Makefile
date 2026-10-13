@@ -80,8 +80,12 @@ GO_TAG_FLAG := -tags=$(GO_TAGS)
 #   覆盖姿势：
 #     make build-server GO_TAGS=apps,connectors     # 关掉技能面（webadmin 同步）
 #     make build-server GO_TAGS=                   # 三个全关（webadmin 自动用 none）
-#   直接覆盖 `FEATURES=` 也可以（例如只想打一个裁过的管理端），但**不要**只覆盖它而
-#   不动 GO_TAGS —— 那正是上面说的半通状态。
+#   只覆盖 `FEATURES=` 而**不动 GO_TAGS** 只在**本地产物**这一层说得通
+#   （例：`make webadmin FEATURES=apps,connectors` 打一个裁过的管理端）——
+#   它正是上面说的半通状态，所以**镜像这一层不再接受它**：`make docker-image FEATURES=…` /
+#   `docker build --build-arg FEATURES=…`（不同时传 GO_TAGS）会被 Dockerfile 里那条
+#   fail-loud 断言当场拒掉（2026-10-14 独立审计 P2-5 的收口；判据在
+#   `scripts/verify-ci-scripts.mjs` 第 19 节）。要打裁过的镜像就走 `GO_TAGS=`。
 # ---------------------------------------------------------------------------
 FEATURES ?= $(if $(strip $(GO_TAGS)),$(GO_TAGS),none)
 

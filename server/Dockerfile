@@ -55,8 +55,36 @@ COPY webadmin/package.json webadmin/package-lock.json ./
 RUN npm ci
 # 用 ENV 而不是把变量写进 RUN：`npm run build`（tsc -b && vite build）整条链路都要能读到
 # 同一个值（vite.config.ts 与 vitest.config.ts 都从环境读，真源解析在 webadmin/features.mjs）。
+#
+# ⚠️ 变体标识的**唯一输入是 `GO_TAGS`**（与 Stage 2 是同一个串，见那边的 `ARG GO_TAGS=`）：
+# 两个 build-arg 必须描述**同一个变体**，下面那条 RUN 就是这条不变量本身。
+ARG GO_TAGS=skills,apps,connectors
 ARG FEATURES=skills,apps,connectors
 ENV FEATURES=$FEATURES
+# **fail-loud：两个变体 build-arg 必须一致**（2026-10-14 独立审计 P2-5 的收口）。
+#
+# 不一致 = **半通镜像**：`FEATURES` 决定页面在不在、`GO_TAGS` 决定接口在不在，两者不同时
+# 管理员点得进菜单而每个请求 404（或反过来少一个运维入口）—— 而两侧各自的判据都只看自己
+# 那半边 ⇒ **没有任何红灯**。此前这条只写在文档的散文里（"靠只覆盖一个变量的入口纪律"），
+# 而 Stage 2 的注释又把 `--build-arg GO_TAGS=` 单独写成合法姿势 ⇒
+# `docker build --build-arg GO_TAGS=apps,connectors .` 会静默造出半通镜像（管理端全开、
+# 服务端已裁）。实测（本地缓存 node:24-alpine/BuildKit）：两个 arg 各自缺省时一致、
+# `make docker-image` 与 `scripts/ci-build-channel-images.sh` 两条入口分别成对传值 / 都用
+# 缺省，因此正常路径不受影响；只有"只覆盖一个变量"的手工形态会在这里当场失败。
+#
+# 断言只判"传进来的两个值是不是同一个变体"：两种编码的**翻译**（空 tag 集 ⟺ 显式 `none`）
+# 仍然只在 `server/Makefile` 一处（`FEATURES ?= $(if $(strip $(GO_TAGS)),$(GO_TAGS),none)`），
+# 本文件不重复实现它。
+RUN set -eu; \
+    expect="$FEATURES"; \
+    if [ "$expect" = "none" ]; then expect=""; fi; \
+    if [ "$expect" != "$GO_TAGS" ]; then \
+      echo "build-arg 不一致：FEATURES=[$FEATURES] GO_TAGS=[$GO_TAGS]" >&2; \
+      echo "两者是同一个变体标识的两种编码（webadmin 用 none 表示三个全关，Go 用空 tag 集）。" >&2; \
+      echo "请成对传：--build-arg GO_TAGS=<变体> --build-arg FEATURES=<同一变体|none>；" >&2; \
+      echo "或改用 make -C server docker-image GO_TAGS=<变体>（翻译由 Makefile 一处完成）。" >&2; \
+      exit 1; \
+    fi
 COPY webadmin/ ./
 RUN npm run build
 
@@ -71,7 +99,10 @@ ARG VERSION=dev
 # 可选模块的编译期开关（2026-10-14，P1 第一片）：唯一真源 = `internal/features` 的
 # build tag 文件，模块名与渠道契约逐字一致（skills / apps / connectors）。**缺省全开** ⇒
 # 不传这个 build-arg 时镜像内容与本改造之前同源（本片只接线、不裁剪）。
-# 取值逗号分隔、不加空格；`--build-arg GO_TAGS=`（空）= 三个模块全关的变体。
+# 取值逗号分隔、不加空格；`--build-arg GO_TAGS=`（空）= 三个模块全关的变体 —— 但它**必须与
+# Stage 1 的 `FEATURES` 成对传**（空 tag 集对应 webadmin 的显式 `none`），只传这一个会被
+# Stage 1 的 fail-loud 断言当场拒掉（2026-10-14 独立审计 P2-5：此前这段注释正是"半通镜像"
+# 的入口）。最省事的姿势是 `make -C server docker-image GO_TAGS=<变体>`。
 # `make docker-image` 会把自己的 `GO_TAGS`（同一份缺省值）透传过来；**必须写在包面
 # 之前**（`go` 的 flag 解析在第一个非 flag 词处停止）。
 ARG GO_TAGS=skills,apps,connectors

@@ -171,10 +171,13 @@ const REGISTERED_GUARD_ENTRIES = new Map([
   // （取值来自 `--print-digests` 的复算结果，且必须取**工作树**=提交后 HEAD 那份，
   // 由 `check-guard-parser-integrity.mjs` 与 `verify-check-workspaces.mjs` 各自独立复算对拍）。
   ['check:layout', { script: 'node scripts/verify-layout.mjs', argvTail: [], digest: 'c7851ab69aab2e137758d69dfe56c777627ae404dd5a36b619f0d89cfd4bdc1d' }],
-  ['check:workflows', { script: 'node scripts/check-workflows.mjs', argvTail: [], digest: '6135549c5839a56cd2b51aa36801cbde4b474c4d5fbc2164c40d0783aa27c457' }],
-  // 2026-10-14：新增第 19 节（webadmin 变体接线：三处缺省值同源 / 哨兵落点登记 / 调度点），
-  // 摘要按 `--print-digests` 复算后同批更新（改判据必须显式出现在 diff 里）。
-  ['check:ci-scripts', { script: 'node scripts/verify-ci-scripts.mjs', argvTail: [], digest: 'eec8a333228587092ebd99697d4e9900e241d8ba5284807bd0927f69f3eb312e' }],
+  // 2026-10-14：`check:workflows` 补两条变体判据步骤的可执行性登记（`REQUIRED_CI_STEPS` /
+  // 判据词表 / `PINNED_STEP_POLICIES` + 载荷），并把 `[SK-7b]` 的固定开销常量提为
+  // `CI_JOB_FIXED_OVERHEAD_MINUTES`（45→60 min 预算的同批模型更正）；`check:ci-scripts`
+  // 第 19 节新增"两个变体 build-arg 必须成对"（Dockerfile fail-loud 断言）与量具自检。
+  // 两条摘要均按 `--print-digests` 复算后同批更新（改判据必须显式出现在 diff 里）。
+  ['check:workflows', { script: 'node scripts/check-workflows.mjs', argvTail: [], digest: 'ee0d0dfae61321e4063a9c1f8c3304023da19476004592f9eb647d920f5ae7c8' }],
+  ['check:ci-scripts', { script: 'node scripts/verify-ci-scripts.mjs', argvTail: [], digest: '8b27a1ff2e367413f1c2aeba7a7f7fec185bccd42689f4cff66852dc7c7b9f03' }],
   ['check:patch-resolutions', { script: 'node scripts/verify-patch-resolutions.mjs', argvTail: [], digest: '6dcde2281311235a57722608d91e6a1fa59734411ad65cda76ea2bdc43145c83' }],
   ['check:patch-pin', { script: 'node scripts/check-patch-pin.mjs', argvTail: [], digest: 'a8fe5b45df5dfadd7a87332b31f9e14c4a6722a41f21cf0f0d9afa6450a3ba84' }],
   ['check:patches', { script: 'node scripts/verify-patches.mjs', argvTail: [], digest: '22131d86472ff930f22687192b07216c5cf74ab594d0091a6766e661a2c24683' }],
