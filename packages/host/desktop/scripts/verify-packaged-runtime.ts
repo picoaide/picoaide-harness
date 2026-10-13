@@ -19,8 +19,20 @@ import { extractFile, listPackage } from '@electron/asar'
 import { FuseVersion, FuseV1Options, flipFuses, getCurrentFuseWire } from '@electron/fuses'
 import AdmZip from 'adm-zip'
 import { normalizeAsarEntry, toAsarEntryPath } from './asar-entry-path.ts'
-import { readChannelVariantManifest, type ChannelVariantManifest } from './channel-variant.ts'
-import { FEATURE_MODULE_SURFACES } from '../src/channel-features.ts'
+import {
+  CHANNEL_VARIANT_MANIFEST_FILENAME,
+  defaultChannelVariantDir,
+  readChannelVariantManifest,
+  type ChannelVariantManifest,
+} from './channel-variant.ts'
+import {
+  FEATURE_MODULE_SURFACES,
+  closedFeatureModules,
+  closedFeatureSurfaces,
+  prunedFeatureBundles,
+  prunedFeatureRows,
+} from '../src/channel-features.ts'
+import { readDesktopChannelProfile, type DesktopChannelProfile } from '../src/desktop-channel.ts'
 import { asarLayoutLogLine, assertMacBundleConsistency } from './mac-bundle-consistency.ts'
 import { packagedAppId } from './channel-build.ts'
 import {
@@ -2155,19 +2167,154 @@ export interface PackagedRuntimeVariantView {
  * 那边数的是"三张表的并集"里属于该包的条目数，所以这里也按并集削减 —— 按单张表
  * 削减会让 connectors 这种"扁平表 0 条、导出表 6 条"的包算错（少削减 0 条 ⇒ 变体
  * 构建会因为总下限而假红）。
- * @param manifest - 变体清单。**三态**：不传 = 读 `temp/channel-variant.json`
- *   （生产形态）；传 `undefined` / `null` = **显式声明"这次按全开算"**（测试与
- *   人工复核用）。
+ * @param manifest - 变体清单。**三态**：不传 = 读 `temp/channel-variant.json`，
+ *   并**先与随包 `build/channel.json` 的 `features` 对拍**（生产形态，见
+ *   {@link resolveVariantManifestUnderDeclaration}）；传 `undefined` / `null` =
+ *   **显式声明"这次按全开算"**（测试与人工复核用；这一路**绕过**随包声明对拍，
+ *   否则夹具无法在任意机器状态下构造"全开基线"）。
  *   JS 的缺省参数在实参为 `undefined` 时也会生效，所以"显式全开"必须有一个
  *   不同的取值 —— 否则开发机上恰好躺着一份变体清单时（变体构建进行中，这是**正常**
  *   状态），"全开基线"的用例会静默改成测变体路径，而它看上去仍然全绿。
  * @returns 折叠后的视图。
+ * @throws 随包声明与临时清单漂移 / 声明有模块关闭而清单缺失时（fail-loud）。
  */
 export function packagedRuntimeVariantView(
   manifest?: ChannelVariantManifest | null,
 ): PackagedRuntimeVariantView {
-  const resolved = manifest === undefined ? readChannelVariantManifest() : manifest ?? undefined
+  const resolved = manifest === undefined ? resolveVariantManifestUnderDeclaration() : manifest ?? undefined
   return buildVariantView(resolved)
+}
+
+/** 变体清单的绝对落点（报错定位与人工复核用）。 */
+function channelVariantManifestPath(): string {
+  return join(defaultChannelVariantDir(), CHANNEL_VARIANT_MANIFEST_FILENAME)
+}
+
+/**
+ * **随包声明派生的期望摘除面** —— "本次构建关了哪些模块"的**权威**。
+ *
+ * 权威是随包的 `build/channel.json`（`readDesktopChannelProfile()`，同一份文件被
+ * `stagePackAppRoot()` 复制进 asar），不是构建机上的临时清单：临时清单只是同一份
+ * 声明的**派生物**，它缺失/过期/被上一轮覆盖时，判据必须红，而不是退化成
+ * "全开即通过"（那样"声明关了 connectors、产物里整包都在"会静默拿到绿灯）。
+ * @param profile - 随包渠道配置（缺省读 `build/channel.json`；测试注入）。
+ * @returns 声明的关闭模块 / 要摘的包 / 要摘的行。
+ */
+export interface DeclaredFeaturePrune {
+  /** 声明里显式关闭的模块名（顺序 = `FEATURE_MODULE_SURFACES`）。 */
+  readonly closedModules: readonly string[]
+  /** 关闭模块对应的包名（= staging `package.json` 要摘的键）。 */
+  readonly packages: readonly string[]
+  /** 关闭模块对应的 profile 行 id。 */
+  readonly rows: readonly string[]
+  /** 关闭模块的仓库相对目录（= 临时清单的 `directories`，prebuild 的输入表键）。 */
+  readonly directories: readonly string[]
+}
+
+/**
+ * 读随包声明并派生期望摘除面（{@link DeclaredFeaturePrune}）。
+ * @param profile - 随包渠道配置（缺省读 `build/channel.json`）。文件不在 = 官方/未
+ *   渠道化构建 = 全开。
+ * @returns 期望摘除面。
+ */
+export function declaredFeaturePrune(
+  profile: DesktopChannelProfile | undefined = readDesktopChannelProfile(),
+): DeclaredFeaturePrune {
+  const features = profile?.features
+  return {
+    closedModules: closedFeatureModules(features),
+    packages: prunedFeatureBundles(features),
+    rows: prunedFeatureRows(features),
+    directories: closedFeatureSurfaces(features).flatMap(surface => [...surface.directories]),
+  }
+}
+
+/**
+ * 两个清单的**对称差**（顺序无关；两侧都点名，便于一眼看出谁多谁少）。
+ * @param left - 一侧（已排序去重）。
+ * @param right - 另一侧。
+ * @returns 只在一侧出现的条目。
+ */
+function listSymmetricDifference(left: readonly string[], right: readonly string[]): string[] {
+  const a = new Set(left)
+  const b = new Set(right)
+  return [...new Set([...left, ...right])].filter(entry => a.has(entry) !== b.has(entry)).sort()
+}
+
+/**
+ * **随包声明 ↔ 构建机临时清单**的一致性判据（2026-10-14 R2 审计 S3 修复）。
+ *
+ * 三种状态都必须**当场可判**（假绿方向是"声明关了模块、产物里整包还在"）：
+ *   1. 声明有关闭 + 清单缺失 ⇒ **红**（清单缺失不得降级成"全开即通过"）；
+ *   2. 声明与清单不一致（模块 / 包 / 行 / 目录任一集合不相等）⇒ **红**；
+ *   3. 声明全开 + 清单仍在 ⇒ **红**（残留清单会让产物少掉随包声明仍然打开的模块）。
+ * 一致时返回，不抛错。
+ * @param declared - 随包声明派生的期望摘除面。
+ * @param manifest - 已读到的临时清单（缺失为 `undefined`）。
+ * @param manifestPath - 清单路径（报错定位；测试注入）。
+ * @throws 上述三种形态之一。
+ */
+export function assertVariantDeclarationConsistency(
+  declared: DeclaredFeaturePrune,
+  manifest: ChannelVariantManifest | undefined,
+  manifestPath: string = channelVariantManifestPath(),
+): void {
+  if (declared.closedModules.length === 0) {
+    if (manifest === undefined) return
+    throw new Error(
+      `dsh-plugin-desktop: 随包 build/channel.json 的 features 全开，但构建机临时清单仍在：${manifestPath}`
+      + `（modules=[${manifest.modules?.join(', ') ?? ''}]）—— 清单是上一条变体产线的残留，`
+      + '本次构建会按它裁依赖 ⇒ 产物少掉随包声明仍然打开的模块。'
+      + '修法：跑一次 prepareChannelPackaging()（每次构建都会清残留）或删掉该文件。',
+    )
+  }
+  if (manifest === undefined) {
+    throw new Error(
+      `dsh-plugin-desktop: 随包 build/channel.json 声明关闭了 [${declared.closedModules.join(', ')}]，`
+      + `但构建机临时清单缺失（${manifestPath}）—— 无法证明这些模块真的被裁出产物`
+      + '（"声明关了、代码还在"正是本仓最贵的失败形态）。清单缺失**不得**降级成"全开即通过"。',
+    )
+  }
+  const problems: string[] = []
+  const pairs: ReadonlyArray<readonly [string, readonly string[], readonly string[]]> = [
+    ['modules', declared.closedModules, manifest.modules ?? []],
+    ['packages', declared.packages, manifest.packages ?? []],
+    ['rows', declared.rows, manifest.rows ?? []],
+    ['directories', declared.directories, manifest.directories ?? []],
+  ]
+  for (const [label, declaredList, manifestList] of pairs) {
+    const difference = listSymmetricDifference(declaredList, manifestList)
+    if (difference.length === 0) continue
+    problems.push(
+      `${label}: 随包声明=[${[...declaredList].sort().join(', ')}] `
+      + `vs 临时清单=[${[...manifestList].sort().join(', ')}]（对称差 ${difference.join(', ')}）`,
+    )
+  }
+  if (problems.length > 0) {
+    throw new Error(
+      `dsh-plugin-desktop: 随包 build/channel.json 的 features 与构建机临时清单漂移：${manifestPath}\n  `
+      + `${problems.join('\n  ')}\n`
+      + '声明是权威（它随包、进 asar，运行期按它决定"要不要装配这个模块"），'
+      + '临时清单是它的派生物；两者不一致时产物会处在"少包却仍声明要装配"或'
+      + '"声明关了却还带整包"的中间态，两条都必须在打包末端拒包。',
+    )
+  }
+}
+
+/**
+ * 生产形态的清单解析：先读随包声明，再读临时清单，**对拍通过后**才把它当成
+ * 本次构建的裁剪面。
+ *
+ * 顺序是承重的：先对拍再返回 ⇒ 任何"清单缺失/漂移"的形态都在**折叠三张表之前**
+ * 抛出，不会先按一份错清单把判据折叠掉再报错。
+ * @returns 临时清单（全开构建为 `undefined`）。
+ * @throws 声明与清单不一致 / 缺失时（见 {@link assertVariantDeclarationConsistency}）。
+ */
+function resolveVariantManifestUnderDeclaration(): ChannelVariantManifest | undefined {
+  const declared = declaredFeaturePrune()
+  const manifest = readChannelVariantManifest()
+  assertVariantDeclarationConsistency(declared, manifest)
+  return manifest
 }
 
 /**
@@ -2259,15 +2406,18 @@ function featureModuleArchivePrefix(pkg: string): string {
  *
  * @param entries - 归一化后的归档条目集合（`normalizeAsarEntry()` 的结果）。
  * @param where - 归档路径（报错定位用）。
- * @param manifest - 变体清单（缺省读 `temp/channel-variant.json`）。
- * @throws 关闭的模块仍在产物里，或全开变体里看不到某个模块的包时。
+ * @param manifest - 变体清单。不传 = **先与随包 `build/channel.json` 对拍**再读
+ *   `temp/channel-variant.json`（生产形态，权威是随包声明 —— 2026-10-14 R2 审计 S3）；
+ *   传 `undefined`/`null` = 显式全开（测试）。
+ * @throws 关闭的模块仍在产物里，或全开变体里看不到某个模块的包时（以及随包声明与
+ *   临时清单漂移/清单缺失时 —— 见 {@link assertVariantDeclarationConsistency}）。
  */
 export function assertFeatureModulePresence(
   entries: ReadonlySet<string>,
   where: string,
   manifest?: ChannelVariantManifest | null,
 ): void {
-  const resolved = manifest === undefined ? readChannelVariantManifest() : manifest ?? undefined
+  const resolved = manifest === undefined ? resolveVariantManifestUnderDeclaration() : manifest ?? undefined
   const pruned = new Set(resolved?.packages ?? [])
   const problems: string[] = []
   for (const surface of FEATURE_MODULE_SURFACES) {
@@ -2307,12 +2457,20 @@ export function assertFeatureModulePresence(
  * 就等于包在。asar 那一侧才需要扫条目 —— 那里"包目录"不是一个 stat 能回答的东西。
  * 两条布局共用同一个清单来源、判据语义相同（本仓已登记过"两套布局各维护一份判据
  * 必然漂移"的教训）。
+ *
+ * **导出是为了让用例直接调用**（2026-10-14 R2 审计 P2-1）：在
+ * `verifyPackagedRuntime()` 的物理分支上，"未被关闭的模块必须存在"那一臂**不可达**
+ * —— 四个模块包全都被更早的必需项 / 必需导出判据先接住（实测：
+ * `packaged runtime … is missing required entries/exports`）。也就是说把它那个
+ * 自检臂留在 `verifyPackagedRuntime()` 里等于一条永不执行的断言；直接调用
+ * （`tests/channel-variant-packaging.spec.ts` 的对应用例）才是它唯一可达的接线面。
+ * 承重方向（关闭的模块必须不在）在物理布局上**是**可达的、真跑能红。
  * @param appRoot - 物理应用根。
  * @param exists - 物理探针。
  * @param view - 变体视图。
  * @throws 关闭的模块仍在树上，或全开变体看不到某个模块的包时。
  */
-function assertFeatureModuleDirs(
+export function assertFeatureModuleDirs(
   appRoot: string,
   exists: FileProbe,
   view: PackagedRuntimeVariantView,

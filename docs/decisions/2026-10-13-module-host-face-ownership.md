@@ -204,13 +204,13 @@ wasm-apps-host；`account-card` → capability-center），`account-card` 另有
 | 环节 | 谁做 | 产物侧结果 |
 | --- | --- | --- |
 | 取值 + 变体标识 | `scripts/channel-constants.ts` 的 `normalizeChannelFeatures()` / `channelFeaturesVariant()` | `build/channel.json` 多出 `features` / `features_variant` 两个键 |
-| 写变体清单 | `scripts/channel-variant.ts` 的 `applyChannelVariant()`（挂在 `prepareChannelPackaging()` 里） | `<desktop>/temp/channel-variant.json`（**不进包**） |
+| 写变体清单 | `scripts/channel-variant.ts` 的 `applyChannelVariant()`（挂在 `prepareChannelPackaging()` 里） | `<desktop>/temp/channel-variant.json`（**不进包**；它是随包声明的**派生物**，不是判据的权威 —— 见下两行） |
 | **真开关**：裁依赖 | `scripts/pack-app-root.mjs` 的 `stagePackAppRoot()` | staging `package.json` 的 `dependencies` 少掉该模块的包 ⇒ **整包不进 app.asar** |
 | 装配面：bundle 层 | `src/profile.ts` 的 `requiredDesktopBundles()` | `dsh.profile.bundles` 不再列它（否则 profile 去解析一个不存在的包，应用起不来） |
 | 装配面：必需行 | `src/startup-rows.ts` 的 `requiredDesktopRows()` | boot 后的必需行断言不再要求那几行（否则正常的裁剪会被报成启动失败） |
-| 三张必需表 + 每包下限 | `scripts/verify-packaged-runtime.ts` 的 `packagedRuntimeVariantView()` | 归档验证按折叠后的表判，不把"已裁掉"判成"缺条目" |
-| 缺席判据 | 同上 `assertFeatureModulePresence()` | 关闭的模块**整包不许出现**；全开变体必须看得见每一个模块 |
-| 预构建 | `scripts/prebuild-workspace-deps.ts` 的 `variantPrunedDirs()` | 没有保留包把它当构建输入时跳过（否则照建，见 §6bis.3） |
+| 三张必需表 + 每包下限 | `scripts/verify-packaged-runtime.ts` 的 `packagedRuntimeVariantView()` | 归档验证按折叠后的表判，不把"已裁掉"判成"缺条目"；折叠前先过 `assertVariantDeclarationConsistency()` |
+| 缺席判据 | 同上 `assertFeatureModulePresence()` | 关闭的模块**整包不许出现**；全开变体必须看得见每一个模块。**权威 = 随包 `build/channel.json` 的 `features`**（2026-10-14 R2 审计 S3）：临时清单缺失/与声明不一致/声明全开却有残留 ⇒ fail-loud |
+| 预构建 | `scripts/prebuild-workspace-deps.ts` 的 `variantPrunedDirs(features)` | 跳过集由**调用方传入的本轮 features** 派生（不传 = 一个包都不跳）；没有保留包把它当构建输入时跳过（否则照建，见 §6bis.3）。`DSH_PREBUILD=force` **覆盖**这条跳过（2026-10-14 R2 审计 S2） |
 | 运行期开关 | `src/desktop-channel.ts` 的 `profile.features` | 上面两条装配面判定的唯一输入 |
 
 **官方渠道 / 没写 `features` 的渠道**：`applyChannelVariant()` 返回 `undefined` 并且
@@ -235,11 +235,19 @@ wasm-apps-host；`account-card` → capability-center），`account-card` 另有
 
 ### 6bis.3 `connectors` 关掉时预构建**照样建它**（有意的）
 
-`@picoaide/dsh-browser` 的 `deps` 里有 `packages/host/connectors` —— 它的 tsc 与
-运行期惰性 require 都读那份 `lib/`（见 `prebuild-workspace-deps.ts` 第 2 条注释）。
-跳过它会让**保留包自己**构建失败。反正它不会进 asar（依赖清单已经摘了）。
-`variantPrunedDirs()` 因此只在"没有保留包把它当构建输入"时才跳过 —— 今天实际能跳的
-只有 `capability-center`。
+`@picoaide/dsh-browser` 的 `deps` 里有 `packages/host/connectors` ——
+`prebuild-workspace-deps.ts` 的注释第 2 条记了真实理由：**browser 的 `tests/*.spec.ts`
+值导入真实 `ConnectorStore`**（`src/` 自 2026-10-13 起已不读它的类型，契约在
+`src/connectors-contract.ts` 本地声明），运行期那一次惰性 require 也解析到那份 `lib/`。
+跳过它会让**保留包自己的 check** 失败。反正它不会进 asar（依赖清单已经摘了）。
+`variantPrunedDirs(features)` 因此只在"没有保留包把它当构建输入"时才跳过 —— 今天实际
+能跳的只有 `capability-center`。
+
+**2026-10-14 R2 审计 S1 的补充**：它之所以"依赖清单已经摘了"还不进 asar，靠的是
+**同时**把 `packages/host/browser/package.json` 里那条生产依赖改成 `peerDependencies`
+（+ `devDependencies` 副本）—— 否则 electron-builder 的传递生产依赖收集会顺着
+`browser → connectors` 把整包重新拖进 asar（实测 `--dir` 打包 exit 1）。见
+`scripts/check-workspaces.mjs` 的 `PACKAGES[dsh-browser]` 注释。
 
 ### 6bis.4 新增一个功能模块时，要登记什么（一处）
 
@@ -283,6 +291,17 @@ bundle 层名）、`rows`（profile 行 id）、`directories`（仓库相对目�
 * **全开零影响**：`tests/channel-variant-packaging.spec.ts` 断言无清单时视图的每一栏
   与裸表**同一个对象/逐元素相同**；`tests/channel-variant.spec.ts` 断言无清单时
   `stagePackAppRoot()` 产出的 `package.json` 与改造前逐字相同。
+* **判据的权威是随包声明**（2026-10-14 R2 审计 S3 修复）：`resolveVariantManifestUnderDeclaration()`
+  = 先 `declaredFeaturePrune()`（读随包 `build/channel.json` 的 `features`）再与
+  `temp/channel-variant.json` 对拍，`assertVariantDeclarationConsistency()` 三态 fail-loud
+  （声明有关闭+清单缺失 / 两侧不一致 / 声明全开+残留清单）。缺省参数走这条路；
+  显式传 `null`/对象是测试与人工复核接缝（**绕过**对拍，否则夹具无法在任意机器
+  状态下构造全开基线）。
+* **物理布局的自检臂要直接调用**（2026-10-14 R2 审计 P2-1）：
+  `assertFeatureModuleDirs()` 的"未被关闭的模块必须存在"那一臂在
+  `verifyPackagedRuntime()` 里**不可达**（被更早的必需项 / 必需导出判据先接住），
+  所以导出了它并有 `tests/channel-variant-packaging.spec.ts` 的直接调用用例；
+  承重方向（关闭的模块仍在 ⇒ 红）在两条路径上都可达。
 
 ## 7. 判据在哪（本轮新增/改动的）
 

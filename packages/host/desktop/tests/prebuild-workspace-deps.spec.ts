@@ -36,7 +36,6 @@ import {
   WORKSPACE_PACKAGES,
   type WorkspacePackage,
 } from '../scripts/prebuild-workspace-deps.ts'
-import { applyChannelVariant, channelVariantDirFor } from '../scripts/channel-variant.ts'
 
 const desktopRoot = fileURLToPath(new URL('../', import.meta.url))
 const repoRoot = resolve(desktopRoot, '..', '..', '..')
@@ -446,52 +445,33 @@ describe('真实工作区的声明面对拍（静态读取，不扫 lib/）', ()
  * 所以这里同时钉住两侧：能跳的跳、不能跳的**必须照建**。
  */
 describe('变体裁剪：被关闭的模块里哪些可以安全跳过预构建', () => {
-  const created: string[] = []
-  afterEach(() => {
-    for (const dir of created.splice(0)) rmSync(dir, { recursive: true, force: true })
-  })
-
-  /** 造一个只用来放变体清单的"桌面包根"。 */
-  function fixtureRoot(): string {
-    const root = mkdtempSync(join(tmpdir(), 'pico-prebuild-variant-'))
-    created.push(root)
-    return root
+  /** 三个键的开关表（`closed` 里的模块为 false）。 */
+  function switches(closed: readonly string[]): Record<string, boolean> {
+    return Object.fromEntries(['skills', 'apps', 'connectors'].map(name => [name, !closed.includes(name)]))
   }
 
-  function withVariant(closed: readonly string[], root: string): void {
-    const features = Object.fromEntries(
-      ['skills', 'apps', 'connectors'].map(name => [name, !closed.includes(name)]),
-    )
-    applyChannelVariant({
-      channelId: 'fixture',
-      features,
-      featuresVariant: closed.length === 0 ? 'skills,apps,connectors' : 'fixture',
-      official: false,
-    }, channelVariantDirFor(root))
-  }
-
-  it('没有清单（全开构建）时一个包都不跳', () => {
-    expect([...variantPrunedDirs(fixtureRoot()).keys()]).toEqual([])
+  it('没传 features（= 不知道本轮变体）时一个包都不跳', () => {
+    // 2026-10-14 R2 审计 S2：跳过判定的输入必须是**本轮** features。旧实现读磁盘上的
+    // `temp/channel-variant.json`（后一步才写）⇒ 读到上一轮残留、静默跳过全开构建
+    // 必需的包。现在没传就一个都不跳（多建一个包只是慢，跳过是错）。
+    expect([...variantPrunedDirs(undefined).keys()]).toEqual([])
+    expect([...variantPrunedDirs(switches([])).keys()]).toEqual([])
   })
 
   it('关闭 skills：能力中心可以跳（没有保留包把它当构建输入）', () => {
-    const root = fixtureRoot()
-    withVariant(['skills'], root)
-    const pruned = variantPrunedDirs(root)
+    const pruned = variantPrunedDirs(switches(['skills']))
     expect([...pruned.keys()]).toEqual(['packages/host/capability-center'])
-    expect(pruned.get('packages/host/capability-center')).toBe('fixture')
+    // 变体标识与 `channelFeaturesVariant()` 同源（日志里印的就是这一份）。
+    expect(pruned.get('packages/host/capability-center')).toBe('apps,connectors')
   })
 
   it('关闭 connectors：**不跳** —— browser 的构建输入里有它（跳了保留包会构建失败）', () => {
-    const root = fixtureRoot()
-    withVariant(['connectors'], root)
-    expect([...variantPrunedDirs(root).keys()]).toEqual([])
+    expect([...variantPrunedDirs(switches(['connectors'])).keys()]).toEqual([])
   })
 
   it('两个都关：只有能力中心被跳，connectors 仍照建', () => {
-    const root = fixtureRoot()
-    withVariant(['skills', 'connectors'], root)
-    expect([...variantPrunedDirs(root).keys()]).toEqual(['packages/host/capability-center'])
+    expect([...variantPrunedDirs(switches(['skills', 'connectors'])).keys()])
+      .toEqual(['packages/host/capability-center'])
   })
 
   it('"不能跳"的理由是表里的真实边，不是硬编码豁免', () => {

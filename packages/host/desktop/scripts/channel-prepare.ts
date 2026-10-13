@@ -36,8 +36,6 @@ import {
 import {
   applyChannelVariant,
   defaultChannelVariantDir,
-  readChannelVariantManifest,
-  type ChannelVariantManifest,
 } from './channel-variant.ts'
 import { SPEECH_MODEL_PAYLOAD_DIR } from './verify-packaged-runtime.ts'
 import { BUNDLED_RUNTIMES_PAYLOAD_DIR } from './verify-packaged-runtime.ts'
@@ -119,20 +117,6 @@ export async function prepareChannelPackaging(
   await prepareSpeechModelPayload(context, appDir, options.speechModel)
   await prepareBundledRuntimesPayload(appDir, options.runtimes, options.runtimeTarget)
   return context
-}
-
-/**
- * 本次构建的变体清单（**只读**；全开构建返回 `undefined`）。
- *
- * 打包脚本与冒烟探针用它回答"这次构建声明关了哪些模块"，而不是各自再读一遍
- * `channel.json`（那就是第二份派生规则）。
- * @param dir - 落点（缺省 {@link defaultChannelVariantDir}）。
- * @returns 清单；全开时为 `undefined`。
- */
-export function currentChannelVariant(
-  dir: string = defaultChannelVariantDir(),
-): ChannelVariantManifest | undefined {
-  return readChannelVariantManifest(dir)
 }
 
 /**

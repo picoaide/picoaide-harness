@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
@@ -7,9 +7,12 @@ import {
   type ChannelVariantManifest,
 } from '../scripts/channel-variant.ts'
 import {
+  assertFeatureModuleDirs,
   assertFeatureModulePresence,
   assertRequiredEntriesCoverWorkspaceSurface,
+  assertVariantDeclarationConsistency,
   assertWorkspacePackageCoverage,
+  declaredFeaturePrune,
   effectiveVariantEntries,
   effectivePackagedRuntimeEntries,
   packagedRuntimeVariantView,
@@ -49,6 +52,36 @@ const bothClosed = manifest(['skills', 'connectors'], [SKILLS_PACKAGE, CONNECTOR
 function entriesOf(entries: Iterable<string>, pkg: string): string[] {
   const prefix = `node_modules/${pkg}/`
   return [...entries].filter(entry => entry.startsWith(prefix))
+}
+
+/**
+ * 随包声明（`build/channel.json`）的就位 / 还原。
+ *
+ * 2026-10-14 R2 审计 S3 起，`verifyPackagedRuntime()` 的缺席判据以**随包声明**为
+ * 权威（`resolveVariantManifestUnderDeclaration()`）：只写 `temp/channel-variant.json`
+ * 而不写随包 `channel.json` 是"声明全开 + 清单仍在"的漂移态 —— 那也是正确的红，
+ * 但不是这些用例要测的那条判据（它们要测"关闭的模块仍在产物里 ⇒ 拒包"）。所以用例
+ * 必须把两侧就位成**一致**的形态。
+ * @param features - 随包声明的 features（必须与 `applyChannelVariant()` 的开关一致）。
+ * @param body - 声明就位期间执行的用例体。
+ * @returns 用例体的返回值。
+ */
+function withPackagedDeclaration<T>(features: Record<string, boolean>, body: () => T): T {
+  const file = join(resolve(dirname(fileURLToPath(import.meta.url)), '..'), 'build', 'channel.json')
+  const had = existsSync(file)
+  const backup = had ? readFileSync(file, 'utf8') : undefined
+  mkdirSync(dirname(file), { recursive: true })
+  writeFileSync(file, `${JSON.stringify({
+    channel_id: 'fixture',
+    desktop: { app_origin_scheme: 'fixture-app' },
+    features,
+  }, null, 2)}\n`)
+  try {
+    return body()
+  } finally {
+    if (backup === undefined) rmSync(file, { force: true })
+    else writeFileSync(file, backup)
+  }
 }
 
 describe('变体视图：全开构建逐元素等于裸表（官方/全开零影响）', () => {
@@ -209,14 +242,17 @@ describe('缺席判据（承重）：关闭的模块整包不在产物里 + 全�
     const hadManifest = existsSync(manifestPath)
     const backup = hadManifest ? read(manifestPath, 'utf8') : undefined
     try {
-      applyChannelVariant({
-        channelId: 'fixture',
-        features: { skills: false, apps: true, connectors: true },
-        featuresVariant: 'apps,connectors',
-        official: false,
+      // 随包声明与临时清单**两侧一致**地就位（声明是权威，只写清单 = 漂移态）。
+      withPackagedDeclaration({ skills: false, apps: true, connectors: true }, () => {
+        applyChannelVariant({
+          channelId: 'fixture',
+          features: { skills: false, apps: true, connectors: true },
+          featuresVariant: 'apps,connectors',
+          official: false,
+        })
+        expect(() => verifyPackagedRuntime(context, list, () => true, readEntry))
+          .toThrow(/feature-module presence check failed/u)
       })
-      expect(() => verifyPackagedRuntime(context, list, () => true, readEntry))
-        .toThrow(/feature-module presence check failed/u)
     } finally {
       if (backup === undefined) rmSync(manifestPath, { force: true })
       else writeFileSync(manifestPath, backup)
@@ -244,21 +280,24 @@ describe('缺席判据在两套布局上都成立（物理布局 = 目录形态�
     const root = mkdtempSync(join(tmpdir(), 'pico-variant-physical-'))
     const previous = process.env.PACKAGED_RUNTIME_LAYOUT
     try {
-      applyChannelVariant({
-        channelId: 'fixture',
-        features: { skills: false, apps: true, connectors: true },
-        featuresVariant: 'apps,connectors',
-        official: false,
+      // 随包声明与临时清单**两侧一致**地就位（见 withPackagedDeclaration 的说明）。
+      withPackagedDeclaration({ skills: false, apps: true, connectors: true }, () => {
+        applyChannelVariant({
+          channelId: 'fixture',
+          features: { skills: false, apps: true, connectors: true },
+          featuresVariant: 'apps,connectors',
+          official: false,
+        })
+        process.env.PACKAGED_RUNTIME_LAYOUT = 'physical'
+        const context = {
+          appOutDir: root,
+          electronPlatformName: 'linux',
+          packager: { appInfo: { productFilename: 'fixture', id: 'ai.deepseek.dsh.desktop' } },
+        } as unknown as PackagedRuntimeContext
+        // 探针一律说"在"：前面几条断言全过，唯一能红的就只剩缺席判据。
+        expect(() => verifyPackagedRuntime(context, () => [], () => true, () => ''))
+          .toThrow(/feature-module presence check failed/u)
       })
-      process.env.PACKAGED_RUNTIME_LAYOUT = 'physical'
-      const context = {
-        appOutDir: root,
-        electronPlatformName: 'linux',
-        packager: { appInfo: { productFilename: 'fixture', id: 'ai.deepseek.dsh.desktop' } },
-      } as unknown as PackagedRuntimeContext
-      // 探针一律说"在"：前面几条断言全过，唯一能红的就只剩缺席判据。
-      expect(() => verifyPackagedRuntime(context, () => [], () => true, () => ''))
-        .toThrow(/feature-module presence check failed/u)
     } finally {
       if (previous === undefined) delete process.env.PACKAGED_RUNTIME_LAYOUT
       else process.env.PACKAGED_RUNTIME_LAYOUT = previous
@@ -266,6 +305,93 @@ describe('缺席判据在两套布局上都成立（物理布局 = 目录形态�
       else writeFileSync(manifestPath, backup)
       rmSync(root, { recursive: true, force: true })
     }
+  })
+  it('直接调用 assertFeatureModuleDirs()：两条臂都可达（2026-10-14 R2 审计 P2-1）', () => {
+    // 为什么必须**直接调用**：在 `verifyPackagedRuntime()` 的物理分支上，"未被关闭的
+    // 模块必须存在"那一臂**不可达** —— 四个模块包全都被更早的必需项 / 必需导出判据
+    // 先接住（实测：`packaged runtime … is missing required entries/exports`）。
+    // 也就是说留在 `verifyPackagedRuntime()` 里的那个自检臂等于一条永不执行的断言；
+    // 直接调用是它唯一可达的接线面。
+    const appRoot = '/fixture/physical/app'
+    const present = new Set(FEATURE_MODULE_SURFACES.flatMap(surface => surface.packages)
+      .map(pkg => join(appRoot, 'node_modules', ...pkg.split('/'))))
+    const probe = (path: string): boolean => present.has(path)
+
+    // 承重臂：声明关闭 skills，物理树上还有那个包目录 ⇒ 红。
+    expect(() => assertFeatureModuleDirs(appRoot, probe, packagedRuntimeVariantView(skillsClosed)))
+      .toThrow(new RegExp(`${SKILLS_PACKAGE} 仍随包`, 'u'))
+    // 量具自检臂：没有任何变体关闭它、物理树上却看不到 ⇒ 红（该臂在
+    // `verifyPackagedRuntime()` 里被前置判据遮蔽，只有直接调用才打得到）。
+    const everythingButCapability = new Set([...present]
+      .filter(path => !path.includes('dsh-capability-center')))
+    expect(() => assertFeatureModuleDirs(
+      appRoot, path => everythingButCapability.has(path), packagedRuntimeVariantView(null),
+    )).toThrow(/量具自检失败/u)
+    // 正例：全开变体 + 四个模块包都在 ⇒ 不抛。
+    expect(() => assertFeatureModuleDirs(appRoot, probe, packagedRuntimeVariantView(null))).not.toThrow()
+  })
+})
+
+describe('随包声明是裁剪面的权威（2026-10-14 R2 审计 S3）', () => {
+  // 直接调用这两个导出（不走磁盘）：三态与"权威是声明而不是临时清单"这两件事
+  // 在 `verifyPackagedRuntime()` 里被前后判据裹着，只有直接调用才看得清是哪一态红的。
+  const declaredConnectorsOff = { closedModules: [], packages: [], rows: [], directories: [] }
+
+  it('declaredFeaturePrune() 从随包 features 派生关闭面（畸形/缺失一律按全开）', () => {
+    expect(declaredFeaturePrune({ features: { connectors: false } } as never)).toEqual({
+      closedModules: ['connectors'],
+      packages: [CONNECTORS_PACKAGE],
+      rows: ['pico-connectors'],
+      directories: ['packages/host/connectors'],
+    })
+    // 没有渠道包（官方/未渠道化构建）= 全开：一个包都不摘。
+    expect(declaredFeaturePrune(undefined)).toEqual(declaredConnectorsOff)
+    // 畸形取值方向必须"开着"（把 'false' 当关会去加载一个不在包里的模块）。
+    expect(declaredFeaturePrune({ features: { connectors: 'false' } } as never).closedModules)
+      .toEqual([])
+  })
+
+  it('声明有关闭 + 清单缺失 ⇒ 红（不得降级成"全开即通过"）', () => {
+    expect(() => assertVariantDeclarationConsistency(
+      declaredFeaturePrune({ features: { connectors: false } } as never),
+      undefined,
+      '/fixture/temp/channel-variant.json',
+    )).toThrow(/临时清单缺失/u)
+  })
+
+  it('声明与清单不一致（modules / packages / rows 任一）⇒ 红，且两侧都点名', () => {
+    const declared = declaredFeaturePrune({ features: { connectors: false } } as never)
+    expect(() => assertVariantDeclarationConsistency(declared, skillsClosed, '/fixture/temp/channel-variant.json'))
+      .toThrow(/漂移/u)
+    expect(() => assertVariantDeclarationConsistency(
+      declared,
+      { ...connectorsClosed, packages: [], rows: [] },
+      '/fixture/temp/channel-variant.json',
+    )).toThrow(/packages: 随包声明=\[@picoaide\/dsh-connectors\] vs 临时清单=\[\]/u)
+    expect(() => assertVariantDeclarationConsistency(
+      declared, { ...connectorsClosed, rows: [] }, '/fixture/temp/channel-variant.json',
+    )).toThrow(/rows:/u)
+  })
+
+  it('声明全开 + 残留临时清单 ⇒ 红（残留会让产物少掉声明仍打开的模块）', () => {
+    const allOpen = declaredFeaturePrune({ features: { skills: true, apps: true, connectors: true } } as never)
+    expect(allOpen).toEqual(declaredConnectorsOff)
+    expect(() => assertVariantDeclarationConsistency(allOpen, connectorsClosed, '/fixture/temp/channel-variant.json'))
+      .toThrow(/features 全开，但构建机临时清单仍在/u)
+    // 一致（全开 + 无清单 / 关闭 + 一致清单）⇒ 不抛。
+    expect(() => assertVariantDeclarationConsistency(allOpen, undefined, '/fixture/x.json')).not.toThrow()
+    const declared = declaredFeaturePrune({ features: { connectors: false } } as never)
+    // 一致形态：spec 的 `manifest()` 夹具不写 rows/directories，这里补齐成与声明同源的那份。
+    const consistent = {
+      ...connectorsClosed,
+      rows: ['pico-connectors'],
+      directories: ['packages/host/connectors'],
+    }
+    expect(() => assertVariantDeclarationConsistency(declared, consistent, '/fixture/x.json')).not.toThrow()
+    // 目录不一致同样必须红（prebuild 的输入表键）。
+    expect(() => assertVariantDeclarationConsistency(
+      declared, { ...consistent, directories: [] }, '/fixture/x.json',
+    )).toThrow(/directories: 随包声明=\[packages\/host\/connectors\] vs 临时清单=\[\]/u)
   })
 })
 

@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   CHANNEL_VARIANT_SCHEMA,
@@ -84,6 +85,39 @@ describe('功能模块摘除面是变体裁剪的唯一声明', () => {
     }
     // 全开时返回的**就是**那张表（逐元素相同，不是副本过滤后的等价物）。
     expect(requiredDesktopBundles({ skills: true, apps: true, connectors: true })).toEqual(all)
+  })
+
+  it('摘除面三列都非空，且 packages 的并集**恰好**等于登记目录里那些包的包名', () => {
+    // 为什么必须钉这一条（2026-10-14 R2 审计 P2-3）：上面那条"恰好少了它的包"在
+    // `packages: []` 时是**同义反复**（两侧都是 `[]`），`rows: []` / `directories: []`
+    // 同理 —— 新登记一个模块、摘除面留空且不写 `blockedReason` 时全部门禁仍绿，而
+    // `manifestFor()` 会产出一份空清单 ⇒ `"声明关了、东西还在"` 的静默交付。
+    //
+    // 真源**不是**这份表自己，而是**模块自己的 `package.json`**：登记目录里的每个包
+    // 都必须在某个 surface 的 `packages` 里（反之亦然）—— 集合相等，不是自比。
+    // 目录/行/包三列任一为空都在这里当场红。
+    const declaredDirs = FEATURE_MODULE_SURFACES.flatMap(surface => [...surface.directories])
+    expect(declaredDirs.length).toBeGreaterThan(0)
+    const packageNames = new Set(FEATURE_MODULE_SURFACES.flatMap(surface => [...surface.packages]))
+    const namesOnDisk = new Set(declaredDirs.map((dir) => {
+      const manifest = JSON.parse(
+        readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..', dir, 'package.json'), 'utf8'),
+      ) as { name?: unknown }
+      expect(typeof manifest.name, `${dir}/package.json 必须有 name`).toBe('string')
+      return manifest.name as string
+    }))
+    expect([...packageNames].sort()).toEqual([...namesOnDisk].sort())
+    for (const surface of FEATURE_MODULE_SURFACES) {
+      expect(surface.packages.length, `${surface.module}.packages 不能为空`).toBeGreaterThan(0)
+      expect(surface.rows.length, `${surface.module}.rows 不能为空`).toBeGreaterThan(0)
+      expect(surface.directories.length, `${surface.module}.directories 不能为空`).toBeGreaterThan(0)
+      // 同一列在两个 surface 里重复出现 ⇒ 关掉 A 会连带摘掉 B 的包/行（静默跨模块裁剪）。
+      for (const other of FEATURE_MODULE_SURFACES) {
+        if (other.module === surface.module) continue
+        for (const pkg of surface.packages) expect(other.packages).not.toContain(pkg)
+        for (const id of surface.rows) expect(other.rows).not.toContain(id)
+      }
+    }
   })
 
   it('必需行清单的折叠同样只做减法：全开逐字相同、关闭恰好少那几行', () => {
