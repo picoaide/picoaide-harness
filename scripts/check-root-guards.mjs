@@ -187,7 +187,12 @@ const REGISTERED_GUARD_ENTRIES = new Map([
   // 词表/登记表各自多出对方没有的条目）⇒ 摘要不能取任何一侧的旧值，只能在合并后的
   // 工作树上重新复算（下面两个值就是这么来的；由 `check-guard-parser-integrity` 与
   // `verify-check-workspaces` 各自独立复算对拍）。
-  ['check:workflows', { script: 'node scripts/check-workflows.mjs', argvTail: [], digest: 'a2362e82d4478d766f6790e990534f103b2a47c841144b3a85d443a8f1a9ff01' }],
+  // 2026-10-14 合并后审计 P1/P2：`check-workflows.mjs` 把 `[SK-7b]` 的固定开销常量
+  // 12 改成 14（补算本片新增的 `check-go-build-tags` 步骤 ≈1.9 min），并新增**逐 job 的
+  // 预算登记表** `CI_JOB_BUDGET_MINUTES = { server: 60 }` —— 预算被静默削低（60→45，
+  // 此前 exit 0）现在当场判红，合成负例 `b14-timeout-budget-below-registered` 是这条
+  // 判据的钉子。⇒ 该守卫脚本内容变了，摘要按本表上方的纪律在同一批里复算更新。
+  ['check:workflows', { script: 'node scripts/check-workflows.mjs', argvTail: [], digest: '1035651b524c6a32b909d6601069a184756aa86bdc5009834ec55885ea2b91e2' }],
   ['check:ci-scripts', { script: 'node scripts/verify-ci-scripts.mjs', argvTail: [], digest: '8b27a1ff2e367413f1c2aeba7a7f7fec185bccd42689f4cff66852dc7c7b9f03' }],
   ['check:patch-resolutions', { script: 'node scripts/verify-patch-resolutions.mjs', argvTail: [], digest: '6dcde2281311235a57722608d91e6a1fa59734411ad65cda76ea2bdc43145c83' }],
   ['check:patch-pin', { script: 'node scripts/check-patch-pin.mjs', argvTail: [], digest: 'a8fe5b45df5dfadd7a87332b31f9e14c4a6722a41f21cf0f0d9afa6450a3ba84' }],

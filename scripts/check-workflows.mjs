@@ -456,9 +456,9 @@ const BLOCK_ERREXIT_ALLOWLIST = [
   },
 ]
 
-const SELFTEST_MIN_SAMPLES = 43
+const SELFTEST_MIN_SAMPLES = 44
 /** 必须被策略报出来的红样本下限(与上一条同口径)。 */
-const SELFTEST_MIN_RED_SAMPLES = 29
+const SELFTEST_MIN_RED_SAMPLES = 30
 /**
  * `SELFTEST_REQUIRED_SAMPLES`（定向样本存在性登记）的**条数下限**（2026-10-05，收口轮
  * 独立核验代理 final-A §4 的 P3-1）。
@@ -479,8 +479,11 @@ const SELFTEST_MIN_RED_SAMPLES = 29
  * 2026-10-05 收口轮③（V-P15P1 的 G2）：168 → **175**（新增 `z15`–`z18` 四格"吃光剩余词"的
  * 红样本：裸包装词 + 位置实参吃掉最后一个词；`z19`–`z21` 三格反向对照：`nice -n 5` /
  * `taskset -c 0` / 冻结启动器表达式后面的真命令必须仍然绿）。
+ * 2026-10-14 合并后审计 P1：175 → **176**（新增 `b14-timeout-budget-below-registered`：
+ * `server` 的 `timeout-minutes` 被削到登记值以下的合成负例 —— 这条判据是"预算只许 ≥
+ * `CI_JOB_BUDGET_MINUTES` 的登记值"唯一的钉子，删掉它 60→45 会重新静默）。
  */
-const SELFTEST_MIN_REQUIRED_SAMPLES = 175
+const SELFTEST_MIN_REQUIRED_SAMPLES = 176
 /**
  * 发布链步骤 **argv 白名单**的覆盖下限（FF-B 残留 R1，2026-10-05）。
  *
@@ -749,6 +752,10 @@ const SELFTEST_REQUIRED_SAMPLES = [
   { id: 'z19-wrapper-real-command-nice-green', policy: null },
   { id: 'z20-wrapper-real-command-taskset-green', policy: null },
   { id: 'z21-wrapper-real-command-interp-green', policy: null },
+  // 2026-10-14 合并后审计 P1：`[SK-7b]` 的**逐 job 预算登记**判据（预算不许低于
+  // `CI_JOB_BUDGET_MINUTES` 的登记值）。这格是这条判据唯一的合成负例 —— 删掉它，
+  // 把 `ci.yml` 的 `server` 预算从 60 改回 45 会重新变成静默放行（审计实测修前 exit 0）。
+  { id: 'b14-timeout-budget-below-registered', policy: '[SK-7b]' },
 ]
 
 /** `selfTestScanner()` 至少执行的断言条数(供 main() 对账"自检没被掏空")。 */
@@ -7266,15 +7273,35 @@ function checkSwallowedExitCodes(file, document, blocks, allowlist, reported) {
  *     `make build-server`；
  *   · 2026-10-14 独立审计 P2-3：本片给同一个 job 挂上了两条 webadmin 变体判据
  *     （`make webadmin-variant-tests` 实测 5m17s + `make webadmin-check-features` 实测
- *     1m04s，4 vCPU 机器）⇒ 5 + 6.4 ≈ 11.4，向上取 12。
+ *     1m04s，4 vCPU 机器）⇒ 5 + 6.4 ≈ 11.4，向上取 12；
+ *   · 2026-10-14 合并后审计 P2（本批）：同一个 job 里还新增了
+ *     `node scripts/check-go-build-tags.mjs --expect-cut`（该步骤自记 4 vCPU 暖缓存 8 组合
+ *     全跑 ≈ 1m52s，审计当日带负载更慢），而它**没有被算进**上一个取值 ⇒ 12 比真实固定
+ *     开销少约 1.9 min。取 5 + 6.4 + 1.9 ≈ 13.3，**向上取 14**。
  *
  * **为什么必须改这个常量，而不是只改 job 的 `timeout-minutes`**：`2X + F` 是这条判据对
  * "真挂的包能不能打出 goroutine dump"的**全部模型**。F 留在 5 时模型给出 35 min，于是
- * 一个 40 min 的 job 预算会被判为"安全"，而真实最坏路径是 42.4 min ⇒ 挂起的包先撞 job
- * 上限被整体取消，R2-SK-7 要防的那件事原样复现。固定开销变了而同批不改模型，就是本仓
- * 反复点名的"算出来 ≠ 有判据"。改这里只可能让判据更严（F 变大 ⇒ 需要的预算更大）。
+ * 一个 40 min 的 job 预算会被判为"安全"，而真实最坏路径是 44.3 min（15 + 21 + 6.4 + 1.9）
+ * ⇒ 挂起的包先撞 job 上限被整体取消，R2-SK-7 要防的那件事原样复现。固定开销变了而同批
+ * 不改模型，就是本仓反复点名的"算出来 ≠ 有判据"。改这里只可能让判据更严（F 变大 ⇒
+ * 需要的预算更大）。
  */
-const CI_JOB_FIXED_OVERHEAD_MINUTES = 12
+const CI_JOB_FIXED_OVERHEAD_MINUTES = 14
+
+/**
+ * 逐 job 的**预算登记值**（分钟；唯一真源 = 这张表，`ci.yml` 的 `timeout-minutes` 只许
+ * **不低于**它）。
+ *
+ * 为什么需要这张表：`[SK-7b]` 只判**下界** `2X + F ≤ budget` —— 把 `server` 的
+ * `timeout-minutes: 60` 静默改回 45 时 `2×15+14 = 44 ≤ 45` 仍然成立，判据照绿
+ * （2026-10-14 合并后审计 P1 的现场：60→45 这个变异在补本表之前是 exit 0）。而 45 min 下
+ * happy path ≈39.3 min 只剩 ~1.14× 余量，runner 稍慢就先撞 job 上限被整体取消 ——
+ * `panic: test timed out` + goroutine dump + 用例名全丢，正是 R2-SK-7 要防的形态。
+ *
+ * 语义：**预算只许 ≥ 我们承诺过的值**；要往下调必须先显式改这张表（进 diff、可评审）。
+ * 未登记的 job 不走这条判断（登记面只覆盖"有承诺预算"的 job）。
+ */
+const CI_JOB_BUDGET_MINUTES = { server: 60 }
 
 /**
  * [SK-7b] `go test … -timeout X` 与所在 job `timeout-minutes` 的序关系。
@@ -7287,11 +7314,15 @@ const CI_JOB_FIXED_OVERHEAD_MINUTES = 12
  * 上限 30 min ⇒ **挂起的那个包还没到自己的 -timeout,job 就被整体取消**了。产物因此从
  * `panic: test timed out after 25m0s` + goroutine dump + 用例名,退化成一句"gate 红、
  * 查不出原因"(被 cancel 的 step 不会留下 Go 的 dump)。现在的取值是 15m + job 60min:
- * 15(挂满) + 21(其余包) + 12(固定开销) = 48 ≤ 60,且 2×15+12 = 42 ≤ 60。
+ * 15(挂满) + 21(其余包) + 14(固定开销) = 50 ≤ 60,且 2×15+14 = 44 ≤ 60。
  *
  * 判据里的 `2X` = "挂满的那个包" + "其余包 ≈ 与之同量级"(实测最慢单包 299s,全量 ~21 min);
  * `F` = 该 job 里**除 go test 之外**的全部固定开销(见常量注释 —— 2026-10-14 把本片新增的
- * 两条 webadmin 变体判据算进去,此前写死的 `+5` 已不足以覆盖真实最坏路径)。
+ * 两条 webadmin 变体判据与 `check-go-build-tags` 一并算进去,此前写死的 `+5` 已不足以
+ * 覆盖真实最坏路径)。
+ *
+ * 除下界外还有一条**逐 job 的预算登记**（见 {@link CI_JOB_BUDGET_MINUTES}）：声明过的
+ * 预算不许被静默削低。
  * 没声明 `timeout-minutes` 的 job 也判失败:平台默认 360 min 只是兜底,不能拿它证明
  * "dump 一定打得出来"。
  *
@@ -7382,6 +7413,24 @@ function checkGoTestTimeoutBudget(file, document, blocks, notes) {
             + `  ⇒ 无法证明"挂起的包会被自己的 -timeout 打断并打出 goroutine dump"。\n`
             + `  给 job 加显式预算:2×${formatMinutes(minutes)}+${CI_JOB_FIXED_OVERHEAD_MINUTES}=`
             + `${formatMinutes(worst)} ≤ timeout-minutes。`)
+          continue
+        }
+        // **逐 job 的预算登记**（2026-10-14 合并后审计 P1）：`worst <= budget` 只是**下界**，
+        // 预算被静默调低时它照样成立（审计实测 60→45 的变异 exit 0）。这里把"我们承诺过的
+        // 预算"也变成判据面的一部分 —— 降下来必须显式改 `CI_JOB_BUDGET_MINUTES`。
+        const registeredBudget = CI_JOB_BUDGET_MINUTES[item.jobId]
+        if (registeredBudget !== undefined && budget < registeredBudget) {
+          report(`${flagText} 所在 job 的预算 ${formatMinutes(budget)}m 低于登记值 `
+            + `${formatMinutes(registeredBudget)}m(${file} job ${item.jobId})\n`
+            + `  ⇒ 这等于把承诺过的 ${formatMinutes(registeredBudget)}m 上限静默削到 `
+            + `${formatMinutes(budget)}m:happy path 的余量会掉到约 1.1×(而注释口径是 ≥1.4×),`
+            + 'runner 稍慢或某个包多花几分钟就先撞 job 上限被整体取消 —— `panic: test timed out` '
+            + '+ goroutine dump + 用例名全丢,只剩"gate 红、查不出原因"\n'
+            + '  (2026-10-14 合并后审计 P1 的现场:把 `timeout-minutes: 60` 改回 45 时本判据'
+            + '此前全绿)。\n'
+            + `  ⇒ 要下调预算必须先显式改 \`CI_JOB_BUDGET_MINUTES\` 的 \`${item.jobId}\` `
+            + '登记值(进 diff、可评审);否则请把 `timeout-minutes` 保持在 ≥ '
+            + `${formatMinutes(registeredBudget)}m。`)
           continue
         }
         // 下界(2026-09-19 第三轮审计 F2-2):`-timeout 0` 在 Go 里是**关闭超时**
@@ -12033,7 +12082,10 @@ export function selfTestPolicies() {
     return [
       '  server:',
       `    runs-on: ${GATE_SELFTEST_RUNS_ON}`,
-      '    timeout-minutes: 45',
+      // 预算取 60 = **与真 `ci.yml` 的 `server` job 同形**（`CI_JOB_BUDGET_MINUTES` 是
+      // 逐 job 的登记面，写 45 会让"预算低于登记值"这条判据在合成绿样本上假红；
+      // 与 `GATE_SELFTEST_RUNS_ON` 同一条纪律：合成样本必须复刻真树的取值）。
+      '    timeout-minutes: 60',
       ...(option.pg ? [
         '    env:',
         '      PG_DSN_TEST: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable',
@@ -12254,18 +12306,44 @@ export function selfTestPolicies() {
     '      - name: 单包 25m',
     '        run: go test ./... -count=1 -p 1 -timeout 25m',
   ])
-  // 2026-10-14：算术里的固定开销由写死的 `+5` 换成 `CI_JOB_FIXED_OVERHEAD_MINUTES`（= 12，
-  // 含本片新增的两条 webadmin 变体判据 6.4 min）⇒ 这条自检的期望串同批复算（25m 那条从
-  // `2×25+5=55` 变成 `2×25+12=62`）。断言本身没变松：仍然逐字要求报错写出算术。
+  // 2026-10-14：算术里的固定开销由写死的 `+5` 换成 `CI_JOB_FIXED_OVERHEAD_MINUTES`（先后是
+  // 12、14 —— 14 把那片新增的 `check-go-build-tags` 步骤 1.9 min 一并算进去）⇒ 这条自检的
+  // 期望串跟着复算（25m 那条从 `2×25+5=55` → `2×25+12=62` → `2×25+14=64`）。断言本身没变松：
+  // 仍然逐字要求报错写出算术。
   const budgetFailure = tags(tooLong, '[SK-7b]')
-  expect(budgetFailure.some(failure => failure.detail.includes('2×25+12=62 > 45')),
-    '[SK-7b] 自检:报错里没有写出算术(2×25+12=62 > 45)')
+  expect(budgetFailure.some(failure => failure.detail.includes('2×25+14=64 > 45')),
+    '[SK-7b] 自检:报错里没有写出算术(2×25+14=64 > 45)')
   expect(budgetFailure.some(failure => failure.detail.includes('单包 25m')),
     '[SK-7b] 自检:报错没有点名 step')
   expectGreen('b2-timeout-15m-ok', [
     '      - name: 单包 15m',
     '        run: go test ./... -count=1 -p 1 -timeout 15m',
   ])
+  // 2026-10-14 合并后审计 P1 的验收样本：`server` 的预算被削到 **45**（登记值 60）时必须红。
+  // 这是"预算只许 ≥ 登记值"那条判据的**唯一**钉子 —— 删掉它，把 `ci.yml` 的
+  // `timeout-minutes: 60` 改回 45 会重新变成静默放行（审计实测修前 exit 0）。
+  // 形状与 b2 相同（`-timeout 15m`、`2×15+14 = 44 ≤ 45` 本来会绿），只有 job 名换成
+  // 登记表里的 `server` ⇒ 红的原因只可能是"预算低于登记值"（`raw` 样本按既有手法传空
+  // 的 steps，整份 workflow 由 `raw` 给出）。
+  const budgetRollback = expectRed('b14-timeout-budget-below-registered', '[SK-7b]', [], {
+    raw: [
+      'name: selftest',
+      'on:',
+      '  push:',
+      'jobs:',
+      '  server:',
+      `    runs-on: ${GATE_SELFTEST_RUNS_ON}`,
+      '    timeout-minutes: 45',
+      '    steps:',
+      '      - uses: actions/checkout@v7',
+      '      - name: 单包 15m',
+      '        run: go test ./... -count=1 -p 1 -timeout 15m',
+      '',
+    ].join('\n'),
+  })
+  const rollbackFailure = tags(budgetRollback, '[SK-7b]')
+  expect(rollbackFailure.some(failure => failure.detail.includes('低于登记值 60m')),
+    '[SK-7b] 自检:预算被削到登记值以下时没有报"低于登记值 60m"(P1 的判据形同不存在)')
   expectRed('b3-timeout-no-job-budget', '[SK-7b]', [
     '      - name: 没有 job 预算',
     '        run: go test ./... -timeout 15m',
