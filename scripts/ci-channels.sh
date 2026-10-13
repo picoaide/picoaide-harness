@@ -905,7 +905,12 @@ for id in "${SELECTED[@]}"; do
         const declared = Object.keys(rawFeatures)
         const unknown = declared.filter(key => !KNOWN_FEATURES.includes(key))
         if (unknown.length > 0) {
-          invalid.push("features(有 " + unknown.length + " 个未登记的模块名;合法模块名见 packages/host/desktop/scripts/channel-constants.ts 的 FEATURE_MODULES,键名与取值都不回显)")
+          // 合法模块名**要打印**（2026-10-13 独立审计 P2）：模块名是公开仓里的常量
+          // （skills/apps/connectors），不是渠道身份；而官网《渠道与品牌》页承诺的正是
+          // "报错点名字段与合法模块名"。此前只写"见 channel-constants.ts 的
+          // FEATURE_MODULES"，读者得自己打开源码文件才拿到这三个名字 —— 承诺比实现对得
+          // 宽一档。**取值与未知键名仍然不回显**（那两样才可能是客户品牌）。
+          invalid.push("features(有 " + unknown.length + " 个未登记的模块名;合法模块名: " + KNOWN_FEATURES.join(" / ") + ";键名与取值都不回显)")
         }
         const badType = declared.filter(key => KNOWN_FEATURES.includes(key) && typeof rawFeatures[key] !== "boolean")
         if (badType.length > 0) {
@@ -1158,7 +1163,11 @@ for id in "${SELECTED[@]}"; do
       console.error("::warning::渠道包里有 " + unknownAssetKeys + " 个未知素材字段(已忽略,可能是拼写错误;键名不回显): assets.<unknown>")
     }
     if (templateMissing.length > 0) {
-      console.error("::error::官方渠道配置缺少模板键: " + templateMissing.join(", ") + " —— 官方渠道是新增渠道的模板(拷贝 → 改身份字段 → 裁剪交付面);缺键意味着那几个键藏在代码兜底值里:复制出来的渠道会带着看不见的继承行为(少写 slug 就回落厂商包名、少写 home_dir 就共用数据根),而且要翻源码才知道有哪些键。请逐键补齐 —— 值取现行兜底值,因此显式化本身不改变任何行为")
+      // 跨仓顺序（2026-10-13 独立审计 P0）：`features.*` 这类"新加的模板键"会让**非 tag** 的
+      // 三个打包 job 在每次 PR/push 上红，直到私有渠道仓补键为止 —— 而补键对**合并前**的
+      // harness 完全无害（旧脚本里 features 零命中、未知顶层键不被拒）。所以这条报错要把
+      // 补救动作与顺序直接讲出来：看到它的人多半正处在那个红窗里。
+      console.error("::error::官方渠道配置缺少模板键: " + templateMissing.join(", ") + " —— 官方渠道是新增渠道的模板(拷贝 → 改身份字段 → 裁剪交付面);缺键意味着那几个键藏在代码兜底值里:复制出来的渠道会带着看不见的继承行为(少写 slug 就回落厂商包名、少写 home_dir 就共用数据根),而且要翻源码才知道有哪些键。请逐键补齐 —— 值取现行兜底值,因此显式化本身不改变任何行为。补齐动作落在私有渠道仓的 channels/official/channel.json,且**可以先行**(对合并前的 harness 无害):顺序是私有仓先补键、再合并引入这些键的 harness 改动,否则三个非 tag 的打包 job 会在每一步 PR/push 上红(契约与顺序见 docs/decisions/2026-10-13-channel-feature-modules.md §4)")
     }
     if (missing.length > 0 || invalid.length > 0 || templateMissing.length > 0) {
       if (missing.length > 0) {
