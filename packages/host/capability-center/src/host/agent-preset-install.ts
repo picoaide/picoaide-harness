@@ -48,7 +48,7 @@ import {
   requiresRemoveConfirmation,
   writeProvenance,
 } from './skill-install.ts'
-import { dshHomeSafe } from 'dsh-plugin-desktop/desktop-home'
+import { dshHomeSafe } from '@picoaide/dsh-host-home'
 
 /**
  * Agent preset ids mirror the upstream `PRESET_ID`: lower-case id, directory name.

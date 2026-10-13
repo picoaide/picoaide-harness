@@ -34,7 +34,7 @@ import { mkdir, mkdtemp, readdir, rm, symlink, utimes, writeFile } from 'node:fs
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { SKILL_TEMP_DIR, sweepStaleSkillTemps, type SkillInstallLog } from '../src/skill-install.ts'
+import { SKILL_TEMP_DIR, sweepStaleSkillTemps, type SkillInstallLog } from '../../capability-center/src/host/skill-install.ts'
 import { isolateRuntimeSkillRoots } from './helpers/runtime-skill-roots.ts'
 
 /**

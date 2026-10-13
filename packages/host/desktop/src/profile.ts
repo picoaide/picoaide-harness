@@ -78,12 +78,13 @@ const REQUIRED_BUNDLES = [
   // **不含包自身目录**，所以 `dsh-plugin-desktop` 无法把自己解析成 bundle；企业包是
   // 这一层里第一个、且它的层本来就依赖桌面层先落地（它 patch `desktop-shell` 行）。
   '@picoaide/dsh-enterprise',
-  // 能力中心（技能商店）的客户端面（2026-10-13 从企业包整块搬出）。它排在企业包
-  // 之后、其余层之前：自己的补丁只插一行（宿主半边 no-op），不 patch 别人的行，
-  // 位置对装配语义没有影响 —— 放在"被拆出来的那个包"后面，读起来就是这次拆包的形状。
-  // **这一层就是"关掉技能商店"的开关**：把它从本清单里去掉，客户端 bundle、
-  // 面板、底部条目与 `capability.*` 文案一起不进产物（宿主代理仍由企业包的 auth-gate
-  // 提供，接口调用点不变）。
+  // 能力中心（技能商店）的 **host + client 双面**（2026-10-13 从企业包整块搬出；
+  // 同日 P0-b 把四条本机路由与技能遥测行也搬了进来）。它排在企业包之后、其余层之前：
+  // 自己的补丁只插两行，不 patch 别人的行 —— 但**必须晚于企业包**，因为它的宿主行
+  // `inject` 的 `picoLocalRoutes` 服务由 `picoaide-auth-gate` 提供。
+  // **这一层就是"关掉技能商店"的开关**：把它从本清单里去掉（P2 还要同时摘
+  // `dsh-plugin-desktop.dependencies` 的条目），客户端 bundle、面板、底部条目、
+  // `capability.*` 文案、四条本机路由与技能遥测一起不进产物。
   '@picoaide/dsh-capability-center',
   '@picoaide/dsh-account-card',
   '@picoaide/dsh-wasm-apps',

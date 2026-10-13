@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { apply, type BrandConfig, type Config } from '../src/auth-gate.ts'
+import { type BrandConfig, type Config } from '../src/auth-gate.ts'
+import { applyFullComposition as apply } from './helpers/apply-full-composition.ts'
 
 /**
  * 登录页品牌区（白标最容易漏的一处）。
@@ -22,6 +23,7 @@ function serveLoginPage(config: Config, loggedIn = false): string {
   let index: ((html: string) => string) | undefined
   const ctx = {
     effect: (fn: () => unknown) => { fn() },
+    provide: (name: string, value: unknown) => { (ctx as unknown as Record<string, unknown>)[`__svc_${name}`] = value },
     picoSession: {
       isRestored: () => true,
       isLoggedIn: () => loggedIn,

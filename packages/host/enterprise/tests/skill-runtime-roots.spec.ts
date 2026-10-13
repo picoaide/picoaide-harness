@@ -14,7 +14,7 @@ import { describe, expect, it } from 'vitest'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { runtimeSkillRoots, RUNTIME_SKILL_ROOT_RANKS } from '../src/skill-runtime-roots.ts'
+import { runtimeSkillRoots, RUNTIME_SKILL_ROOT_RANKS } from '../../capability-center/src/host/skill-runtime-roots.ts'
 import { listRuntimeSkills } from './helpers/upstream-skill-registry.ts'
 
 function skillMd(name: string, marker: string): string {

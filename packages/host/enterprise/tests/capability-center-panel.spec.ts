@@ -27,9 +27,9 @@ import {
   confirmStripText,
   type CapabilityItem,
   type SectionCard,
-} from '../../../client/capability-center/src/client/CapabilityCenterPanel.tsx'
-import { builtinCardsForTab, builtinSkillsInstallOutcome, planBuiltinCards } from '../../../client/capability-center/src/client/BuiltinSkillsStrip.tsx'
-import { setActiveLocale } from '../../../client/capability-center/src/client/locales.ts'
+} from '../../capability-center/src/client/CapabilityCenterPanel.tsx'
+import { builtinCardsForTab, builtinSkillsInstallOutcome, planBuiltinCards } from '../../capability-center/src/client/BuiltinSkillsStrip.tsx'
+import { setActiveLocale } from '../../capability-center/src/client/locales.ts'
 
 afterEach(() => { setActiveLocale('zh') })
 
@@ -591,7 +591,7 @@ describe('A6 + 跨泳道契约 S2 本机内置技能的卸载端点', () => {
  * 纯函数用例抓到。
  */
 describe('A2/A3/A11/A15 接线判据（源码级）', () => {
-  const source = readFileSync(fileURLToPath(new URL('../../../client/capability-center/src/client/CapabilityCenterPanel.tsx', import.meta.url)), 'utf8')
+  const source = readFileSync(fileURLToPath(new URL('../../capability-center/src/client/CapabilityCenterPanel.tsx', import.meta.url)), 'utf8')
 
   it('更新按钮不再硬编码覆盖确认（确认条才是唯一的覆盖来源）', () => {
     // 旧实现把「更新」的 onClick 写成 `install(item, { overwrite: true })`（硬编码 force）
@@ -673,7 +673,7 @@ describe('A2/A3/A11/A15 接线判据（源码级）', () => {
     expect(builtinSkillsInstallOutcome(200, true)).toBe('ok')
     expect(builtinSkillsInstallOutcome(422, false)).toBe('failed')
     // hook 必须真的用它（否则 409 又变成"贴文案 + 重试"）。
-    const strip = readFileSync(fileURLToPath(new URL('../../../client/capability-center/src/client/BuiltinSkillsStrip.tsx', import.meta.url)), 'utf8')
+    const strip = readFileSync(fileURLToPath(new URL('../../capability-center/src/client/BuiltinSkillsStrip.tsx', import.meta.url)), 'utf8')
     expect(strip).toContain('const outcome = builtinSkillsInstallOutcome(res.status, res.ok)')
     expect(strip).toContain("if (outcome === 'conflict')")
     // 面板：conflict 一律经同一条确认条（与普通卡的 409 回落同形），不得自己造第二套。
@@ -702,7 +702,7 @@ describe('A2/A3/A11/A15 接线判据（源码级）', () => {
  *   - 去掉 `title` 说明 ⇒ 第三条红。
  */
 describe('C-03：详情弹层的动作按钮必须与 install() 的站级闸同源', () => {
-  const source = readFileSync(fileURLToPath(new URL('../../../client/capability-center/src/client/CapabilityCenterPanel.tsx', import.meta.url)), 'utf8')
+  const source = readFileSync(fileURLToPath(new URL('../../capability-center/src/client/CapabilityCenterPanel.tsx', import.meta.url)), 'utf8')
 
   it('弹层里的按版本按钮同时吃 own-key busy 与站级 blocked', () => {
     expect(source).toContain('disabled={busy || blocked}')
@@ -717,7 +717,7 @@ describe('C-03：详情弹层的动作按钮必须与 install() 的站级闸同�
   it('禁用时给出原因文案（不能是"点了没反应"）', () => {
     expect(source).toContain("title={blocked && !busy ? t('capability.busyHint') : undefined}")
     // 文案必须走字典（locales-hygiene 会同时钉 zh/en 与引用点）。
-    const locales = readFileSync(fileURLToPath(new URL('../../../client/capability-center/src/client/locales.ts', import.meta.url)), 'utf8')
+    const locales = readFileSync(fileURLToPath(new URL('../../capability-center/src/client/locales.ts', import.meta.url)), 'utf8')
     expect(locales).toContain("'capability.busyHint'")
   })
 })

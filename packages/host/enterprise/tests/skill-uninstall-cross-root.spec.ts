@@ -21,8 +21,8 @@ import { describe, expect, it } from 'vitest'
 import { mkdir, mkdtemp, rm, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { ArchiveInstallRefusal, uninstallSkill } from '../src/skill-install.ts'
-import { runtimeSkillRoots } from '../src/skill-runtime-roots.ts'
+import { ArchiveInstallRefusal, uninstallSkill } from '../../capability-center/src/host/skill-install.ts'
+import { runtimeSkillRoots } from '../../capability-center/src/host/skill-runtime-roots.ts'
 import { listRuntimeSkills } from './helpers/upstream-skill-registry.ts'
 
 function skillMd(name: string, marker: string): string {

@@ -41,7 +41,7 @@ import {
   uninstallSkill,
   writeProvenance,
   type SkillProvenance,
-} from '../src/skill-install.ts'
+} from '../../capability-center/src/host/skill-install.ts'
 import { fakeReq, fakeRes, harness, stubGateway } from './helpers/auth-gate-harness.ts'
 import { isolateRuntimeSkillRoots } from './helpers/runtime-skill-roots.ts'
 

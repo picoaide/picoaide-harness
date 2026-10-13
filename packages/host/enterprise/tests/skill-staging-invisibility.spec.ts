@@ -47,7 +47,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { listInstalledSkills } from '../src/skill-install.ts'
+import { listInstalledSkills } from '../../capability-center/src/host/skill-install.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 /** 宿主机（dsh-plugin-desktop）安装的 pinned 上游包目录。 */

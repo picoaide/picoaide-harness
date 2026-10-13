@@ -312,6 +312,7 @@
     "@picoaide/dsh-cron": "workspace:*",
     "@picoaide/dsh-enterprise": "workspace:*",
     "@picoaide/dsh-foot-menu": "workspace:*",
+    "@picoaide/dsh-gateway-client": "workspace:*",
     "@picoaide/dsh-host-home": "workspace:*",
     "@picoaide/dsh-host-locale": "workspace:*",
     "@picoaide/dsh-wasm-apps": "workspace:*",

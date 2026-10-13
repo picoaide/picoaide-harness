@@ -53,7 +53,7 @@ export const FIBER_FAILED = 3
  * 判据是「缺了它这个产品就不是它」：窗口与壳、桌面自有路由、登录门、企业面、
  * 四个自研业务面。**不含**可选客户端 UI 行 —— `profile.ts` 的 `filterRows` 会有意
  * 丢弃组合里解析不到的客户端行，把它们放进来会造成启动假报警。
- * 共 20 条；`tests/startup-rows.spec.ts` 会逐条断言它们真的在组合树里且未被 disable。
+ * 共 21 条；`tests/startup-rows.spec.ts` 会逐条断言它们真的在组合树里且未被 disable。
  *
  * 2026-09-21（并道改造）：`picoaide-foot-menu` 入表 —— 它是**五个面板入口的唯一
  * 承载行**（更多 + 浮层）。它不在 `filterRows` 的丢弃范围内（那只丢
@@ -77,11 +77,20 @@ export const REQUIRED_DESKTOP_ROWS = [
   'picoaide-auth-gate',
   'picoaide-channel-sync',
   'picoaide-error-reporting',
-  // 能力中心（技能商店）的客户端面（capability-center/cordis.patch.yml）。
+  // 能力中心（技能商店）的 host + client 双面（capability-center/cordis.patch.yml）。
   // 2026-10-13 从企业包拆出：这一条是"技能商店还在产物里"的唯一行级判据 ——
   // 它一旦消失（拆包漏接线 / 被渠道覆盖层禁用），底部「更多」里的能力中心入口
   // 会**安静地**少掉一条，正是本模块要消灭的形态，因此按"必需行"处理。
   'picoaide-capability-center',
+  // 技能遥测行（0040：技能被真正调用后的匿名计数上报）。2026-10-13（P0-b）随技能面
+  // 从 `picoaide-skill-telemetry`（enterprise）改为 `@picoaide/dsh-capability-center`
+  // 的同名子路径。
+  //
+  // **为什么这次才入表**：它此前不在本清单里 —— 被渠道覆盖层或 home 补丁禁用时
+  // 没有任何判据会红，"技能用量系统性少计"只会以数据缺失的形式出现在服务端。
+  // 变体化（P2）会让"某行不在组合里"成为常态，因此那条静默缺口必须先补上：
+  // 要么纳入登记（本行），要么在豁免表里写明理由。这里选前者。
+  'picoaide-skill-telemetry',
   // 自研业务面
   'pico-connectors',
   'pico-cron',

@@ -1,6 +1,6 @@
 {
   "schema": "picoaide-semver-corpus/1",
-  "about": "版本先后语义的**仓内共享语料**（R4-D-1 / 2026-09-23 第四轮审计）。Go 侧（internal/util、internal/updatecheck、internal/skillmanifest、internal/wasmapp/registry）与 TS 侧（packages/client/capability-center/src/client/version-compare.ts、packages/host/desktop/src/updates.ts）**各自读这一份**并逐条断言 Math.sign / 符号相等。",
+  "about": "版本先后语义的**仓内共享语料**（R4-D-1 / 2026-09-23 第四轮审计）。Go 侧（internal/util、internal/updatecheck、internal/skillmanifest、internal/wasmapp/registry）与 TS 侧（packages/host/capability-center/src/client/version-compare.ts、packages/host/desktop/src/updates.ts）**各自读这一份**并逐条断言 Math.sign / 符号相等。",
   "domain": "只覆盖「版本号本身的先后语义」（SemVer 2.0.0 §11）。刻意**不含**各实现的容错面（`v` 前缀装饰、空串、非法字符、缺段名如 `1.0`）—— 那些是各调用方按自身安全方向定的兜底（例如 updatecheck 把非法输入判为 0 = 不提示，util 回落字节序），收录进来只会把两种不同的兜底混成一条规则。语料里的每一对，四个 Go 调用点与两个 TS 调用点都必须给出同一个符号。",
   "cases": [
     {

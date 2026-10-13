@@ -47,7 +47,7 @@ import {
   uninstallSkill,
   writeProvenance,
   type SkillInstallLog,
-} from '../src/skill-install.ts'
+} from '../../capability-center/src/host/skill-install.ts'
 import { isolateRuntimeSkillRoots } from './helpers/runtime-skill-roots.ts'
 
 /**
@@ -549,9 +549,13 @@ describe('R19B-09：RESIDUE 拒绝文案走 hostCopy（按调用解析，缺省�
 // 端到端渲染一条 RESIDUE 需要构造影子技能 + 真 uninstall 调用链；而这一跳唯一的失效
 // 形态就是"调用点少写了 locale"（漏一个入口，那条 404/422 就退回中文）。源码级判据
 // 对这一形态是**完备**的：新增/改动任何 install/uninstall 调用点都必须带 locale。
-describe('R19B-09 最后一跳：auth-gate 的每个 install/uninstall 调用点都按请求传 locale', () => {
+describe('R19B-09 最后一跳：技能路由的每个 install/uninstall 调用点都按请求传 locale', () => {
   it('每个调用点的选项对象都带 locale: hostLocale(req)', async () => {
-    const source = await readFile(join(import.meta.dirname, '..', 'src', 'auth-gate.ts'), 'utf8')
+    // 2026-10-13（P0-b）：六个调用点随四条本机路由从 `enterprise/src/auth-gate.ts`
+    // 搬到 `capability-center/src/host/skill-routes.ts`。判据的**对象与口径都不变**
+    // （"新增/改动任何调用点都必须带 locale"），只是读的文件跟着走 —— 留在这里红着
+    // 比删掉它安全得多：它就是"漏一个入口，那条 404/422 退回中文"的唯一完备判据。
+    const source = await readFile(join(import.meta.dirname, '..', '..', 'capability-center', 'src', 'host', 'skill-routes.ts'), 'utf8')
     const markers = ['await installSkillArchive({', 'await uninstallSkill(']
     const sites: { marker: string, body: string }[] = []
     for (const marker of markers) {

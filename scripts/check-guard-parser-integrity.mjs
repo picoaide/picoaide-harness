@@ -365,10 +365,11 @@ const REGISTERED_INSTALL_INTEGRITY_BODIES = [
     // 登记值必须取**工作树**（= 提交后的 HEAD）那份：`sha256sum scripts/check-install-integrity.mjs`。
     //
     // 2026-10-13：`EXECUTION_POINT_REGISTRY` 登记了新包
-    // `packages/client/capability-center` 的四条派生执行点（能力中心客户端面从
-    // `packages/host/enterprise` 拆出）⇒ 本件内容变了，摘要同步进 diff
+    // `packages/host/capability-center` 的四条派生执行点 + 网关客户端叶子包的三条
+    // （能力中心 host + client 双面 / `server-connector` 实现落点，2026-10-13 P0-b）
+    // ⇒ 本件内容变了，摘要同步进 diff
     // （取值 = `sha256sum scripts/check-install-integrity.mjs`，即提交后的 HEAD 那份）。
-    sha256: 'b14e865994da2f676f03fb2f6992255015fa164a8dd6b9bef6473f7c94bcc5a9',
+    sha256: 'a817dc3a5a7bd124214b3450b2f265ee7a23bb82fa2efcb5318f100ea2230fd6',
     methods: [
       'judge-body-bytes-equal-head',
       'yarnrc-forbidden-keys',

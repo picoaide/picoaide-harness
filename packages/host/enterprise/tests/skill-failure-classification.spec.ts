@@ -32,7 +32,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { ArchiveInstallRefusal, SkillLockedError, describeArchiveFailure } from '../src/skill-install.ts'
+import { ArchiveInstallRefusal, SkillLockedError, describeArchiveFailure } from '../../capability-center/src/host/skill-install.ts'
 
 /** 真的本机绝对路径（不是写死的假串）——"不含本机路径"必须用真实片段断言。 */
 let root = ''

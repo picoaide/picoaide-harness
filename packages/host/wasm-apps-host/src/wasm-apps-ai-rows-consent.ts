@@ -84,7 +84,7 @@
 import { randomBytes } from 'node:crypto'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import { dshHomeSafe } from 'dsh-plugin-desktop/desktop-home'
+import { dshHomeSafe } from '@picoaide/dsh-host-home'
 
 /** 授权状态文件名（落在数据根 `$DSH_HOME` 下；0600）。 */
 export const AI_ROWS_CONSENT_FILE_NAME = 'wasm-apps-ai-rows-consent.json'

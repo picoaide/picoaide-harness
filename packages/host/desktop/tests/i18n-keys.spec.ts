@@ -29,7 +29,7 @@ const DICTIONARY_PACKAGES = [
   // 2026-10-13：能力中心（技能商店）的客户端字典随面板从 `dsh-enterprise` 搬到
   // `@picoaide/dsh-capability-center`（75 个 `capability.*` 键）。它与 enterprise
   // 一样吃"零死键 + 零缺失键"的判据；漏登记 = 这份字典再次脱离守卫。
-  'packages/client/capability-center',
+  'packages/host/capability-center',
   // 2026-09-21：底部「更多」行（并道改造）引入的客户端字典 —— 它的四条文案
   // （more / label / labelAttention / attention）都必须有引用点，否则「更多」行会
   // 静默退回中文或漏掉无障碍标签。

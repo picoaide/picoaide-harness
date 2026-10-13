@@ -41,7 +41,7 @@ import {
   PrecheckCode,
   precheckSkillPackage,
   scanFrontmatterComplexity,
-} from '../src/manifest-precheck.ts'
+} from '../../capability-center/src/host/manifest-precheck.ts'
 
 /** 仓库根：从本文件（`packages/host/enterprise/tests/`）往上走四级。 */
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..')
@@ -49,7 +49,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '
 /** 服务端真源（限额、规则、错误码的唯一权威）。 */
 const GO_REPO_PATH = 'server/internal/skillmanifest/manifest.go'
 /** 客户端镜像（与上面同一份真源的两处执行点之一）。 */
-const TS_REPO_PATH = 'packages/host/enterprise/src/manifest-precheck.ts'
+const TS_REPO_PATH = 'packages/host/capability-center/src/host/manifest-precheck.ts'
 
 /**
  * 读真源。**缺席即失败**（不返回 null、不 skip）：真源被删/改名是"必须有人来看"

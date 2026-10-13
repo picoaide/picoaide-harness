@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { apply, loginServerSwitchConflict, type Config } from '../src/auth-gate.ts'
+import { loginServerSwitchConflict, type Config } from '../src/auth-gate.ts'
+import { applyFullComposition as apply } from './helpers/apply-full-composition.ts'
 import type { Session } from '../src/server-connector/config.ts'
 
 /**
@@ -68,7 +69,8 @@ function sessionHarness(
   const warns: string[] = []
   const ctx = {
     effect: (fn: () => unknown) => { fn() },
-    get: (name: string) => (name === 'connection' ? fence : undefined),
+    provide: (name: string, value: unknown) => { (ctx as unknown as Record<string, unknown>)[`__svc_${name}`] = value },
+    get: (name: string) => ((ctx as unknown as Record<string, unknown>)[`__svc_${name}`] ?? ((name === 'connection' ? fence : undefined))),
     logger: { info: vi.fn(), warn: (m: string) => { warns.push(String(m)) }, error: vi.fn() },
     picoSession: {
       isRestored: () => true,

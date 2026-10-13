@@ -29,8 +29,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { INVOCATION_BOOLEAN_LITERALS, PrecheckCode, precheckSkillPackage } from '../src/manifest-precheck.ts'
-import { assertLoadableSkillMetadata } from '../src/skill-install.ts'
+import { INVOCATION_BOOLEAN_LITERALS, PrecheckCode, precheckSkillPackage } from '../../capability-center/src/host/manifest-precheck.ts'
+import { assertLoadableSkillMetadata } from '../../capability-center/src/host/skill-install.ts'
 import { listRuntimeSkills, UPSTREAM_SKILL_FILESYSTEM_LIBS, UPSTREAM_SKILL_FILESYSTEM_SOURCE } from './helpers/upstream-skill-registry.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))

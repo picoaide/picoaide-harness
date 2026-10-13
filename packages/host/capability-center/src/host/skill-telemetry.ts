@@ -1,9 +1,9 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
-import { SESSION_CHANGED_EVENT } from './session-service.ts'
-import { fetchJSON } from './server-connector/auth.ts'
-import type { Session } from './server-connector/config.ts'
+import { SESSION_CHANGED_EVENT } from '@picoaide/dsh-host-locale/session-events'
+import { fetchJSON } from '@picoaide/dsh-gateway-client/auth'
+import type { Session } from '@picoaide/dsh-gateway-client/config'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { resolveSkillsDir } from './skill-install.ts'
@@ -38,8 +38,39 @@ import { resolveSkillsDir } from './skill-install.ts'
 
 export const name = 'skill-telemetry'
 
-/** Services consumed: the session service (bearer token). */
+/** Services consumed: the session service (bearer token) and the model tool registry. */
 export const inject = ['picoSession', 'tools']
+
+/**
+ * `picoSession` 服务在本模块里需要的**最小结构面**（探测式）。
+ *
+ * 不 `declare module '@deepseek-ai/cordis' { interface Context { … } }`：那会在
+ * 同一个 TS program 里与 provider（`@picoaide/dsh-enterprise/session-service`）的
+ * 声明争同一个成员名，形状一旦不同就是 TS2717。探测 + 结构类型是本仓既有的跨包
+ * 服务读法（先例：`wasm-apps-host/src/session.ts` 探测 `picoSession`、
+ * `connectors/src/index.ts` 探测 `workspaceRegistry`）。
+ */
+interface PicoSessionProbe {
+  getSession(): Session | null
+}
+
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    /** 会话变化（登录/登出/恢复完成）。形状与 provider 的声明逐字一致。 */
+    'pico/session-changed'(session: { username?: string; token?: string; serverURL?: string } | null): void
+  }
+}
+
+/** 每次调用探测（服务可能晚于本行出现；缺席时按"未登录"处理，绝不猜）。 */
+function currentSession(ctx: Context): Session | null {
+  // 结构探测而不是必需依赖：最小组合（单测、无头嵌入）里 `get` 可能整个缺席 ——
+  // 那时按"未登录"处理（不上报），与探测面其余方法同一口径。
+  const viaGet = (typeof ctx.get === 'function' ? ctx.get('picoSession') : undefined) as PicoSessionProbe | undefined
+  // `ctx.get('<服务名>')` 与"服务属性"在真实 Cordis 里是同一条服务（`Service` 基类
+  // 两者都挂）；最小夹具常常只摆了属性。两条都探，语义与只探一条相同。
+  const probe = viaGet ?? (ctx as unknown as { picoSession?: PicoSessionProbe }).picoSession
+  return typeof probe?.getSession === 'function' ? probe.getSession() : null
+}
 
 /**
  * 渠道功能模块 `skills` 的**端到端哨兵串**（契约见
@@ -215,7 +246,7 @@ export function apply(ctx: Context): void {
     const skillName = typeof args?.name === 'string' ? args.name : ''
     if (skillName === '') return
     // 同步取会话（见 apply 的注释）：这一笔调用属于**此刻**这一代。
-    const session = ctx.picoSession.getSession()
+    const session = currentSession(ctx)
     void installedVersion(skillName)
       .then((version) => reportSkillCall(session, skillName, version, callIdOf(exec.callId)))
   })
@@ -228,7 +259,7 @@ export function apply(ctx: Context): void {
     if (skillName === '') return
     // 同上：`_session` 是上游会话对象（不携带服务端/令牌），所以作用域仍从 `picoSession`
     // 取 —— 但取的是**事件发生的此刻**，不是 await 之后的某一代。
-    const session = ctx.picoSession.getSession()
+    const session = currentSession(ctx)
     void installedVersion(skillName)
       .then((version) => reportSkillCall(session, skillName, version, callIdOf(event.data.id)))
   })

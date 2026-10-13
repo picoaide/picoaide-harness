@@ -358,6 +358,7 @@ the package names, versions, and licenses for transparency.
 | @picoaide/dsh-cron | 0.1.0 | MIT |
 | @picoaide/dsh-enterprise | 0.1.0 | MIT |
 | @picoaide/dsh-foot-menu | 0.1.0 | MIT |
+| @picoaide/dsh-gateway-client | 0.1.0 | MIT |
 | @picoaide/dsh-host-home | 0.1.0 | MIT |
 | @picoaide/dsh-host-locale | 0.1.0 | MIT |
 | @picoaide/dsh-wasm-apps | 0.1.0 | MIT |

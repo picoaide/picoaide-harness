@@ -23,7 +23,7 @@ import {
   listShadowingSkills,
   sweepInstallerOwnedShadowSkills,
   uninstallSkill,
-} from '../src/skill-install.ts'
+} from '../../capability-center/src/host/skill-install.ts'
 import { listRuntimeSkills } from './helpers/upstream-skill-registry.ts'
 import { isolateRuntimeSkillRoots } from './helpers/runtime-skill-roots.ts'
 
@@ -111,7 +111,7 @@ describe('R13-B P1-2：已安装集合 == 运行时集合（真跑 pinned 上游
       expect((await listRuntimeSkills(root)).find(s => s.name === 'beta')?.description).toBe('STALE-BACKUP')
 
       // 走安装器的公共入口（zip 通道）。
-      const { installSkillArchive } = await import('../src/skill-install.ts')
+      const { installSkillArchive } = await import('../../capability-center/src/host/skill-install.ts')
       const AdmZip = (await import('adm-zip')).default
       const zip = new AdmZip()
       zip.addFile('SKILL.md', Buffer.from(skillMd('beta', 'FRESH-INSTALL')))

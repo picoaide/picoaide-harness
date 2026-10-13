@@ -274,6 +274,11 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   // 本包**没有** `lib/invariant.js`（没有伴生不变量行），所以只列真实声明的入口。
   'node_modules/@picoaide/dsh-capability-center/lib/index.js',
   'node_modules/@picoaide/dsh-capability-center/lib/client.js',
+  // 2026-10-13（P0-b）：技能遥测行随技能面从 `@picoaide/dsh-enterprise/skill-telemetry`
+  // 搬到本包的同名子路径（profile 行 `picoaide-skill-telemetry` 的名字随之改）。
+  // 它掉出 asar ⇒ 那一行 `failed to import loader entry`，而技能用量计数会**静默**
+  // 变成"服务端一行都没有" —— 没有别的判据会看见。
+  'node_modules/@picoaide/dsh-capability-center/lib/skill-telemetry.js',
   'node_modules/@picoaide/dsh-capability-center/package.json',
   'node_modules/@picoaide/dsh-capability-center/cordis.patch.yml',
   'node_modules/@picoaide/dsh-wasm-apps/lib/index.js',
@@ -286,6 +291,17 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   // `lib/invariant.js` 是 Cordis 伴生行，`lib/electron-adapter.js` 被 desktop 的
   // `lib/main.js` 静态 import（协议特权注册 + 适配器实例），缺它 = 启动期
   // ERR_MODULE_NOT_FOUND（整个应用起不来，而不是某一行插件不装配）。
+  // 宿主侧网关客户端叶子包（2026-10-13，P0-b；`server-connector/{auth,config,electron}`
+  // 的实现落点，enterprise 保留同名 re-export）。四个产物入口都是**真实被解析**的
+  // specifier：`lib/index.js` 是包入口、`auth`/`config` 被 enterprise 与两个模块包导入、
+  // `electron` 被 enterprise 的 `session-service` 导入。`package.json` 是 profile 组装期
+  // `createRequire().resolve` 的落点。它没有 `cordis.patch.yml` / `dsh.client` /
+  // `./invariant`（刻意不是插件），所以只有这五条。
+  'node_modules/@picoaide/dsh-gateway-client/lib/index.js',
+  'node_modules/@picoaide/dsh-gateway-client/lib/auth.js',
+  'node_modules/@picoaide/dsh-gateway-client/lib/config.js',
+  'node_modules/@picoaide/dsh-gateway-client/lib/electron.js',
+  'node_modules/@picoaide/dsh-gateway-client/package.json',
   'node_modules/@picoaide/dsh-wasm-apps-host/lib/index.js',
   'node_modules/@picoaide/dsh-wasm-apps-host/lib/invariant.js',
   'node_modules/@picoaide/dsh-wasm-apps-host/lib/electron-adapter.js',
@@ -1452,11 +1468,11 @@ function desktopProductRoot(): string {
 export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE: readonly WorkspacePackageCoverageFloor[] = [
   { package: 'dsh-account-card', flattened: 5, effective: 5, library: 3 },
   { package: 'dsh-browser', flattened: 7, effective: 7, library: 5 },
-  // 能力中心的客户端面（2026-10-13 从 enterprise 搬出）：4 条扁平条目
-  // （`lib/index.js` / `lib/client.js` / `package.json` / `cordis.patch.yml`），
-  // 生效清单同样 4 条（锚点表里的 package.json + cordis.patch.yml 与扁平表**同一条**，
-  // 并集不增）；`lib/` 产物 2 条。
-  { package: 'dsh-capability-center', flattened: 4, effective: 4, library: 2 },
+  // 能力中心的 host + client 双面（2026-10-13 从 enterprise 搬出）：5 条扁平条目
+  // （`lib/index.js` / `lib/client.js` / `lib/skill-telemetry.js` / `package.json` /
+  // `cordis.patch.yml`），生效清单同样 5 条（锚点表里的 package.json + cordis.patch.yml
+  // 与扁平表**同一条**，并集不增）；`lib/` 产物 3 条。
+  { package: 'dsh-capability-center', flattened: 5, effective: 5, library: 3 },
   // connectors / enterprise 的条目**全部**在 `REQUIRED_ASAR_EXPORTS`（specifier + 落点）里，
   // 扁平清单里一条都没有 ⇒ `flattened: 0` 是有意的，不是漏登记。
   { package: 'dsh-connectors', flattened: 0, effective: 7, library: 5 },
@@ -1466,8 +1482,13 @@ export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE: readonly WorkspacePackageCover
   // 14 条（原 13 条 + R16B-01 新增的 `session-identity`）：account-card 的余额快照要盖
   // 会话身份章，而身份口径的唯一实现在 enterprise ⇒ 多一条真实的跨包 specifier。
   // 15 条（2026-09-28，DSH 0.1.7-rc.2 网关鉴权迁移）：新增 `gateway-llm`（自研 provider 行）。
-  { package: 'dsh-enterprise', flattened: 0, effective: 16, library: 14 },
+  // 2026-10-13（P0-b）：`skill-telemetry` 这一条随技能面搬到能力中心包 ⇒ effective
+  // 16 → 15、`lib/` 产物 14 → 13。
+  { package: 'dsh-enterprise', flattened: 0, effective: 15, library: 13 },
   { package: 'dsh-foot-menu', flattened: 4, effective: 4, library: 2 },
+  // 2026-10-13（P0-b）：网关客户端叶子包（`server-connector` 的实现落点）。
+  // 五条扁平条目全在生效清单里，其中 `lib/` 产物 4 条。
+  { package: 'dsh-gateway-client', flattened: 5, effective: 5, library: 4 },
   { package: 'dsh-host-home', flattened: 2, effective: 2, library: 1 },
   { package: 'dsh-host-locale', flattened: 4, effective: 4, library: 3 },
   { package: 'dsh-wasm-apps', flattened: 5, effective: 5, library: 3 },
@@ -1483,8 +1504,17 @@ export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE: readonly WorkspacePackageCover
  * 该包 4 条扁平条目：`lib/index.js` / `lib/client.js` / `package.json` /
  * `cordis.patch.yml`）。enterprise 侧的条目一条未减 —— 搬走的是客户端面，不是它的
  * 宿主代理或基础面。
+ * 2026-10-13（P0-b）：133 → 138。三处同批（**生效清单 = 三张表的并集**，所以
+ * `REQUIRED_ASAR_EXPORTS` 的增删**一样计入**本下限）：
+ *   · 能力中心 +1（`lib/skill-telemetry.js` —— 技能遥测行随技能面搬入）；
+ *   · 网关客户端叶子包 +5（`lib/{index,auth,config,electron}.js` + `package.json`）；
+ *   · enterprise −1（`@picoaide/dsh-enterprise/skill-telemetry` 从导出表移除）；
+ *   · 应用宿主 +0（`app-routes.ts` 刻意**不**做成独立入口，它由 `lib/index.js` 的
+ *     静态 import 带出来 —— 少一个只有本包可见的入口，就少一处"声明了却没构建"的
+ *     风险面；本包 2026-09-20 正是在那一类上挂过）。
+ * 实测：`effectivePackagedRuntimeEntries().length === 138`。
  */
-export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR = 133
+export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR = 138
 // 111 → 114（2026-09-23 合并 origin/master 的 #138）：那条线给必需清单加了
 // `@deepseek-ai/dsh-plugin-manager` 的 3 个 `lib/**` 条目，生效清单随之增长 3 条。
 // 棘轮语义是"贴住下限、只允许上调" ⇒ 合并后同步上调（删条目仍会打破等式）。
@@ -1947,7 +1977,6 @@ export const REQUIRED_ASAR_EXPORTS: readonly RequiredExport[] = [
   { specifier: '@picoaide/dsh-enterprise/error-reporting', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/error-reporting.js' },
   // 同批补漏的三个兄弟导出:它们都已在 `exports` 里发布、lib/ 也有产物,只是此前没进清单
   // (清单是"允许失败"的唯一真源,少一条就少一道门)。
-  { specifier: '@picoaide/dsh-enterprise/skill-telemetry', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/skill-telemetry.js' },
   { specifier: '@picoaide/dsh-enterprise/channel-sync', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/channel-sync.js' },
   { specifier: '@picoaide/dsh-enterprise/invariant', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/invariant.js' },
   // 2026-09-23（第三轮审计的反向 oracle）：下面 7 条都是**产物里真实存在、且被真实

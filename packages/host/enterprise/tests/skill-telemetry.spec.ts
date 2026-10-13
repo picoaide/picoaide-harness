@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { apply, reportSkillCall } from '../src/skill-telemetry.ts'
+import { apply, reportSkillCall } from '../../capability-center/src/host/skill-telemetry.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Session } from '../src/server-connector/config.ts'
 import type { ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
@@ -8,7 +8,10 @@ const SESSION: Session = { serverURL: 'https://gateway.example', username: 'test
 
 /** fetchJSON 被 mock:捕获上报 payload 供断言。 */
 const captured: Array<{ path: string; body: unknown }> = []
-vi.mock('../src/server-connector/auth.ts', () => ({
+// 2026-10-13（P0-b）：网关客户端（`fetchJSON`）的实现搬到叶子包
+// `@picoaide/dsh-gateway-client`；被测插件 import 的是**它**，mock 必须打在同一个
+// 模块 id 上，否则替身拦不到、上报计数恒 0（判据会以"没上报"的形式假红）。
+vi.mock('@picoaide/dsh-gateway-client/auth', () => ({
   fetchJSON: vi.fn(async (serverURL: string, path: string, opts: { body?: unknown }) => {
     captured.push({ path, body: opts.body })
     return { ok: true }

@@ -21,7 +21,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import AdmZip from 'adm-zip'
 import { beforeEach, describe, expect, it } from 'vitest'
-import { discoverRuntimeSkills, listInstalledSkills, listLocalSkills, packSkill, uninstallSkill } from '../src/skill-install.ts'
+import { discoverRuntimeSkills, listInstalledSkills, listLocalSkills, packSkill, uninstallSkill } from '../../capability-center/src/host/skill-install.ts'
 import { isolateRuntimeSkillRoots } from './helpers/runtime-skill-roots.ts'
 
 // R13-GH3（H2 跨根）：卸载的"成功"覆盖运行时**全部已知根**（`<dshHome>/skills` +

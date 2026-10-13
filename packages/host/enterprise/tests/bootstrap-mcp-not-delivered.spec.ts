@@ -33,7 +33,10 @@ import { describe, expect, it } from 'vitest'
 /** 仓库根：从本文件（`packages/host/enterprise/tests/`）往上走四级。 */
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..')
 const GO_BOOTSTRAP = 'server/internal/bootstrap/bootstrap.go'
-const TS_CONFIG = 'packages/host/enterprise/src/server-connector/config.ts'
+// 2026-10-13（P0-b）：会话/bootstrap 载荷形状的实现搬到叶子包
+// `packages/host/gateway-client`（enterprise 保留同名 re-export）⇒ 类型承诺的
+// 真源在那里。
+const TS_CONFIG = 'packages/host/gateway-client/src/config.ts'
 const ENTERPRISE_SRC = 'packages/host/enterprise/src'
 
 /** 读真源：读不到即 throw（判据失去输入必须红，不许静默跳过）。 */

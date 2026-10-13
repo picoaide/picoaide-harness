@@ -39,8 +39,8 @@ import {
   isAiRowsConsentScopeError,
   parseAiRowsConsent,
   serializeAiRowsConsent,
-} from '../src/wasm-apps-ai-rows-consent.ts'
-import type { AiRowsConsentScope } from '../src/wasm-apps-ai-rows-consent.ts'
+} from '../../wasm-apps-host/src/wasm-apps-ai-rows-consent.ts'
+import type { AiRowsConsentScope } from '../../wasm-apps-host/src/wasm-apps-ai-rows-consent.ts'
 
 const SCOPE: AiRowsConsentScope = { user: 'alice', server: 'https://harness.example' }
 

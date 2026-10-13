@@ -16,9 +16,10 @@ import { describe, expect, it, vi, afterEach } from 'vitest'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { precheckSkillPackage, PrecheckCode } from '../src/manifest-precheck.ts'
-import { packSkill } from '../src/skill-install.ts'
-import { archiveTooLargeError } from '../src/auth-gate.ts'
+import { precheckSkillPackage, PrecheckCode } from '../../capability-center/src/host/manifest-precheck.ts'
+import { packSkill } from '../../capability-center/src/host/skill-install.ts'
+// 2026-10-13（P0-b）：归档超限文案随技能路由搬到 capability-center。
+import { archiveTooLargeError } from '../../capability-center/src/host/skill-routes.ts'
 import { ApiError, AuthError, authErrorMessage, fetchJSON, login } from '../src/server-connector/auth.ts'
 
 const BODY = '本技能用于单元测试:正文需要足够长才能通过空壳校验,因此这里补充两句完整的说明文字,确保长度稳稳超过下限要求。'

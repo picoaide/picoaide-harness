@@ -158,13 +158,15 @@ const MINIMUM_REQUIRED_GUARDS = [
  */
 const REGISTERED_GUARD_ENTRIES = new Map([
   // 2026-10-13：`scripts/verify-layout.mjs` 的包名表新增
-  // `packages/client/capability-center` ↔ `@picoaide/dsh-capability-center`
-  // （能力中心客户端面从 enterprise 拆出）⇒ 该守卫脚本内容变了，按本表上方的
+  // `packages/host/capability-center` ↔ `@picoaide/dsh-capability-center` 与
+  // `packages/host/gateway-client` ↔ `@picoaide/dsh-gateway-client`
+  // （能力中心 host + client 双面从 enterprise 拆出；网关客户端叶子包新建，2026-10-13 P0-b）
+  // ⇒ 该守卫脚本内容变了，按本表上方的
   // 纪律在同一个改动里更新摘要（取值来自 `--print-digests` 的复算结果，
   // 由 `check-guard-parser-integrity.mjs` 与 `verify-check-workspaces.mjs` 各自独立复算对拍）。
-  ['check:layout', { script: 'node scripts/verify-layout.mjs', argvTail: [], digest: '733757d29364f1ee3f90c58ce8576c660bfeafacdd5f8bc796ae85911401f979' }],
+  ['check:layout', { script: 'node scripts/verify-layout.mjs', argvTail: [], digest: 'c7851ab69aab2e137758d69dfe56c777627ae404dd5a36b619f0d89cfd4bdc1d' }],
   ['check:workflows', { script: 'node scripts/check-workflows.mjs', argvTail: [], digest: '4752f083dafb3efa6658b7a7707c606ef814d6c014dac3804057b33a4246cd57' }],
-  ['check:ci-scripts', { script: 'node scripts/verify-ci-scripts.mjs', argvTail: [], digest: '61b64cc4991341ba9be8ccda99fd581c97fa0f12e7584908f83c4346c282949d' }],
+  ['check:ci-scripts', { script: 'node scripts/verify-ci-scripts.mjs', argvTail: [], digest: '1251b7fcfaf871b2369a311224f1b7b177fd7327a6fa1c356a32c5ba7509efb1' }],
   ['check:patch-resolutions', { script: 'node scripts/verify-patch-resolutions.mjs', argvTail: [], digest: '6dcde2281311235a57722608d91e6a1fa59734411ad65cda76ea2bdc43145c83' }],
   ['check:patch-pin', { script: 'node scripts/check-patch-pin.mjs', argvTail: [], digest: 'a8fe5b45df5dfadd7a87332b31f9e14c4a6722a41f21cf0f0d9afa6450a3ba84' }],
   ['check:patches', { script: 'node scripts/verify-patches.mjs', argvTail: [], digest: '22131d86472ff930f22687192b07216c5cf74ab594d0091a6766e661a2c24683' }],
@@ -185,11 +187,11 @@ const REGISTERED_GUARD_ENTRIES = new Map([
   //   · 本表每条 `digest` ↔ 该守卫脚本的 sha256(内容替换/符号链接替换都红);
   //   · 门禁自己依赖的解析器(`node_modules/yaml`)的**文件集** sha256 ↔ 登记值。
   // 2026-10-13：`scripts/check-install-integrity.mjs` 的 `EXECUTION_POINT_REGISTRY`
-  // 新增 `packages/client/capability-center` 的四条派生执行点（能力中心客户端面从
-  // enterprise 拆出）⇒ 该前置校验件内容变了，它在对方文件里的登记值也同步更新
+  // 新增 `packages/host/capability-center` 的四条与 `packages/host/gateway-client` 的
+  // 三条派生执行点（2026-10-13 P0-b）⇒ 该前置校验件内容变了，它在对方文件里的登记值也同步更新
   // ⇒ 本判据脚本自身的摘要随之变化，按同一套纪律在这里同步（`--print-digests` 复算，
   // 且必须取**工作树**=提交后 HEAD 那份）。
-  ['check:guard-parser-integrity', { script: 'node scripts/check-guard-parser-integrity.mjs', argvTail: [], digest: 'adb422eb7ed84fa27670f223878c585ef10aaabddd93f5c357cd014e9c631702' }],
+  ['check:guard-parser-integrity', { script: 'node scripts/check-guard-parser-integrity.mjs', argvTail: [], digest: 'c20546e9eaf47b17e378b436527416fe95abb601a3c6e84e26de3e01336c0de7' }],
 ])
 
 /**

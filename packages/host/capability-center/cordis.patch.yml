@@ -1,0 +1,23 @@
+# 能力中心（技能商店）的宿主行 —— **host + client 双面**（照 `packages/host/connectors`
+# 的标准形态；2026-10-13 P0-b 起 host 面也在这里，不再借 `@picoaide/dsh-enterprise`）。
+#
+# 两行：
+#   - `picoaide-capability-center`：客户端 bundle（`dsh.client`：面板 + 内置技能区 +
+#     `capability.*` 字典 + 底部「更多」条目）+ 四条本机路由（`/api/pico/skills`、
+#     `/api/pico/agent-presets`、`/api/pico/shared-skills`、`/api/pico/capabilities`）；
+#   - `picoaide-skill-telemetry`：技能被真正调用后的匿名计数上报（0040）。它原先是
+#     `@picoaide/dsh-enterprise/cordis.patch.yml` 的一行，随技能面一起搬进来 ——
+#     留在必需包里的话，"关掉技能商店"仍会带着这段代码进产物。
+#
+# **这一层就是"关掉技能商店"的开关**：把本包从 `dsh-plugin-desktop.dependencies`
+# 与 profile 的 bundle 层里去掉，界面、底部条目、`capability.*` 文案与四条本机路由
+# 一起不进产物。
+#
+# 本行 `inject` 里的 `picoLocalRoutes` 由 `@picoaide/dsh-enterprise/auth-gate` 提供
+# （回环/同源/持有性证明与网关失败分支的唯一实现）；本 bundle 层因此必须晚于
+# enterprise 那一层（`src/profile.ts` 的 `REQUIRED_BUNDLES` 顺序即契约）。
+- insert:
+    - id: picoaide-capability-center
+      name: '@picoaide/dsh-capability-center'
+    - id: picoaide-skill-telemetry
+      name: '@picoaide/dsh-capability-center/skill-telemetry'

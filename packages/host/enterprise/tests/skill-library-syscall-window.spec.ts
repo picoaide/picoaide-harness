@@ -56,7 +56,7 @@ import {
   SKILL_REMOVED_DIR,
   writeSkillTombstone,
   type SkillInstallLog,
-} from '../src/skill-install.ts'
+} from '../../capability-center/src/host/skill-install.ts'
 import { isolateRuntimeSkillRoots } from './helpers/runtime-skill-roots.ts'
 
 /** 注入控制器（`vi.hoisted`：mock 工厂不能引用普通顶层变量）。 */

@@ -35,7 +35,7 @@ import {
   readProvenance,
   SKILL_LOCK_DIR,
   withSkillLock,
-} from '../src/skill-install.ts'
+} from '../../capability-center/src/host/skill-install.ts'
 // 跨端判据必须打**真**同步器（不是测试里另写一份"也会看一眼锁文件"的替身）：
 // 互斥的意义就在于这两份实现互相看得见对方的锁。
 import { syncBuiltinSkills } from '../../../vendor/memory-evolve/lib/coi/skills-sync.js'

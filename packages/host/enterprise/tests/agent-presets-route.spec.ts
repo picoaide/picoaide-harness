@@ -25,8 +25,9 @@ import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { apply, type Config } from '../src/auth-gate.ts'
-import { resolvePresetsDir } from '../src/agent-preset-install.ts'
+import { type Config } from '../src/auth-gate.ts'
+import { applyFullComposition as apply } from './helpers/apply-full-composition.ts'
+import { resolvePresetsDir } from '../../capability-center/src/host/agent-preset-install.ts'
 import type { Session } from '../src/server-connector/config.ts'
 
 const SESSION: Session = {
@@ -82,6 +83,7 @@ function harness(): { call: (url: string, method?: string) => Promise<{ code: nu
   const routes: Route[] = []
   const ctx = {
     effect: (fn: () => unknown) => { fn() },
+    provide: (name: string, value: unknown) => { (ctx as unknown as Record<string, unknown>)[`__svc_${name}`] = value },
     get: (name: string) => (name === 'connection'
       ? { requestRejection: (request: { headers: Record<string, unknown> }) => (request.headers['cookie'] === undefined ? (401 as const) : undefined) }
       : undefined),

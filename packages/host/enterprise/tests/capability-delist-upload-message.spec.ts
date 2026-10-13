@@ -32,9 +32,10 @@ import { join } from 'node:path'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { apply, type Config } from '../src/auth-gate.ts'
-import { uploadFailureText } from '../../../client/capability-center/src/client/CapabilityCenterPanel.tsx'
-import { en, setActiveLocale, t, zh } from '../../../client/capability-center/src/client/locales.ts'
+import { type Config } from '../src/auth-gate.ts'
+import { applyFullComposition as apply } from './helpers/apply-full-composition.ts'
+import { uploadFailureText } from '../../capability-center/src/client/CapabilityCenterPanel.tsx'
+import { en, setActiveLocale, t, zh } from '../../capability-center/src/client/locales.ts'
 import type { Session } from '../src/server-connector/config.ts'
 
 afterEach(() => { setActiveLocale('zh') })
@@ -115,7 +116,8 @@ function harness(session: Session | null): Harness {
   const gateway: string[] = []
   const ctx = {
     effect: (fn: () => unknown) => { fn() },
-    get: (name: string) => (name === 'connection' ? browserFence() : undefined),
+    provide: (name: string, value: unknown) => { (ctx as unknown as Record<string, unknown>)[`__svc_${name}`] = value },
+    get: (name: string) => ((ctx as unknown as Record<string, unknown>)[`__svc_${name}`] ?? ((name === 'connection' ? browserFence() : undefined))),
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     picoSession: {
       isRestored: () => true,
@@ -243,8 +245,9 @@ describe('uploadFailureText：判据只看错误码，其它码逐字沿用原�
 })
 
 describe('下架文案的字典与接线（两处都必须真的用上）', () => {
-  const PANEL = fileURLToPath(new URL('../../../client/capability-center/src/client/CapabilityCenterPanel.tsx', import.meta.url))
-  const AUTH_GATE = fileURLToPath(new URL('../src/auth-gate.ts', import.meta.url))
+  const PANEL = fileURLToPath(new URL('../../capability-center/src/client/CapabilityCenterPanel.tsx', import.meta.url))
+  // 2026-10-13（P0-b）：两条上传代理随技能路由搬到 capability-center。
+  const AUTH_GATE = fileURLToPath(new URL('../../capability-center/src/host/skill-routes.ts', import.meta.url))
 
   it('「已下架」说明文字说清内容冻结与重新上架（中英各一条）', () => {
     expect(zh['capability.delistedHint']).toContain('冻结')

@@ -283,8 +283,11 @@ describe('legacy agent preset composition contract', () => {
   it('mirrors the enterprise format constants instead of letting them drift', () => {
     // 两侧一致由**读对方源码**的对拍判据钉住：桌面包在构建上不能 import
     // `@picoaide/dsh-enterprise`（反向 import 会与 enterprise → desktop 成环）。
+    // 2026-10-13（P0-b）：这个模块随技能面搬到 `@picoaide/dsh-capability-center`
+    // （host + client 双面）。对拍判据的**对象没变**（还是那一份唯一实现），
+    // 只是它的路径跟着走 —— 桌面包照样不能 import 它（反向 import 会成环）。
     const enterprise = readFileSync(
-      join(REPO_ROOT, 'packages', 'host', 'enterprise', 'src', 'agent-preset-install.ts'),
+      join(REPO_ROOT, 'packages', 'host', 'capability-center', 'src', 'host', 'agent-preset-install.ts'),
       'utf8',
     )
     const exported = (name: string): string | undefined =>
