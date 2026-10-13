@@ -13,12 +13,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
 	"github.com/picoaide/picoaide/internal/wasmapp/applimits"
 	"github.com/picoaide/picoaide/internal/wasmapp/compile"
 	"github.com/picoaide/picoaide/internal/wasmapp/compile/testdata/wasmtest"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // 本文件是审计 S4-06 / CTRL-01 的回归护栏：**发布链路只有一个总预算**。

@@ -5,7 +5,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/tetratelabs/wazero"
 )
 

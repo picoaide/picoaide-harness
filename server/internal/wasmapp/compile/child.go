@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // childProcess 是常驻编译子进程的父侧句柄（单进程串行 ⇒ 一个句柄串行使用）。

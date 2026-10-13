@@ -225,7 +225,7 @@ test('平台技能的新源目录在服务端仓库里：镜像下发的那棵�
   // 这一份磁盘树 —— `server/Dockerfile` 还会从中性源把打包器**注入**技能目录
   // （`scripts/pack-assets.mjs`，唯一实现在 `server/demoapps/scripts/`，因为演示应用的
   // 打包器与随技能分发的必须是同一份实现）。注入关系登记在服务端
-  // `server/internal/wasmapp/skillseed/builtin_skills_test.go` 的 `skillFileInjections`。
+  // `server/internal/skillseed/builtin_skills_test.go` 的 `skillFileInjections`。
   // 所以本用例钉两半：① 磁盘树的文件齐备；② 每个注入文件的中性源存在、技能目录里
   // **没有**副本、且 Dockerfile 真的从那一个源 COPY 进了技能目录。
   assert.ok(existsSync(SERVER_SKILLS_DIR), `找不到服务端技能目录：${SERVER_SKILLS_DIR}（仓库布局变了？）`)

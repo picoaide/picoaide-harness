@@ -8,9 +8,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/abi"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // 本文件实现 §5.1 的 `db.define`（R32）：**唯一**的建表入口。

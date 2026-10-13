@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/abi"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // tableInfoRow 是 PRAGMA table_info 的一行（宿主内部使用）。

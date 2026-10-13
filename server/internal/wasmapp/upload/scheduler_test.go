@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
+	"github.com/picoaide/picoaide/internal/limits"
 )
 
 // 分片上传会话回收调度的回归用例（§4.2：会话有效期 30 分钟 ⇒ 过期即回收磁盘）。

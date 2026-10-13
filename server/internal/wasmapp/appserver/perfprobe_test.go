@@ -30,10 +30,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/wasmapp/appcfg"
 	"github.com/picoaide/picoaide/internal/wasmapp/assets"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // moduleSetForTest 取模块缓存里该版本的内存资源集（探针用；取不到即 Fatal）。

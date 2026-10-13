@@ -8,9 +8,9 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/wasmapp/capapi"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // ---- 变异验证(改回危险实现时哪条用例必红)----

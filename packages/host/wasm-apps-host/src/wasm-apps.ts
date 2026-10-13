@@ -75,7 +75,7 @@ export const WASM_JSON_CONTENT_TYPE = 'application/json; charset=utf-8'
 // 客户端侧上限常量（**唯一真源**）
 // ---------------------------------------------------------------------------
 //
-// ⚠️ 与 `server/internal/wasmapp/limits/limits.go` **同源**：客户端不能 import 服务端
+// ⚠️ 与 `server/internal/limits/limits.go` **同源**：客户端不能 import 服务端
 // 的 Go 包，所以这几个数值在两侧各有一份 —— **改一处必须改两处**。
 //
 // 为什么必须在客户端也留一份：这些数字决定客户端的**行为**（何时分片、超时设多长、

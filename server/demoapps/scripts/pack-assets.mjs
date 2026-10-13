@@ -13,10 +13,10 @@
  * 本脚本是这件事的**官方实现**，规则全部复用平台真源（不是"再定一套"）：
  *
  *   段名 = 包内逻辑路径        server/internal/wasmapp/api/publish.go 的 splitAssetSections / isLogicalAssetPath
- *   保留资源 `picoaide.app.json`  server/internal/wasmapp/limits/limits.go 的 AppConfigFileName（平台独占，模块里的同名段会被忽略）
+ *   保留资源 `picoaide.app.json`  server/internal/limits/limits.go 的 AppConfigFileName（平台独占，模块里的同名段会被忽略）
  *   工具链元数据段             server/internal/wasmapp/api/publish.go 的 toolchainSections（平台忽略，不会成为资源）
  *   路径规则（长度/段/字符）    server/internal/wasmapp/assets/assets.go 的 validateLogicalPath（MaxPathBytes / MaxSegmentBytes）
- *   自定义段总量上限           server/internal/wasmapp/limits/limits.go 的 SectionTotalMaxBytes
+ *   自定义段总量上限           server/internal/limits/limits.go 的 SectionTotalMaxBytes
  *   LEB128 读法                server/internal/wasmapp/wasmmod/leb.go 的 readU32 / readName
  *
  * 零外部依赖（只用 Node 内置能力）；**绝不就地覆盖输入**（必须给 `--out`）。

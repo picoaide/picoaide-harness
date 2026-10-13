@@ -17,6 +17,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/wasmapp/abi"
 	"github.com/picoaide/picoaide/internal/wasmapp/appcfg"
@@ -25,7 +26,6 @@ import (
 	"github.com/picoaide/picoaide/internal/wasmapp/assets"
 	"github.com/picoaide/picoaide/internal/wasmapp/compile"
 	"github.com/picoaide/picoaide/internal/wasmapp/hostcap"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/registry"
 	"github.com/picoaide/picoaide/internal/wasmapp/runtime"
 	"github.com/picoaide/picoaide/internal/wasmapp/wasmmod"

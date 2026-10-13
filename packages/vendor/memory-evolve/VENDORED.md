@@ -204,7 +204,7 @@ node <repo>/scripts/verify-inventories.mjs && node <repo>/scripts/verify-layout.
     `server/demoapps/scripts/pack-assets.mjs`（演示应用打包阶段与随技能分发**必须是同一份
     实现**，两份会漂），`server/Dockerfile` 的**最终阶段**从那同一个源 `COPY` 进
     `<PICOAI_SKILL_SEED_DIR>/app-builder/scripts/pack-assets.mjs`；注入关系登记在服务端
-    `server/internal/wasmapp/skillseed/builtin_skills_test.go` 的 `skillFileInjections`。
+    `server/internal/skillseed/builtin_skills_test.go` 的 `skillFileInjections`。
     技能源树里**不再有**该文件的副本。
   - 用例改名并扩成「镜像下发树 = 磁盘树 + 构建期注入文件」，新增**三类**断言：
     ① 磁盘树文件齐备；② 每个注入文件的中性源存在、且技能目录里**没有**副本；

@@ -552,7 +552,7 @@ var errNotRegularAsset = errors.New("channel: asset is not a regular file")
 // 审计 W5-01 实测:三个端点全 200 且 body 是渠道目录之外文件的内容)。
 //
 // 目录、符号链接、设备、FIFO 一律按"不存在"处理(404,与"未配置"同一个信封)。
-// 口径与本仓其它素材加载路径一致:wasmapp/skillseed、archiveutil、appdb、
+// 口径与本仓其它素材加载路径一致:internal/skillseed、archiveutil、appdb、
 // cachetrust 全都拒符号链接;构建期同判在 scripts/ci-channels.sh(lstatSync().isFile(),
 // 因为 `cp -a` 与 `docker COPY` 都不 dereference —— 只在服务端拦是"只拦一半")。
 //

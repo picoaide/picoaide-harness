@@ -21,10 +21,10 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/abi"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
 	"github.com/picoaide/picoaide/internal/wasmapp/capapi"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // ===== 假能力实现 =====

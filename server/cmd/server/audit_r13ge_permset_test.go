@@ -58,6 +58,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/picoaide/picoaide/internal/features"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
 )
@@ -69,7 +70,28 @@ import (
 // 新增一条没有入口的权限点会被要求在这里"签字"。
 //
 // 键 = 权限点字面量；值 = 为什么保留它（谁在用 / 计划中的入口）。
-var reservedPermissions = map[string]string{}
+//
+// P1 第二片（2026-10-14）：**可选模块关闭**时，它那一组权限点在本变体里确实没有
+// 入口（路由整片不编译）。这不是"死权限点"，而是"这个变体没有那一面" —— 因此按
+// 变体派生登记，理由写清是哪个模块被裁掉。反向的再反向（登记了却已有入口）仍然生效：
+// 模块编进来时这条登记会消失，若那时权限点仍无入口 ⇒ 照样红。
+var reservedPermissions = func() map[string]string {
+	m := map[string]string{}
+	if !features.HasSkills() {
+		m[serverauth.PermMarketRead] = "技能面（skills）未编入本变体：市场/共享技能/能力中心路由整片不注册；权限模型不随变体变（P1 第二片）"
+		m[serverauth.PermMarketWrite] = "同上（skills 未编入）"
+	}
+	if !features.HasSkills() && !features.HasApps() {
+		// `capability:read` 有**两个**入口面：技能面的 `/skills/builtin` 与应用面的
+		// `/admin/wasm-apps/*` 读端点 —— 只有**两面都不在**时它才没有入口。
+		m[serverauth.PermCapabilityRead] = "技能面（skills）与应用面（apps）都未编入本变体：能力中心读入口两面都不存在；权限模型不随变体变（P1 第二片）"
+	}
+	if !features.HasConnectors() {
+		m[serverauth.PermConnectorRead] = "连接器面（connectors）未编入本变体：连接器管理路由整片不注册；权限模型不随变体变（P1 第二片）"
+		m[serverauth.PermConnectorWrite] = "同上（connectors 未编入）"
+	}
+	return m
+}()
 
 // TestAuditR13GEDeclaredAdminPermsAreGrantedToSuperAdmin 是判据 A（缺失的那一向）。
 func TestAuditR13GEDeclaredAdminPermsAreGrantedToSuperAdmin(t *testing.T) {

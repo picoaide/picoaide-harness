@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // 本文件用**真文件系统**钉住分片上传会话的全部边界（§4.2）。

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
+	"github.com/picoaide/picoaide/internal/limits"
 )
 
 // 本文件是**编译缓存目录被外部删除/改名**时的执行侧自愈（审计 R5-A-2，P1）。

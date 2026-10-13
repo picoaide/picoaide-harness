@@ -5,8 +5,8 @@
 //
 // 生成物（五份，全部提交进仓库）：
 //
-//	server/internal/wasmapp/limits/limits.json   —— limits.Doc() 的 JSON（AI/工具消费）
-//	server/internal/wasmapp/limits/limits.md     —— 给人看的 Markdown 表
+//	server/internal/limits/limits.json   —— limits.Doc() 的 JSON（AI/工具消费）
+//	server/internal/limits/limits.md     —— 给人看的 Markdown 表
 //	server/internal/wasmapp/appcfg/appcfg.json   —— appcfg.Doc() 的 JSON（字段规格单一真源）
 //	<server/skills/app-builder/references/limits.md>
 //	                                            —— 内置技能里的同一份上限表（逐字节相同）
@@ -15,7 +15,7 @@
 //
 // 用法：
 //
-//	cd server && go generate ./internal/wasmapp/limits     # 重新生成（directive 在 limits_gen_test.go）
+//	cd server && go generate ./internal/limits     # 重新生成（directive 在 limits_gen_test.go）
 //	cd server && go run ./cmd/picoaide-limits-gen          # 等价：写文件
 //	cd server && go run ./cmd/picoaide-limits-gen -check   # 只比对（CI 门禁；不一致非零退出）
 //
@@ -38,8 +38,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/appcfg"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // modulePath 是服务端模块的 module 行（用于确认"向上找到的是本仓的 server/"，
@@ -48,8 +48,8 @@ const modulePath = "github.com/picoaide/picoaide"
 
 // 生成物相对**模块根**（server/）的路径。
 const (
-	jsonRelPath = "internal/wasmapp/limits/limits.json"
-	mdRelPath   = "internal/wasmapp/limits/limits.md"
+	jsonRelPath = "internal/limits/limits.json"
+	mdRelPath   = "internal/limits/limits.md"
 	// appcfgJSONRelPath 是字段规格的机器可读产物（TS 侧工具参数/表单预校验、
 	// SKILL 生成、跨语言对拍的输入）。
 	appcfgJSONRelPath = "internal/wasmapp/appcfg/appcfg.json"
@@ -65,10 +65,10 @@ const skillLimitsRelPath = "server/skills/app-builder/references/limits.md"
 const skillAppConfigRelPath = "server/skills/app-builder/references/app-config.md"
 
 // generatedNote 是每个生成物都必须带的那句"不要手改"。
-const generatedNote = "本文件由 `go generate ./internal/wasmapp/limits` 生成，不要手改。"
+const generatedNote = "本文件由 `go generate ./internal/limits` 生成，不要手改。"
 
 // appcfgGeneratedNote 是字段表生成物的"不要手改"（并指明唯一的真源文件）。
-const appcfgGeneratedNote = "本文件由 `go generate ./internal/wasmapp/limits` 生成，不要手改；" +
+const appcfgGeneratedNote = "本文件由 `go generate ./internal/limits` 生成，不要手改；" +
 	"单一真源是 `server/internal/wasmapp/appcfg/appcfgspec.go`。"
 
 func main() {
@@ -139,7 +139,7 @@ func run(check bool, rootFlag string) error {
 	}
 
 	if len(failed) > 0 {
-		return fmt.Errorf("生成物与源码不一致：\n%s\n跑 `go generate ./internal/wasmapp/limits` 重新生成", strings.Join(failed, "\n"))
+		return fmt.Errorf("生成物与源码不一致：\n%s\n跑 `go generate ./internal/limits` 重新生成", strings.Join(failed, "\n"))
 	}
 	if check {
 		fmt.Printf("limits 生成物一致（%d 条目）；appcfg 生成物一致（配置 %d 字段 / 发布 %d 字段）\n",
@@ -205,7 +205,7 @@ func renderMarkdown() []byte {
 	var b strings.Builder
 	b.WriteString("# WASM 应用平台上限表\n\n")
 	b.WriteString(generatedNote + "\n\n")
-	b.WriteString("单一真源：`server/internal/wasmapp/limits/limits.go`（含 `limitsspec.go` 的表定义）。")
+	b.WriteString("单一真源：`server/internal/limits/limits.go`（含 `limitsspec.go` 的表定义）。")
 	b.WriteString("改任何上限数值请改源码后重新生成——本表里的每个数字都必须与代码一致。\n\n")
 	b.WriteString("| 键 | 值 | 单位 | 章节 | 名称 | 说明 |\n")
 	b.WriteString("| --- | --- | --- | --- | --- | --- |\n")

@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/abi"
 	"github.com/picoaide/picoaide/internal/wasmapp/appdb"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // 本文件是审计 R1-rt-5 的回归护栏：**被放弃的宿主调用不能在句柄被池回收之后把 appdb 复活**。

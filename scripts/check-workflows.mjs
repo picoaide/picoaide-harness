@@ -3452,6 +3452,24 @@ const PINNED_STEP_POLICIES = [
       return null
     },
   },
+  {
+    // 2026-10-14 独立审计 P1-4（P1 第三片）：服务端构建变体矩阵。
+    id: 'ci-check-go-build-tags',
+    label: '`node scripts/check-go-build-tags.mjs --expect-cut`（服务端构建变体矩阵）',
+    // 识别口径 = **server job 里命令位真的执行那个脚本**（与 `REQUIRED_CI_STEPS` 的
+    // `job: 'server'` 同源；`[SK-23]` 的合成样本用别的 job 名 ⇒ 不会被这条策略连带判红）。
+    match: (script, item) => item?.jobId === 'server'
+      && executedCommands(script).some(entry => entry.command === 'node'
+        && (entry.argv[0] ?? '') === 'scripts/check-go-build-tags.mjs'),
+    ifPolicy: 'never',
+    // 载荷 = 必须逐字带 `--expect-cut`。这条断言是"关掉的模块包树必须真的消失"，
+    // **默认只报告**（不拦退出码）：没有 `--expect-cut` 时这一步在"裁剪失败"下照样
+    // 退出 0，于是它从判据退化成日志 —— 而存在性对账（[SK-23]）只问"命令还在不在"，
+    // 看不见这个降级（2026-10-14 P1-4 的现场正是"判据在、但不在任何自动化里"）。
+    payload: script => (/--expect-cut(\s|$)/u.test(script) ? null
+      : '它没有带 `--expect-cut` —— 裁剪断言会退化成"只报告"，'
+        + '关掉的模块包树还在依赖图里时这一步仍退出 0'),
+  },
 ]
 /**
  * `if:` 允许形态的**登记值**。
@@ -3506,6 +3524,11 @@ const CI_JUDGEMENT_ARGV_PREFIXES = [
   // `REQUIRED_CI_STEPS` 里登记的那条会以"登记了却不存在"报红，而反向的"未登记判据步骤"
   // 也永远不会命中它（两张表漂移）。
   ['yarn', 'workspace', 'dsh-plugin-desktop', 'test'],
+  // 2026-10-14 P1 第三片：服务端构建变体矩阵（8 个可选模块子集各 build + vet 一次，
+  // 并断言 `go list -deps ./cmd/server` 里"关掉的模块包树不在"）。与上一条同理 ——
+  // 它是 `node scripts/<脚本>` 形态，不在 `make check` / `go test` 这些既有词条里，
+  // 不进词表就等于"新加的判据步骤"这个方向永远看不见它。
+  ['node', 'scripts/check-go-build-tags.mjs'],
 ]
 /**
  * **[SK-23] 必须存在的判据步骤：登记表 + 双向对账**（R21 fix-6 / E-03）。
@@ -3588,6 +3611,17 @@ const REQUIRED_CI_STEPS = [
       + ' job 当时只打包（每条命令都带 `--no-gates`）⇒ 它们在 CI 上**从未执行**，实测 5 skipped、'
       + '退出码 0 —— 与"通过"不可区分。删掉这一步 / 给它加 `if: false` / 换掉 spec 路径，都会让'
       + '"帮手真的能替换应用"重新变成没人看守的承诺',
+  },
+  {
+    file: 'ci.yml',
+    job: 'server',
+    argv: ['node', 'scripts/check-go-build-tags.mjs'],
+    pinnedId: 'ci-check-go-build-tags',
+    label: '`node scripts/check-go-build-tags.mjs --expect-cut`（服务端构建变体矩阵：8 个可选模块子集）',
+    why: '2026-10-14 独立审计 P1-4：这是**唯一**在"包树真被裁掉"这一层判"关掉模块"的判据 ——'
+      + ' 同 job 的 `go vet` / `go test` 都只跑发布态组合（全开），所以减配变体的编译面在别处'
+      + '没有任何自动化。删掉这一步（或去掉 `--expect-cut` 让它退化成"只报告"、退出码恒 0）⇒'
+      + ' "支持任意模块组合"重新变成没人看守的承诺，而 server job 照旧全绿',
   },
 ]
 

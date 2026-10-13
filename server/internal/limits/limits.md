@@ -1,8 +1,8 @@
 # WASM 应用平台上限表
 
-本文件由 `go generate ./internal/wasmapp/limits` 生成，不要手改。
+本文件由 `go generate ./internal/limits` 生成，不要手改。
 
-单一真源：`server/internal/wasmapp/limits/limits.go`（含 `limitsspec.go` 的表定义）。改任何上限数值请改源码后重新生成——本表里的每个数字都必须与代码一致。
+单一真源：`server/internal/limits/limits.go`（含 `limitsspec.go` 的表定义）。改任何上限数值请改源码后重新生成——本表里的每个数字都必须与代码一致。
 
 | 键 | 值 | 单位 | 章节 | 名称 | 说明 |
 | --- | --- | --- | --- | --- | --- |

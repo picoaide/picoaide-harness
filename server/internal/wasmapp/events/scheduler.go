@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
+	"github.com/picoaide/picoaide/internal/limits"
 )
 
 // DefaultCleanupInterval 是调用事件保留期清理的检查间隔（1 小时）。

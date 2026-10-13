@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/wasmapp/abi"
 	"github.com/picoaide/picoaide/internal/wasmapp/appcfg"
@@ -16,7 +17,6 @@ import (
 	"github.com/picoaide/picoaide/internal/wasmapp/assets"
 	"github.com/picoaide/picoaide/internal/wasmapp/edge"
 	"github.com/picoaide/picoaide/internal/wasmapp/hostcap"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/logbuf"
 	"github.com/picoaide/picoaide/internal/wasmapp/registry"
 	"github.com/picoaide/picoaide/internal/wasmapp/runtime"

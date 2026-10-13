@@ -2,7 +2,7 @@
  * 平台内置技能（服务端下发、客户端按需安装）的**共享事实**。
  *
  * 用户要求：「skill 应该是内置到服务端，客户端可以按需安装」。链路的三个落点：
- *   - 服务端：`server/internal/wasmapp/skillseed` 把镜像内 `/opt/picoaide/skills`
+ *   - 服务端：`server/internal/skillseed` 把镜像内 `/opt/picoaide/skills`
  *     打包下发（`GET /api/client/v2/skills/builtin[/:name/archive]`）；
  *   - 客户端安装：`auth-gate.ts` 的 `/api/pico/skills/builtin*` 两条分支 →
  *     `installSkillArchive()` → `<dshHome>/skills/<name>`（复用市场那条链路）；

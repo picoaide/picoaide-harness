@@ -8,23 +8,61 @@
   },
   "deletionSurface": {
     "absentPaths": [
-      { "path": "server/internal/wasmapp/session", "anchor": "internal/wasmapp/session/**", "reason": "§8.4 整包：旧换票/应用会话包" },
-      { "path": "server/internal/wasmapp/anonlimit", "anchor": "internal/wasmapp/anonlimit/**", "reason": "§8.4 整包：匿名限流（新模型不存在匿名面）" },
-      { "path": "server/internal/wasmapp/aichat", "anchor": "internal/wasmapp/aichat/**", "reason": "§8.4/§21.3 整包：服务端 ai.chat（改由客户端 AI loop 提供）" },
-      { "path": "server/internal/wasmapp/edge/hostgate.go", "anchor": "HostGate", "reason": "§8.4 边界铁律：主机门控（HostGate/MatchHost/IsProbePath/CheckOrigin/SelfOrigin）整体删除" },
-      { "path": "server/internal/wasmapp/edge/subdomain.go", "anchor": "MatchHost", "reason": "§8.4 边界铁律：应用子域匹配" },
-      { "path": "server/internal/wasmapp/edge/hostgate_test.go", "anchor": "hostgate_test.go", "reason": "§8.4 边界铁律：门控测试随实现同批删除" },
-      { "path": "server/internal/wasmapp/edge/subdomain_test.go", "anchor": "subdomain_test.go", "reason": "§8.4 边界铁律：子域测试随实现同批删除" },
-      { "path": "server/internal/wasmapp/appserver/clientip.go", "anchor": "clientip.go", "reason": "§8.4 appserver 落点：匿名用的客户端 IP 判定（随匿名面删除）" }
+      {
+        "path": "server/internal/wasmapp/session",
+        "anchor": "internal/wasmapp/session/**",
+        "reason": "§8.4 整包：旧换票/应用会话包"
+      },
+      {
+        "path": "server/internal/wasmapp/anonlimit",
+        "anchor": "internal/wasmapp/anonlimit/**",
+        "reason": "§8.4 整包：匿名限流（新模型不存在匿名面）"
+      },
+      {
+        "path": "server/internal/wasmapp/aichat",
+        "anchor": "internal/wasmapp/aichat/**",
+        "reason": "§8.4/§21.3 整包：服务端 ai.chat（改由客户端 AI loop 提供）"
+      },
+      {
+        "path": "server/internal/wasmapp/edge/hostgate.go",
+        "anchor": "HostGate",
+        "reason": "§8.4 边界铁律：主机门控（HostGate/MatchHost/IsProbePath/CheckOrigin/SelfOrigin）整体删除"
+      },
+      {
+        "path": "server/internal/wasmapp/edge/subdomain.go",
+        "anchor": "MatchHost",
+        "reason": "§8.4 边界铁律：应用子域匹配"
+      },
+      {
+        "path": "server/internal/wasmapp/edge/hostgate_test.go",
+        "anchor": "hostgate_test.go",
+        "reason": "§8.4 边界铁律：门控测试随实现同批删除"
+      },
+      {
+        "path": "server/internal/wasmapp/edge/subdomain_test.go",
+        "anchor": "subdomain_test.go",
+        "reason": "§8.4 边界铁律：子域测试随实现同批删除"
+      },
+      {
+        "path": "server/internal/wasmapp/appserver/clientip.go",
+        "anchor": "clientip.go",
+        "reason": "§8.4 appserver 落点：匿名用的客户端 IP 判定（随匿名面删除）"
+      }
     ],
     "absentGlobs": [
-      { "glob": "server/cmd/server/wasmapp_domain*.go", "anchor": "wasmapp_domain*.go", "reason": "§8.4 cmd/server 落点：应用基域配置面" }
+      {
+        "glob": "server/cmd/server/wasmapp_domain*.go",
+        "anchor": "wasmapp_domain*.go",
+        "reason": "§8.4 cmd/server 落点：应用基域配置面"
+      }
     ]
   },
   "packageInventory": {
     "root": "server/internal/wasmapp",
-    "why": "W-1a 的修法：把整棵树移出扫描面（mv server/internal/wasmapp server/wasmapp-legacy）曾让『删除面不存在』4 条 PASS 真空成立、五桶计数同步缩水。包清单双向断言：登记了但不在 = 树被搬走/包被删；在但没登记 = 新包（含换个名字重新实现同一能力），两者都必须红。",
-    "excludeDirNames": ["testdata"],
+    "why": "W-1a 的修法：把整棵树移出扫描面（mv server/internal/wasmapp server/wasmapp-legacy）曾让『删除面不存在』4 条 PASS 真空成立、五桶计数同步缩水。包清单双向断言：登记了但不在 = 树被搬走/包被删；在但没登记 = 新包（含换个名字重新实现同一能力），两者都必须红。 2026-10-14（P1 第二片）：`limits` 与 `skillseed` 两个包**移出**本树 —— `limits`（上限数值唯一真源）被基础面的 `internal/skillmanifest` 与 `cmd/server` 的 HTTP 超时直接依赖，`skillseed`（平台内置技能下发面）服务的是 `skills` 模块，两者都不能随 `apps` 变体被裁掉。现落在 `server/internal/limits` 与 `server/internal/skillseed`，随模块的包边界见 docs/decisions/2026-10-14-server-build-tags.md §2。",
+    "excludeDirNames": [
+      "testdata"
+    ],
     "packages": [
       "abi",
       "api",
@@ -43,7 +81,6 @@
       "edge",
       "events",
       "hostcap",
-      "limits",
       "logbuf",
       "memprofile",
       "opens",
@@ -55,7 +92,6 @@
       "refapp/wasiprobe",
       "registry",
       "runtime",
-      "skillseed",
       "upload",
       "wasmmod"
     ]
@@ -73,11 +109,26 @@
   "budgets": {
     "schema": "wasm-residue-budgets/1",
     "why": "W-3 的修法：上限此前直接取自环境变量（WASM_RESIDUE_CONTRACT_BUDGET=999 能把 B=36>34 的红翻成绿）。现在上限的唯一真源是本文件；环境变量只允许**收紧**（更小的正整数），取值非法或大于本文件的值一律 fail-loud。放宽上限 = 改这里的数并写理由 —— 一个必须进 diff、可被评审的有意识动作。",
-    "contract": { "value": 39, "reason": "B 桶（契约型保留）实测构成：client 13 + webadmin 7 + appcfg.go/inherit.go 14 + **legacy-config 契约模块 5**（2026-09-25 R15C-R-03：`server/cmd/server/legacy_config.go` 的已废除键名逐字表 —— 两条键 × 声明处 + 清理命令各 1 处；该文件按『拒绝/忽略清单』口径整文件声明为契约面，见 CONTRACT_MODULES 的 legacy-config 条目与其独立预算 budgets.contractModules） = 39；零余量（多一条即红）" },
-    "ann": { "value": 66, "reason": "ANN 桶（带删除/废弃标注的注释）实测 66（原 65；2026-09-23 把 §8.4 明列的已删符号 `CheckOrigin` 补进残留词汇表 ⇒ 注释里的提及 +1，留 1 条余量到 66）。**不需要**再上调：2026-09-25 R15C-R-03 的 `server/cmd/server/legacy_config.go` 表头注释虽然也是「已废除」标注，但该文件已按『拒绝/忽略清单』整文件声明为**契约模块**（bucketOf 里契约模块优先于 ANN）⇒ 那一条计入 B 而不是 ANN（实测 ANN 仍为 66）" },
-    "whitelisted": { "value": 520, "reason": "C 桶（夹具/历史文档/不可变迁移）实测 489（479 + 原 D 桶前缀豁免的 5 处随包技能文档 + CheckOrigin 词汇 +5）。C 的**主判据是资格规则**（测试文件形态 / 文档 / 不可变迁移 / testdata 夹具），上限只拦『成批塞入文档目录』；留 ~6% 余量给记录面的正常增长，避免把别人的文档提交打成假红" },
-    "derived": { "value": 0, "reason": "D 桶（纯生成物）不再有整目录前缀豁免：只有 isGenerated 命中的产物才算，且必须逐文件登记（本文件 capabilityAllowlist 同级的 derivedAllowance）。当前实测 0 处 ⇒ 上限 0" },
-    "contractModules": { "appcfg": 14, "legacy-config": 5 },
+    "contract": {
+      "value": 39,
+      "reason": "B 桶（契约型保留）实测构成：client 13 + webadmin 7 + appcfg.go/inherit.go 14 + **legacy-config 契约模块 5**（2026-09-25 R15C-R-03：`server/cmd/server/legacy_config.go` 的已废除键名逐字表 —— 两条键 × 声明处 + 清理命令各 1 处；该文件按『拒绝/忽略清单』口径整文件声明为契约面，见 CONTRACT_MODULES 的 legacy-config 条目与其独立预算 budgets.contractModules） = 39；零余量（多一条即红）"
+    },
+    "ann": {
+      "value": 66,
+      "reason": "ANN 桶（带删除/废弃标注的注释）实测 66（原 65；2026-09-23 把 §8.4 明列的已删符号 `CheckOrigin` 补进残留词汇表 ⇒ 注释里的提及 +1，留 1 条余量到 66）。**不需要**再上调：2026-09-25 R15C-R-03 的 `server/cmd/server/legacy_config.go` 表头注释虽然也是「已废除」标注，但该文件已按『拒绝/忽略清单』整文件声明为**契约模块**（bucketOf 里契约模块优先于 ANN）⇒ 那一条计入 B 而不是 ANN（实测 ANN 仍为 66）"
+    },
+    "whitelisted": {
+      "value": 520,
+      "reason": "C 桶（夹具/历史文档/不可变迁移）实测 489（479 + 原 D 桶前缀豁免的 5 处随包技能文档 + CheckOrigin 词汇 +5）。C 的**主判据是资格规则**（测试文件形态 / 文档 / 不可变迁移 / testdata 夹具），上限只拦『成批塞入文档目录』；留 ~6% 余量给记录面的正常增长，避免把别人的文档提交打成假红"
+    },
+    "derived": {
+      "value": 0,
+      "reason": "D 桶（纯生成物）不再有整目录前缀豁免：只有 isGenerated 命中的产物才算，且必须逐文件登记（本文件 capabilityAllowlist 同级的 derivedAllowance）。当前实测 0 处 ⇒ 上限 0"
+    },
+    "contractModules": {
+      "appcfg": 14,
+      "legacy-config": 5
+    },
     "capabilityAllowlist": 1
   },
   "derivedAllowance": {

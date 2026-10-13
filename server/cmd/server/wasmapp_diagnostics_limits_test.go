@@ -1,3 +1,8 @@
+//go:build apps
+
+// 本文件判的是 `apps` 模块内部的装配与运行期行为（P1 第二片，2026-10-14）：
+// 它引用 `internal/wasmapp/**` 的类型与 `cmd/server/wasmapp*.go` 里的装配接缝，
+// 关闭 apps 时那些文件整份不编译 ⇒ 判据按模块分文件。断言一条都没有删。
 package main
 
 import (

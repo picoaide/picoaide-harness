@@ -8,9 +8,9 @@ import (
 	"math"
 	"time"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/abi"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // 本文件实现 §5.1 的 `db.query`（单条 SELECT，只读连接）与 `db.exec`（单条写语句）。

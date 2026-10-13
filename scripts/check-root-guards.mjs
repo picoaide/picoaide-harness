@@ -171,7 +171,12 @@ const REGISTERED_GUARD_ENTRIES = new Map([
   // （取值来自 `--print-digests` 的复算结果，且必须取**工作树**=提交后 HEAD 那份，
   // 由 `check-guard-parser-integrity.mjs` 与 `verify-check-workspaces.mjs` 各自独立复算对拍）。
   ['check:layout', { script: 'node scripts/verify-layout.mjs', argvTail: [], digest: 'c7851ab69aab2e137758d69dfe56c777627ae404dd5a36b619f0d89cfd4bdc1d' }],
-  ['check:workflows', { script: 'node scripts/check-workflows.mjs', argvTail: [], digest: '6135549c5839a56cd2b51aa36801cbde4b474c4d5fbc2164c40d0783aa27c457' }],
+  // 2026-10-14 P1 第三片：`check-workflows.mjs` 增加了服务端构建变体矩阵一步的登记
+  // （判据词表 `CI_JUDGEMENT_ARGV_PREFIXES` + `REQUIRED_CI_STEPS` + `PINNED_STEP_POLICIES`
+  // 的 `ci-check-go-build-tags`，理由：该判据此前**不在任何自动化里**，只在人手敲
+  // `make -C server check-tags` 时生效 —— 见 docs/decisions/2026-10-14-server-build-tags.md §11-1）。
+  // 摘要按本表上方的纪律在同一个改动里同步（取值来自 `--print-digests` 的复算结果）。
+  ['check:workflows', { script: 'node scripts/check-workflows.mjs', argvTail: [], digest: 'c2db38d198fd43b703851ef944da52fb6c17de3b94f679ab6268cf8e8b1c2f6e' }],
   ['check:ci-scripts', { script: 'node scripts/verify-ci-scripts.mjs', argvTail: [], digest: '1251b7fcfaf871b2369a311224f1b7b177fd7327a6fa1c356a32c5ba7509efb1' }],
   ['check:patch-resolutions', { script: 'node scripts/verify-patch-resolutions.mjs', argvTail: [], digest: '6dcde2281311235a57722608d91e6a1fa59734411ad65cda76ea2bdc43145c83' }],
   ['check:patch-pin', { script: 'node scripts/check-patch-pin.mjs', argvTail: [], digest: 'a8fe5b45df5dfadd7a87332b31f9e14c4a6722a41f21cf0f0d9afa6450a3ba84' }],

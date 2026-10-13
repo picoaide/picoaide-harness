@@ -26,8 +26,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // fakeCache 是可变的编译器水位夹具（含**生效**上限与调用计数）。

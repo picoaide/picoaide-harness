@@ -169,7 +169,7 @@ type JSONDoc struct {
 
 // Doc 返回机器可读文档。
 func Doc() JSONDoc {
-	return JSONDoc{Version: 1, Source: "server/internal/wasmapp/limits/limits.go", Items: Table()}
+	return JSONDoc{Version: 1, Source: "server/internal/limits/limits.go", Items: Table()}
 }
 
 func itoa(v int) string { return fmt.Sprintf("%d", v) }

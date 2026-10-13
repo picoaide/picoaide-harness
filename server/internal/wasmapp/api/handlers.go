@@ -27,6 +27,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
@@ -34,7 +35,6 @@ import (
 	"github.com/picoaide/picoaide/internal/wasmapp/appproof"
 	"github.com/picoaide/picoaide/internal/wasmapp/compile"
 	"github.com/picoaide/picoaide/internal/wasmapp/events"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/readyz"
 	"github.com/picoaide/picoaide/internal/wasmapp/registry"
 )

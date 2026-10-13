@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
+	"github.com/picoaide/picoaide/internal/limits"
 )
 
 // 本文件是**编译子进程 env 白名单**的验收（§4.3「参数 / 环境变量」+ R31）。

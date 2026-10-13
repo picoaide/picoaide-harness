@@ -41,10 +41,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/picoaide/picoaide/internal/llmgateway"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
-	"github.com/picoaide/picoaide/internal/wasmapp/skillseed"
+	"github.com/picoaide/picoaide/internal/skillseed"
 	"github.com/picoaide/picoaide/webadmin"
 )
 
@@ -343,30 +342,32 @@ var sweepNonAPIRoutes = map[string]sweepExpect{
 // 这两族路由在扫描里逐条都是 JSON 401 —— 若不写清，读者会以为"扫描没覆盖到"。
 var sweepAuthGatedNonJSONSurfaces = map[string]string{
 	// application/gzip（archiveutil 打包的技能/智能体归档）
-	"GET /api/client/v2/skills/builtin/:name/archive":         "内置技能归档（application/gzip）",
-	"GET /api/client/v2/marketplace/skills/:name/archive":     "商城技能归档（application/gzip）",
-	"GET /api/client/v2/agent-presets/:name/archive":          "智能体预设归档（application/gzip）",
-	"GET /api/client/v2/agent-presets/:name/:version/archive": "智能体预设指定版本归档（application/gzip）",
-	"GET /api/client/v2/shared-skills/:name/:version/archive": "组织共享技能归档（application/gzip）",
-	"POST /api/server/admin/skills/:name/archive":             "管理端技能归档（application/gzip，重新打包）",
-	"GET /api/server/admin/skills/:name/file":                 "管理端技能单文件（原样字节）",
-	"GET /api/server/admin/agents/:name/file":                 "管理端智能体单文件（原样字节）",
 	// 2026-09-23：归档预览弹层「文件过大 → 下载归档」的落点（链接 = 预览基路径
 	// + /archive）。市场命名空间此前只有 POST …/archive（上传新版）⇒ 市场行点下去
 	// 404；组织行一直有（下面 shared-skills / agent-presets 那几条）。
 	// 正向举证在 admin_archive_evidence_test.go（带真管理会话断言原样 zip 字节）。
-	"GET /api/server/admin/skills/:name/archive":                 "管理端市场技能归档（application/gzip；zip 归档时为 application/zip 原样字节）",
-	"GET /api/server/admin/agents/:name/archive":                 "管理端市场智能体归档（application/gzip；zip 归档时为 application/zip 原样字节）",
-	"GET /api/server/admin/agent-presets/:name/archive":          "管理端预设归档（application/gzip）",
-	"GET /api/server/admin/agent-presets/:name/:version/archive": "管理端预设指定版本归档（application/gzip）",
-	"GET /api/server/admin/agent-presets/:name/:version/file":    "管理端预设单文件（原样字节）",
-	"GET /api/server/admin/shared-skills/:name/:version/archive": "管理端组织共享技能归档（application/gzip）",
-	"GET /api/server/admin/shared-skills/:name/:version/file":    "管理端组织共享技能单文件（原样字节）",
 	// text/event-stream（上游流式转发）
 	"POST /v1/chat/completions": "OpenAI 兼容流式对话（stream=true ⇒ text/event-stream）",
 	"POST /v1/messages":         "Anthropic 兼容流式对话（stream=true ⇒ text/event-stream）",
 	"POST /chat/completions":    "官方原生无前缀变体（同上）",
 	"POST /messages":            "官方原生无前缀变体（同上）",
+}
+
+// sweepAllAuthGatedNonJSONSurfaces 是基础面例外表与**按变体提供**的模块例外表的并集
+// （P1 第二片，2026-10-14）。
+//
+// 为什么要并集而不是各判各的：判据"登记了就必须真的被扫到"必须对**整张表**成立 ——
+// 分成两次循环会让"模块表里的条目在另一变体里 never 命中"重新变成静默事实。
+// 并集后这条判据在八种组合下逐字同一份实现。
+func sweepAllAuthGatedNonJSONSurfaces() map[string]string {
+	all := make(map[string]string, len(sweepAuthGatedNonJSONSurfaces)+len(sweepModuleAuthGatedNonJSONSurfaces))
+	for k, v := range sweepAuthGatedNonJSONSurfaces {
+		all[k] = v
+	}
+	for k, v := range sweepModuleAuthGatedNonJSONSurfaces {
+		all[k] = v
+	}
+	return all
 }
 
 // sweepAllowed5xx 是允许的 5xx 白名单（声明式，每条写清理由）。
@@ -539,7 +540,7 @@ func TestAPISweepAllRoutesContract(t *testing.T) {
 	// ---- E. 汇总 ----
 	t.Logf("扫描汇总：路由 %d 条 + NoRoute 产品面 %d 条；JSON 契约断言 %d 条；HTML 例外命中 %d 条；"+
 		"认证闸后非 JSON 例外登记 %d 条；未预期 5xx %d 条",
-		len(hits), noRouteHits, jsonAsserted, htmlHits, len(sweepAuthGatedNonJSONSurfaces), len(unexpected5xx))
+		len(hits), noRouteHits, jsonAsserted, htmlHits, len(sweepAllAuthGatedNonJSONSurfaces()), len(unexpected5xx))
 
 	if len(problems) > 0 {
 		sort.Strings(problems)
@@ -628,7 +629,7 @@ func sweepCheckExceptionTables(routes gin.RoutesInfo, hits []sweepHit) []string 
 		registered[rt.Method+" "+rt.Path] = true
 	}
 	// 认证闸后的非 JSON 面：既要登记，也必须真的在扫描里（看到的是 JSON 401）。
-	for route, why := range sweepAuthGatedNonJSONSurfaces {
+	for route, why := range sweepAllAuthGatedNonJSONSurfaces() {
 		if !swept[route] {
 			problems = append(problems, fmt.Sprintf(
 				"例外登记表里的 %s（%s）没有出现在扫描里：登记了却 never 命中 ⇒ 表在说谎", route, why))
@@ -724,7 +725,9 @@ func sweepContainsInt(set []int, v int) bool {
 // 内容类型与正向举证一致（删掉/改错登记 ⇒ 举证用例红，例外表因此是载荷而非注释）。
 func assertDeclaredNonJSON(t *testing.T, route, wantContentType string) {
 	t.Helper()
-	why, ok := sweepAuthGatedNonJSONSurfaces[route]
+	// 查**并集**（基础面 + 按变体提供的模块面）：模块自有的例外在别的变体里不存在，
+	// 但"登记了就必须能被正向举证"这件事对整张表成立（P1 第二片，2026-10-14）。
+	why, ok := sweepAllAuthGatedNonJSONSurfaces()[route]
 	if !ok {
 		t.Fatalf("%s 未登记在 sweepAuthGatedNonJSONSurfaces：非 JSON 例外必须显式登记"+
 			"（它未认证时是 JSON 401，扫描里看不出真实内容类型）", route)
@@ -827,110 +830,3 @@ func sweepBuiltinSkillsDir(t *testing.T) (dir string, name string) {
 // 为什么需要它：扫描是未认证的，BearerAuth 闸先于内容类型生效 ⇒ 归档路由在扫描里
 // 逐条都是 JSON 401，看不到真实内容类型。这里带真令牌打一次内置技能归档，断言它
 // 确实是 application/gzip + 真 gzip 字节。
-func TestAPISweepExceptionEvidenceBinaryArchive(t *testing.T) {
-	db := requireRealDB(t)
-
-	// 内置技能目录：优先用仓库真实资产（server/skills = 镜像 /opt/picoaide/skills
-	// 的源头），没有就自建夹具（见 sweepBuiltinSkillsDir 的注释：本用例举证的是
-	// **内容类型契约**，不该因为无关分支的资产没提交而红）。
-	skillsDir, skillName := sweepBuiltinSkillsDir(t)
-	prevDir := skillseed.Dir
-	skillseed.Dir = skillsDir
-	t.Cleanup(func() { skillseed.Dir = prevDir })
-
-	// 例外表是**载荷**：这里正向举证的路由必须登记在案（删掉登记 ⇒ 本用例红），
-	// 否则"归档是 gzip 例外"这件事可以被人从表里悄悄删掉而没人发现。
-	assertDeclaredNonJSON(t, "GET /api/client/v2/skills/builtin/:name/archive", "application/gzip")
-
-	sweepSilenceAccessLog(t)
-	r := sweepEngine(t, db)
-	token := sweepIssueToken(t, db, "sweep-archive")
-
-	h := sweepDoAuthed(r, "GET", "/api/client/v2/skills/builtin/:name/archive",
-		"/api/client/v2/skills/builtin/"+skillName+"/archive", token)
-	if h.status != 200 {
-		t.Fatalf("%s：status=%d want 200；content-type=%q body=%s",
-			h.label(), h.status, h.ct, h.bodySummary())
-	}
-	if !strings.HasPrefix(h.ct, "application/gzip") {
-		t.Fatalf("%s：content-type=%q want application/gzip（例外登记里的二进制面）",
-			h.label(), h.ct)
-	}
-	if len(h.body) < 3 || h.body[0] != 0x1f || h.body[1] != 0x8b {
-		t.Fatalf("%s：body 不是 gzip 字节流（前 3 字节 % x）", h.label(), h.body[:min(3, len(h.body))])
-	}
-	if chk := h.header.Get("X-Skill-Checksum"); chk == "" {
-		t.Errorf("%s：缺少 X-Skill-Checksum（客户端靠它做 sha256 对照）", h.label())
-	}
-	t.Logf("例外正向举证：%s ⇒ %d %s（%d 字节 gzip，X-Skill-Checksum=%s…）",
-		h.label(), h.status, h.ct, len(h.body), h.header.Get("X-Skill-Checksum")[:8])
-}
-
-// TestAPISweepExceptionEvidenceSSE：非 JSON 例外「SSE（text/event-stream）」
-// 的**正向举证**。
-//
-// 配置一个指向本进程内假上游的 provider + model，带真令牌发一次 stream=true 的
-// 对话请求，断言响应确实是 text/event-stream（上游字节被原样转发）。
-func TestAPISweepExceptionEvidenceSSE(t *testing.T) {
-	db := requireRealDB(t)
-
-	// 假上游：按 OpenAI 流式形态吐两帧 + [DONE]。
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n")
-		fmt.Fprint(w, "data: [DONE]\n\n")
-	}))
-	t.Cleanup(upstream.Close)
-
-	// 测试库里的 provider 密钥是明文（与 internal/llmgateway 的测试同口径：
-	// 生产装配注入的是 AES-GCM 解密，测试里换成恒等函数）。
-	prevDecrypt := llmgateway.DecryptSecret
-	llmgateway.DecryptSecret = func(s string) (string, error) { return s, nil }
-	// 上游路由有进程内缓存：造数据前后都必须失效，否则读到别的用例/上一步的集合。
-	llmgateway.InvalidateUpstreams()
-	t.Cleanup(func() {
-		llmgateway.DecryptSecret = prevDecrypt
-		llmgateway.InvalidateUpstreams()
-	})
-
-	if _, err := db.Exec(
-		`INSERT INTO gateway_providers (name, base_url, api_key_enc, models) VALUES ('sweep-fake', ?, 'k', '["sweep-model"]')`,
-		upstream.URL); err != nil {
-		t.Fatalf("插入上游: %v", err)
-	}
-	if _, err := db.Exec(
-		`INSERT INTO models (name, provider_id, display_name) VALUES ('sweep-model', 1, 'Sweep Model')`); err != nil {
-		t.Fatalf("插入模型: %v", err)
-	}
-
-	// 例外表是**载荷**：同上，SSE 面必须登记在案。
-	assertDeclaredNonJSON(t, "POST /v1/chat/completions", "text/event-stream")
-
-	sweepSilenceAccessLog(t)
-	r := sweepEngine(t, db)
-	token := sweepIssueToken(t, db, "sweep-sse")
-
-	body := `{"model":"sweep-model","messages":[{"role":"user","content":"hi"}],"stream":true}`
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-
-	hit := sweepHit{method: "POST", route: "/v1/chat/completions", reqPath: "/v1/chat/completions",
-		status: w.Code, ct: w.Header().Get("Content-Type"), header: w.Header(), body: w.Body.Bytes()}
-	if hit.status != 200 {
-		t.Fatalf("%s：status=%d want 200；content-type=%q body=%s",
-			hit.label(), hit.status, hit.ct, hit.bodySummary())
-	}
-	if !strings.HasPrefix(hit.ct, "text/event-stream") {
-		t.Fatalf("%s：content-type=%q want text/event-stream（例外登记里的流式面）",
-			hit.label(), hit.ct)
-	}
-	if !strings.Contains(string(hit.body), "data: ") {
-		t.Fatalf("%s：SSE 流里没有 data: 帧：%s", hit.label(), hit.bodySummary())
-	}
-	t.Logf("例外正向举证：%s（stream=true）⇒ %d %s（%d 字节）",
-		hit.label(), hit.status, hit.ct, len(hit.body))
-}

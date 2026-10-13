@@ -24,7 +24,7 @@ import (
 // 防线只有一条：**素材必须是渠道目录里的普通文件**。目录、符号链接、设备、FIFO
 // 一律按"不存在"处理（404，与"未配置"同一个信封，不新增响应形态）。
 //
-// 同族口径与本仓其它素材加载路径一致（wasmapp/skillseed、archiveutil、appdb、
+// 同族口径与本仓其它素材加载路径一致（internal/skillseed、archiveutil、appdb、
 // cachetrust 全都拒符号链接）；构建期同判在 `scripts/ci-channels.sh`
 // （`lstatSync(...).isFile()`）—— `cp -a` 与 `docker COPY` 都不 dereference，
 // 所以只在服务端拦是"只拦一半"。

@@ -13,8 +13,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // 本文件是审计 FW-2 的回归护栏：**客户端声明的剩余预算必须把平台侧在这一跳的预算钳小**。

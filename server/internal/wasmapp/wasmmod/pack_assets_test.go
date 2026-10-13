@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/compile/testdata/wasmtest"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // 本文件是 R1-e2e-6 的**自证门禁**：平台把 wasm 自定义段当一等静态资源载体

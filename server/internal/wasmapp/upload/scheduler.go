@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
+	"github.com/picoaide/picoaide/internal/limits"
 )
 
 // DefaultCleanupInterval 是过期上传会话的回收检查间隔（TTL 的 1/6 = 5 分钟）。

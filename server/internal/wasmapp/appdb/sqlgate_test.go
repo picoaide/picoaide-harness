@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // TestSingleStatementGate 是单语句闸门的表驱动用例（§4.5、§10.1 第 4 项）。

@@ -13,7 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
+	"github.com/picoaide/picoaide/internal/limits"
 )
 
 // 本文件是**执行侧自持**的磁盘编译缓存运维组件（水位 + 回收 + 周期循环）。

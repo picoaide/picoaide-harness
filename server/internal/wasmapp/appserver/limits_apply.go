@@ -3,9 +3,9 @@ package appserver
 import (
 	"time"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/appdb"
 	"github.com/picoaide/picoaide/internal/wasmapp/applimits"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/queue"
 	"github.com/picoaide/picoaide/internal/wasmapp/runtime"
 )

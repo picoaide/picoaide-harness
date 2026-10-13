@@ -123,7 +123,7 @@ beforeAll(async () => {
     GOMODCACHE: process.env.GOMODCACHE ?? join(work, 'gomodcache'),
     GOPATH: process.env.GOPATH ?? join(work, 'gopath'),
   }
-  const log = execFileSync('go', ['test', './internal/wasmapp/skillseed/', '-run', 'TestExportArchiveForE2E', '-count=1', '-v'], {
+  const log = execFileSync('go', ['test', './internal/skillseed/', '-run', 'TestExportArchiveForE2E', '-count=1', '-v'], {
     cwd: SERVER_DIR, env, encoding: 'utf8',
   })
   const match = /sha256=([0-9a-f]{64})/u.exec(log)

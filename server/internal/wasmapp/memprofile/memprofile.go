@@ -29,7 +29,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
+	"github.com/picoaide/picoaide/internal/limits"
 )
 
 // EnvMemoryProfile 是选择档位的环境变量名（空 = 默认档）。

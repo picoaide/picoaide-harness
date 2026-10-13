@@ -1,13 +1,21 @@
+//go:build apps
+
+// 本文件属于 `apps` 模块（P1 第二片，2026-10-14）：关闭 apps 时它整份不编译，
+// `internal/wasmapp/**` 包树因此从 `go list -deps ./cmd/server` 里消失。
+// 关闭态的替身在 `optional_apps_off.go`（同名同签名的最小实现）。
+
 package main
 
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/picoaide/picoaide/internal/channel"
 	"github.com/picoaide/picoaide/internal/serverstore"
 	wasmapi "github.com/picoaide/picoaide/internal/wasmapp/api"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
@@ -161,6 +169,42 @@ func newWasmAppEvictor(srv wasmAppEvictor) func(string) {
 // ⚠️ W4 删除的三项装配：应用基域 holder（`EnvAppsBaseDomain` / 控制台设置）、
 // R35 可信代理自检（`anonlimit`）、员工浏览器会话与换票（`session`）—— 它们都属于
 // "应用有对外主机名"的旧模型；客户端专属模型下应用请求由客户端的协议 handler 合成。
+// validateAppOriginScheme 校验本部署的**应用 origin scheme**（契约 §8.3/§10）。
+//
+// 为什么放在启动期而不是"用时回落"：这个 scheme 决定"服务端认哪个自身源"，
+// 客户端注册的是渠道包里配的那一个。两端不一致的后果不是"某个功能坏了"，而是
+// **所有非幂等应用请求 403**（跨源写判据永远不成立），而错误现象与配置毫无关系
+// —— 排障会先去查应用代码。R1-OPS-4/CHN-6 的结论就是"字段缺失/非法必须 fail-loud"；
+// 唯一的中性 fallback 留给"镜像没带渠道配置"（本地开发），由 channel.AppOriginScheme
+// 自己处理（目录缺失 ⇒ 默认值）。
+func validateAppOriginScheme() error {
+	scheme, err := channel.AppOriginScheme()
+	if err != nil {
+		return fmt.Errorf("应用 origin scheme 不可用（渠道配置问题）：%w；"+
+			"请在镜像内的 channel.json 里设置 desktop.app_origin_scheme"+
+			"（须匹配 ^[a-z][a-z0-9+.-]{1,31}$、不得是保留协议、不得与 desktop.deep_link_scheme 同值）",
+			err)
+	}
+	log.Printf("app origin scheme resolved: %s", scheme)
+	return nil
+}
+
+// appOriginScheme 返回本部署的应用 origin scheme（装配期读取）。
+//
+// 为什么允许在这里吞掉错误：`resolveStartupChannel` → `validateAppOriginScheme`
+// 已经在**启动期**对同一个函数做过 fail-loud 校验，能走到装配说明它已经通过。
+// 兜底默认值只覆盖"渠道目录缺失"（本地开发构建），而那种情况下 AppOriginScheme
+// 本身也不报错 ⇒ 这里的 fallback 事实上不可达，写它是为了不给调用方留一个
+// "必须处理 error"的假分支。
+func appOriginScheme() string {
+	scheme, err := channel.AppOriginScheme()
+	if err != nil {
+		log.Printf("app origin scheme: 读取失败（启动期已校验过，不应发生）：%v", err)
+		return channel.DefaultAppOriginScheme
+	}
+	return scheme
+}
+
 func setupWasmPlatform(ctx context.Context, db *sql.DB, dataDir string) *wasmPlatform {
 	// 客户端持有性证明（契约 §20/§23.1 A′）：签名密钥**启动期按部署生成、落数据根
 	// 0600、绝不编入镜像**（appproof.KeyFileName）。失败即拒绝启动：拿不到签名密钥

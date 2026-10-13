@@ -12,9 +12,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
 	"github.com/picoaide/picoaide/internal/wasmapp/cachetrust"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // IsolationMode 是编译子进程的 OS 级隔离策略（R31 / §15.1 第 14 条）。

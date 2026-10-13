@@ -3,8 +3,8 @@ package wasmmod
 import (
 	"strings"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // SignatureFormatDoc 是**规范化类型签名**的稳定格式说明（写进生成产物头部、SKILL 与错误文案）。

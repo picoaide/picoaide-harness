@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
+	"github.com/picoaide/picoaide/internal/limits"
 )
 
 // 本文件覆盖**上传频率闸门**（§4.3 第 147 行「上传频率」/ §10.3 第 36 项）：

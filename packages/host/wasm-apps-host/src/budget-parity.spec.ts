@@ -11,7 +11,7 @@
  * 客户端预算的那条路径（服务端此刻返回的是 APP_QUEUE_FULL + Retry-After，照样是可读错误）。
  *
  * 数值**不在这里硬编码**：真源 = 服务端生成物
- * `server/internal/wasmapp/limits/limits.json`（`go generate ./internal/wasmapp/limits`）。
+ * `server/internal/limits/limits.json`（`go generate ./internal/limits`）。
  * 本用例只断言"存在 + 单位 + 严格递减" —— 改任一侧的预算都会让它红。
  *
  * 变异验证（实跑）：
@@ -37,7 +37,7 @@ interface LimitsItem {
 
 /** 读生成物并按 `Key` 取一条（**缺项即失败**，不跳过 —— 静默跳过等于把判据关掉）。 */
 function limitsItem(key: string): LimitsItem {
-  const raw = readFileSync(join(REPO, 'server/internal/wasmapp/limits/limits.json'), 'utf8')
+  const raw = readFileSync(join(REPO, 'server/internal/limits/limits.json'), 'utf8')
   const parsed = JSON.parse(raw) as { items?: LimitsItem[] }
   expect(Array.isArray(parsed.items), 'limits.json 必须有 items 数组').toBe(true)
   const item = parsed.items?.find(candidate => candidate.Key === key)
