@@ -62,6 +62,11 @@
 3. **`-tags` 的传参与 flag 顺序被钉住**：`scripts/check-workflows.mjs:3382-3397` 要求 `go vet` 的 `argv[1]` 逐字 `./...` ⇒ 只能写 `go vet ./... -tags=…`。共 14 个构建/测试入口要同改（`server/Makefile` ×6、`server/Dockerfile` ×3、`server/scripts/build-demo-apps.sh`、`.github/workflows/ci.yml` ×3 间接 1）。
 4. **tag 组合下的测试会静默不跑**：CI 只有一个 `go test` 步（`ci.yml:1025-1046`），`scripts/wasm/check-go-test-json.mjs` 只判"报告里出现的用例"。⇒ 必须新增"变体矩阵跑测试"的判据，否则减配变体的代码永不被测。
 5. **关闭态不得用 nil handler 表达**：gin 的 `addRoute` 只断言 `len(handlers) > 0`（源码核证见 §9），传 nil 会**照常注册**，症状是每个请求 panic→Recovery→500 —— 既不是约定的 404，也躲开了"路由消失声明表"的视线。必须走 `registerXxx` 的**提前 return**（既有唯一范例：`server/internal/router/router.go:136-138` 的 `if d.Wasm == nil { return }`）。
+6. **加一个新包必须登记**（2026-10-13 原型预演实测，件在 `temp/probe-tags/wt`）：探针 = `server/internal/featuregate/`（一个无 tag 的 `gate.go` + 四个 tag 文件 `on_skills_apps.go` / `on_skills.go` / `on_apps.go` / `on_none.go`）＋ `main.go` 里的**单点**调用。结果：
+   - 五种构建全部 EXIT=0：无 tag、`-tags skills`、`-tags apps`、`-tags "skills apps"`、`-tags "skills,apps"`；
+   - `cmd/server` 的路由装配判据全过（含 `TestRouteAssemblyHasExactlyOneEntryPoint`）⇒ **"单一入口 + tag 提供者"形态可用**；
+   - 但 `TestAuditR13GH3PackageRegistryCoversWholeServer`（`server/internal/serverstore/audit_r13gh3_searchpath_serverface_test.go:476`）**当场红**：`[internal/featuregate]` 未登记 ⇒ 新增包必须进 `searchPathGuardPackages` 并声明 `family-bearing` / `no-family-sql`（判据自报包面"71 个包 / 285 个非测试源文件"）。P1 落地 `internal/features/`（或同类包）时必须同批登记；
+   - 附带事实：Go 的 `-tags` **同时接受空格与逗号分隔**（`-tags=skills,apps` ≡ `-tags "skills apps"`），传参可以少一层引号风险。
 
 ### 3.2 客户端侧的三条硬约束
 
