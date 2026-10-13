@@ -1,3 +1,9 @@
+//go:build skills && connectors
+
+// 本文件判的是"生产路由表 ↔ 业务包清单"的对拍（市场/智能体渠道策略、管理端镜像
+// 路由注册）。它**必须**在 skills 与 connectors 都编进来时才成立 —— 关闭这两片时
+// 对应路由整片不注册，拿业务包的镜像清单去对拍生产树必然差集非空（P1 第二片，
+// 2026-10-14）。基础面判据不在本文件里（见 router_test.go）。
 package router
 
 import (
@@ -21,6 +27,7 @@ import (
 	"github.com/picoaide/picoaide/internal/reports"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/sharedskills"
+	"github.com/picoaide/picoaide/internal/skillseed"
 	"github.com/picoaide/picoaide/internal/telemetry"
 )
 
@@ -172,14 +179,17 @@ func productionTestDeps(t *testing.T) Deps {
 		ClientRelease: clientrelease.NewHandlers(func() string { return "test" }, "official"),
 		Channel:       channel.NewHandlers(),
 		PortalAdmin:   portal.NewAdminHandlers(nil),
-		Market:        marketplace.NewHandlers(nil, t.TempDir()),
-		Agentshare:    agentshare.NewHandlers(nil, t.TempDir()),
-		Shared:        sharedskills.NewHandlers(nil, t.TempDir()),
-		Capability:    capabilities.NewHandlers(nil, t.TempDir()),
-		Connector:     connectors.NewHandlers(nil),
-		Telemetry:     telemetry.NewHandlers(nil),
-		Gateway:       llmgateway.NewHandlers(nil),
-		Reports:       reports.NewHandlers(nil),
+		// 内置技能下发面：与生产装配同形（缺了它 `/api/server/admin/skills/builtin`
+		// 会整条不注册 —— 逐组提前 return 的**正确**行为，但这条判据要的是生产树形状）。
+		SkillSeed:  skillseed.NewHandlers(skillseed.New(t.TempDir())),
+		Market:     marketplace.NewHandlers(nil, t.TempDir()),
+		Agentshare: agentshare.NewHandlers(nil, t.TempDir()),
+		Shared:     sharedskills.NewHandlers(nil, t.TempDir()),
+		Capability: capabilities.NewHandlers(nil, t.TempDir()),
+		Connector:  connectors.NewHandlers(nil),
+		Telemetry:  telemetry.NewHandlers(nil),
+		Gateway:    llmgateway.NewHandlers(nil),
+		Reports:    reports.NewHandlers(nil),
 	}
 }
 

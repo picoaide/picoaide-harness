@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
 	"github.com/picoaide/picoaide/internal/wasmapp/capapi"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 	"github.com/tetratelabs/wazero/sys"
 )
 

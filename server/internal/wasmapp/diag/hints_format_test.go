@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // 本文件是 **R1-e2e-2** 的护栏：hints 里**不得**出现未被替换的格式动词。

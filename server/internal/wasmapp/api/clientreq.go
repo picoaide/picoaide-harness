@@ -58,11 +58,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
 	"github.com/picoaide/picoaide/internal/wasmapp/appserver"
 	"github.com/picoaide/picoaide/internal/wasmapp/edge"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // maxClientEnvelopeBytes 是信封的请求体上限。

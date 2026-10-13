@@ -29,9 +29,9 @@ import (
 
 	"modernc.org/sqlite"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/abi"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // ===== 执行期证据：SQL 内的 tick 回调 =====

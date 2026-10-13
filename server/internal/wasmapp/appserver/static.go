@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/wasmapp/edge"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // staticCacheMaxAge 是宿主直出的静态资源的浏览器缓存时长。

@@ -33,7 +33,7 @@ import (
 //
 // 这里按**路由**放宽，而不是改全局常量：limits.ServerReadTimeout 参与
 // `ClientUploadTimeout(90s) > ServerReadTimeout >= CompileTimeout` 的序关系断言
-// （internal/wasmapp/limits/limits_gen_test.go），改它会让那条断言说谎，也会把
+// （internal/limits/limits_gen_test.go），改它会让那条断言说谎，也会把
 // 所有端点的慢体窗口一起放宽。写侧已有同口径先例（sse_deadline.go 的
 // SetWriteDeadline 续期、clientrelease.go 的下载写截止时间）。
 //

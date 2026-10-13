@@ -5,7 +5,7 @@ package llmgateway
 // 三件事：
 //
 //	① **形状与平台权威规则同源**：契约里的 app_id 正则/长度必须逐字等于
-//	   `wasmapp/limits` 的 `AppIDPattern`/`MaxAppIDLen`（registry 也是从它们编译的）
+//	   `internal/limits` 的 `AppIDPattern`/`MaxAppIDLen`（registry 也是从它们编译的）
 //	   —— 否则归因标签会与平台身份空间对不上（放行 registry 不认的值，或拒掉合法应用）；
 //	② **语料双向对拍**：同一份 `app-session-id.json` 同时被客户端（构造方向）与本用例
 //	   （解析方向）消费。这里逐条跑 `build_cases` 与 `parse_cases`：
@@ -19,7 +19,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
+	"github.com/picoaide/picoaide/internal/limits"
 )
 
 // TestAppSessionIDContractMatchesPlatformRules 钉住"契约 == 平台权威规则"。

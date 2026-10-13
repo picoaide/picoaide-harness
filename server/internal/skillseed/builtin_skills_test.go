@@ -18,7 +18,7 @@ import (
 // 缺陷形态（独立审计在副本里复现过）：`skillseed_test.go` 的 `repoSkillDir` 只认死一个目录
 // （`../../../../server/skills/app-builder`），摘要登记表也只覆盖这一个技能，而
 // `server/Dockerfile` 又**逐个** COPY 技能目录 ⇒ 在 `server/skills/` 下新加一个技能目录、
-// 谁都不登记，是**全绿**的（`go test ./internal/wasmapp/skillseed/` 整包 `ok`）。那个技能：
+// 谁都不登记，是**全绿**的（`go test ./internal/skillseed/` 整包 `ok`）。那个技能：
 //   - 永远不会进镜像（Dockerfile 没有它那一行）⇒ 员工在能力中心里永远看不到它；
 //   - 不受任何版本/摘要纪律约束（R1-pm-8 的形态：内容变了没人提版本，已安装的员工
 //     永远判不出"有更新"）。
@@ -142,11 +142,11 @@ import (
 // 判据读的三处位置（相对本包目录）。服务端模块根是 `server/`，所以四个 `..` 回到仓库根，
 // 与 `repoSkillDir` 同一口径。
 const (
-	repoSkillsRoot     = "../../../../server/skills"
-	repoDockerfilePath = "../../../../server/Dockerfile"
+	repoSkillsRoot     = "../../../server/skills"
+	repoDockerfilePath = "../../../server/Dockerfile"
 	// repoServerRoot 是 Dockerfile 的**构建上下文**（`docker buildx build … server`）——
 	// COPY 的源路径都相对它解析，判据要按同一口径把源路径映射回磁盘。
-	repoServerRoot = "../../../../server"
+	repoServerRoot = "../../../server"
 	// imageSkillSeedDir 是 Dockerfile 里 `PICOAI_SKILL_SEED_DIR` 的取值，也是
 	// `skillseed.Dir` 的缺省 —— COPY 的目标必须落在它下面，否则服务端一个技能都扫不到。
 	imageSkillSeedDir = "/opt/picoaide/skills"
@@ -156,7 +156,7 @@ const (
 	//（提交口径就是"源树里只此一份"），扫描面必须与承诺一样宽 —— 只扫
 	// `server/skills/` 的话，把同字节副本放到 `server/demoapps/scripts/` 下的别的名字
 	// （真正的漂移形态）是全绿的。
-	repoRootPath = "../../../.."
+	repoRootPath = "../../.."
 )
 
 // repoScanSkipDirs 是仓库级扫描跳过的目录名（逐层匹配）：它们都**没有**被本仓跟踪的内容，

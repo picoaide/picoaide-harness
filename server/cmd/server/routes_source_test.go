@@ -35,6 +35,8 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/picoaide/picoaide/internal/features"
 )
 
 // routeKeys 提取一棵路由树的 (method, path) 集合。
@@ -142,68 +144,6 @@ func TestRouteAssemblyMatchesProductionSource(t *testing.T) {
 // 于是干净提交上 TestRouteAssemblyGatedSlicesAreDeclared 直接失败）。
 // 反过来，**你新加了一条条件注册路由就必须把它登记进来**：失败信息会逐条
 // 列出"消失了却没声明"的路由，照着补一行即可。
-
-// wasmGatedRoutes：d.Wasm == nil 时整片消失（internal/router/registerWasm 的首行）。
-var wasmGatedRoutes = []string{
-	// 客户端面 /api/client/v2/apps/wasm（BearerAuth）
-	"POST /api/client/v2/apps/wasm/validate",
-	"POST /api/client/v2/apps/wasm/:app_id/releases",
-	"POST /api/client/v2/apps/wasm/:app_id/publish",
-	"POST /api/client/v2/apps/wasm/:app_id/unpublish",
-	"POST /api/client/v2/apps/wasm/:app_id/freeze",
-	"GET /api/client/v2/apps/wasm/:app_id/export",
-	"DELETE /api/client/v2/apps/wasm/:app_id",
-	"GET /api/client/v2/apps/wasm/:app_id/diagnostics",
-	"GET /api/client/v2/apps/wasm/:app_id/schema",
-	// 作者数据面（2026-09-21）：只读浏览自己应用库里的行。
-	"GET /api/client/v2/apps/wasm/:app_id/rows",
-	// 客户端专属访问模型（2026-09-19）：请求入口、打开校验、持有性证明（W1 新增，
-	// 与 `:app_id/opens` 管理端出口一起在本轮补齐登记 —— 条件注册的漏登记形态是
-	// "路由整片消失而没人发现"，这正是本表存在的理由）。
-	"POST /api/client/v2/apps/wasm/:app_id/request",
-	"POST /api/client/v2/apps/wasm/:app_id/open",
-	"POST /api/client/v2/apps/wasm/proof",
-	// R1-pm-3：发布者本人的版本历史 + 审核结论（含被拒理由）。条件注册
-	// （d.Wasm == nil 时整片消失）⇒ 新增就必须登记，否则本表反向断言红。
-	"GET /api/client/v2/apps/wasm/:app_id/releases",
-	"GET /api/client/v2/apps/wasm/catalog",
-	// 标识唯一性预查（2026-09-20）：发布表单填 app_id 时异步问它、提交前再问一次。
-	// 与上面几条同理 —— 条件注册（d.Wasm == nil 时整片消失），新增就必须登记。
-	"GET /api/client/v2/apps/wasm/:app_id/availability",
-	// 分片上传（§4.2）
-	"POST /api/client/v2/apps/wasm/uploads",
-	"PUT /api/client/v2/apps/wasm/uploads/:upload_id/chunks/:index",
-	"GET /api/client/v2/apps/wasm/uploads/:upload_id",
-	"POST /api/client/v2/apps/wasm/uploads/:upload_id/complete",
-	"DELETE /api/client/v2/apps/wasm/uploads/:upload_id",
-	// 管理面 /api/server/admin/wasm-apps（AdminRoute + RBAC 申报）
-	"GET /api/server/admin/wasm-apps",
-	"POST /api/server/admin/wasm-apps/:app_id/unpublish",
-	"POST /api/server/admin/wasm-apps/:app_id/publish",
-	"PUT /api/server/admin/wasm-apps/:app_id/owner",
-	"POST /api/server/admin/wasm-apps/:app_id/freeze",
-	"PUT /api/server/admin/wasm-apps/review",
-	"GET /api/server/admin/wasm-apps/limits",
-	"PUT /api/server/admin/wasm-apps/limits",
-	// 2026-09-19 审核闭环 + 运行诊断（router.go 已随本轮提交进仓 ⇒ 按约定登记）。
-	// 与本站的历史注释对照：这 5 条曾只存在于并发会话工作树、未提交，那时把它们
-	// 写进本表会让"干净提交态"报"声明表里的路由并未消失"；现在它们已在提交面内，
-	// 不登记则反向报"消失却没登记"。
-	"GET /api/server/admin/wasm-apps/:app_id/releases",
-	"POST /api/server/admin/wasm-apps/:app_id/releases/:version/approve",
-	"POST /api/server/admin/wasm-apps/:app_id/releases/:version/reject",
-	"GET /api/server/admin/wasm-apps/:app_id/diagnostics",
-	"GET /api/server/admin/wasm-apps/runtime",
-	"GET /api/server/admin/wasm-apps/:app_id/opens",
-	// 客户端专属改造 W5：打开看板概览（静态段 `opens/summary`，与上一条 `:app_id/opens`
-	// 同层但更具体）与按应用的 AI 用量。两条与上一批同类 —— 都是 `d.Wasm != nil` 才注册，
-	// 且都**后于**本表上一轮重算落地，属同一种漏登记（守卫按实跑 diff 反向断言）。
-	"GET /api/server/admin/wasm-apps/opens/summary",
-	"GET /api/server/admin/wasm-apps/:app_id/ai-usage",
-	// 管理面的只读数据面（2026-09-21）：表结构 + 行浏览（与员工面同实现，只差鉴权）。
-	"GET /api/server/admin/wasm-apps/:app_id/schema",
-	"GET /api/server/admin/wasm-apps/:app_id/rows",
-}
 
 // ⚠️ `sessionGatedRoutes` 已随 W4 删除：它登记的是"`d.WasmSession != nil` 时才注册"
 // 的五条员工浏览器 HTML 面（`/login`、`/logout`、`/app-ticket`）—— 那套入口与
@@ -549,24 +489,50 @@ func TestProductionDepsNilGatesDeclaredSlices(t *testing.T) {
 		}
 	}
 
+	// 变体自证（P1 第二片，2026-10-14）：三个可选模块**全关**时，`productionDeps`
+	// 里没有任何"置零会丢路由"的字段 —— 这是关闭态的正确形态（没有可选路由可丢），
+	// 而不是判据空转。此时改为反向断言：树上确实没有可选模块的路由，
+	// 且声明表必须为空（免得"把表清空"变成让守卫变绿的手法）。
+	if len(features.Enabled()) == 0 {
+		if len(wasmGatedRoutes) != 0 {
+			t.Fatalf("三个可选模块全关，但 wasmGatedRoutes 登记了 %d 条 —— 关闭态的声明表必须为空",
+				len(wasmGatedRoutes))
+		}
+		for key := range full {
+			if strings.HasPrefix(key, "POST /api/client/v2/apps/wasm") ||
+				strings.HasPrefix(key, "GET /api/client/v2/apps/wasm") ||
+				strings.Contains(key, "/admin/wasm-apps") ||
+				strings.Contains(key, "/marketplace/") ||
+				strings.Contains(key, "/admin/connectors") {
+				t.Errorf("三个可选模块全关，但可选模块的路由仍在树上：%s", key)
+			}
+		}
+		t.Logf("三个可选模块全关：没有可选路由可被 nil 依赖门控（判据按变体自证；可选路由 0 条）")
+		return
+	}
+
 	if len(gatingFields) == 0 {
 		t.Fatal("没有任何字段置零会让路由消失 —— 判据空转（productionReferenceTree 或 productionDeps 已变）")
 	}
-	wasmGated, hasWasm := gatingFields["Wasm"]
-	if !hasWasm {
-		t.Fatalf("productionDeps.Wasm 置零后没有路由消失（registerWasm 的 `d.Wasm == nil` 守卫变了？）")
-	}
-	declared := make(map[string]bool, len(wasmGatedRoutes))
-	for _, key := range wasmGatedRoutes {
-		declared[key] = true
-	}
-	if undeclared := diffKeys(wasmGated, declared); len(undeclared) > 0 {
-		t.Errorf("d.Wasm == nil 时有路由消失却没有登记（新增条件注册却没人更新声明表）：\n  %s",
-			strings.Join(undeclared, "\n  "))
-	}
-	if stale := diffKeys(declared, wasmGated); len(stale) > 0 {
-		t.Errorf("声明表里的路由在 d.Wasm == nil 时并未消失（路由被删/不再条件注册）：\n  %s",
-			strings.Join(stale, "\n  "))
+	if features.HasApps() {
+		wasmGated, hasWasm := gatingFields["Wasm"]
+		if !hasWasm {
+			t.Fatalf("productionDeps.Wasm 置零后没有路由消失（registerWasm 的 `d.Wasm == nil` 守卫变了？）")
+		}
+		declared := make(map[string]bool, len(wasmGatedRoutes))
+		for _, key := range wasmGatedRoutes {
+			declared[key] = true
+		}
+		if undeclared := diffKeys(wasmGated, declared); len(undeclared) > 0 {
+			t.Errorf("d.Wasm == nil 时有路由消失却没有登记（新增条件注册却没人更新声明表）：\n  %s",
+				strings.Join(undeclared, "\n  "))
+		}
+		if stale := diffKeys(declared, wasmGated); len(stale) > 0 {
+			t.Errorf("声明表里的路由在 d.Wasm == nil 时并未消失（路由被删/不再条件注册）：\n  %s",
+				strings.Join(stale, "\n  "))
+		}
+	} else if len(wasmGatedRoutes) != 0 {
+		t.Fatalf("apps 未编入本变体，但 wasmGatedRoutes 登记了 %d 条 —— 关闭态的声明表必须为空", len(wasmGatedRoutes))
 	}
 
 	// 把"运行期证明会丢路由的字段"绑回 main() 的字面量：漏填/写 nil 都是真事故。
@@ -584,7 +550,7 @@ func TestProductionDepsNilGatesDeclaredSlices(t *testing.T) {
 		}
 	}
 	t.Logf("逐字段置零实测：%d 个字段会条件注册路由（Wasm=%d 条），与声明表一致",
-		len(gatingFields), len(wasmGated))
+		len(gatingFields), len(gatingFields["Wasm"]))
 }
 
 // productionDepsFailFastFields：置零即**装配期 panic** 的字段（fail-loud，可接受，

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
+	"github.com/picoaide/picoaide/internal/limits"
 )
 
 // 本文件是**父侧**的缓存目录推导、度量与回收（§4.3.1 / §10.3 第 35 项）。

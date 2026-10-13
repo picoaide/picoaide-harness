@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
+	"github.com/picoaide/picoaide/internal/limits"
 )
 
 // ---- WASM 应用平台 DAO 测试(迁移 0069 / wasmapps.go / audit.go 的链版本化)----

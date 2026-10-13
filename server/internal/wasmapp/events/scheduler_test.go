@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/serverstore"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // 保留期清理调度的回归用例（审计 P1-2：`Cleanup` 曾零调用方 ⇒ 7 天保留未生效）。

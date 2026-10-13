@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // 本文件是 **R1-rt-7b** 的护栏：编译子进程必须按**生效的** instance_memory_mb 跑（双向）。

@@ -50,7 +50,7 @@ const (
 	skillAppConfigRelPath = skillDirRelPath + "/references/app-config.md"
 	// designDocRelPath 是唯一设计基线（access 三取值/缺省必须与它一致）。
 	designDocRelPath = "docs/planning/2026-09-17-wasm-app-platform.md"
-	regenerateHint   = "跑 `go generate ./internal/wasmapp/limits` 重新生成"
+	regenerateHint   = "跑 `go generate ./internal/limits` 重新生成"
 )
 
 // generatedSkillFiles 是 skill 里的**生成物**（它们的字段覆盖由别的用例守，

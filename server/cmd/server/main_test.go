@@ -29,14 +29,12 @@ import (
 
 	"github.com/picoaide/picoaide/internal/channel"
 	"github.com/picoaide/picoaide/internal/clientrelease"
+	"github.com/picoaide/picoaide/internal/features"
 	"github.com/picoaide/picoaide/internal/portal"
 	"github.com/picoaide/picoaide/internal/router"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/updatecheck"
-	wasmapi "github.com/picoaide/picoaide/internal/wasmapp/api"
-	"github.com/picoaide/picoaide/internal/wasmapp/readyz"
-	"github.com/picoaide/picoaide/internal/wasmapp/skillseed"
 	"github.com/picoaide/picoaide/webadmin"
 )
 
@@ -158,22 +156,22 @@ func testProductionDeps(t *testing.T, db *sql.DB) productionDeps {
 		authAPI = serverauth.NewConfiguredAPI(db).API
 	}
 	dataDir := t.TempDir()
-	return productionDeps{
-		DB:    db,
-		Auth:  authAPI.Handlers(),
-		Admin: (&serverauth.AdminAPI{DB: db}).Handlers(),
-		// 与 main() 同源:内置技能目录取 skillseed.Dir(镜像内 /opt/picoaide/skills;
-		// 本机没有该目录时清单为空,与"二进制旁边没有技能资产"的生产行为一致)。
-		SkillSeed: skillseed.NewHandlers(skillseed.New(skillseed.Dir)),
-		// WASM 应用平台操作面 + 员工浏览器会话面:必须非 nil,否则 router.Register
-		// 整片跳过(见 productionDeps.Wasm 的注释)。
-		Wasm: wasmapi.NewHandlers(wasmapi.Options{DB: db, DataRoot: dataDir}),
-		// /readyz 探针:与生产同形(真实库时带 Ping)。
-		Ready:     readyz.New(readyz.Options{DataRoot: dataDir, Ping: pingFn(db)}).Handler(),
+	d := productionDeps{
+		DB:        db,
+		Auth:      authAPI.Handlers(),
+		Admin:     (&serverauth.AdminAPI{DB: db}).Handlers(),
 		DataDir:   dataDir,
 		Version:   "2.7.0",
 		ChannelID: "official",
 	}
+	// 可选模块（skills / apps）的字段由 build-tag 测试文件填 —— 降配变体里它们的
+	// 类型是空类型，字段填不了也不该填（router 侧根本没有那片注册代码）。
+	// `Ready` **必须**在所有变体里非 nil：生产装配对它 fail-fast（见
+	// registerProductionRoutes 的首段），apps 关闭时由替身探针顶替。
+	// 见 optional_testdeps_skills_*_test.go 与 optional_testdeps_apps_*_test.go。
+	fillSkillsProductionDeps(t, &d)
+	fillAppsProductionDeps(t, &d, db, dataDir)
+	return d
 }
 
 // pingFn 把可选的真实库变成 readyz 的探针函数(nil DB ⇒ nil = 不判)。
@@ -633,10 +631,17 @@ func TestResolveStartupChannelDeepLinkScheme(t *testing.T) {
 		},
 		{
 			// app_origin_scheme 的**独立** fail-loud：公共渠道同样不豁免（§8.3）。
+			//
+			// ⚠️ 它随 `apps` 变体放宽（P1 第二片，2026-10-14）：`app_origin_scheme`
+			// 唯一的消费者是应用中心（应用只在客户端内以该 scheme 打开），关闭 apps
+			// 后这个字段没有任何读侧，启动期因此不再强制它存在 —— 见
+			// docs/decisions/2026-10-14-server-build-tags.md 的「关闭态语义」。
+			// **开启 apps 时这条 fail-loud 一字不改**（`wantErr` 由 features 派生，
+			// 而不是把断言删掉）。
 			name:      "官方缺 app_origin_scheme 报错",
 			channelID: "official",
 			config:    `{"schema":1,"channel_id":"official","identity":{"display_name":"X"}}`,
-			wantErr:   true,
+			wantErr:   features.HasApps(),
 		},
 		{
 			name:      "品牌渠道缺字段报错",

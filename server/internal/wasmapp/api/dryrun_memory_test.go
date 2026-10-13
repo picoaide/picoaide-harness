@@ -6,11 +6,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/appcfg"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
 	"github.com/picoaide/picoaide/internal/wasmapp/applimits"
 	"github.com/picoaide/picoaide/internal/wasmapp/compile/testdata/wasmtest"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // 本文件是审计 R1-rt-7 的回归护栏：**发布干跑必须与执行侧同源取单实例内存上限**。

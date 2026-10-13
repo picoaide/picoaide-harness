@@ -1,3 +1,8 @@
+//go:build apps
+
+// 本文件判的是深静态升级（S7-2），用 `router.WasmClientRouteBase` 拼请求路径 ——
+// 该常量属于 `apps` 模块（P1 第二片，2026-10-14）。断言一条都没有删。
+
 package api_test
 
 // audit_s72_deep_static_upgrade_test.go —— S7-2（v2.8.1→HEAD 回归审计，P1）的

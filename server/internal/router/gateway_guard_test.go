@@ -10,30 +10,28 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/picoaide/picoaide/internal/agentshare"
 	"github.com/picoaide/picoaide/internal/appstore"
 	"github.com/picoaide/picoaide/internal/bootstrap"
-	"github.com/picoaide/picoaide/internal/capabilities"
 	"github.com/picoaide/picoaide/internal/channel"
 	"github.com/picoaide/picoaide/internal/clientrelease"
-	"github.com/picoaide/picoaide/internal/connectors"
 	"github.com/picoaide/picoaide/internal/llmgateway"
-	"github.com/picoaide/picoaide/internal/marketplace"
 	"github.com/picoaide/picoaide/internal/portal"
 	"github.com/picoaide/picoaide/internal/reports"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
-	"github.com/picoaide/picoaide/internal/sharedskills"
 	"github.com/picoaide/picoaide/internal/telemetry"
 	"github.com/picoaide/picoaide/internal/util"
 )
 
 // buildRouterWithDB 是 buildTestRouter 的"真库"版本：给需要认证的路由用。
-// 与 main.go 的装配逐字段同形，只是数据目录落到 t.TempDir()。
+//
+// ⚠️ 它**只装配基础面**（P1 第二片，2026-10-14）：本文件判的是网关的改密守卫与
+// 限体，与三个可选模块无关 —— 而可选 handler 的类型在关闭态是空类型，
+// 一个只测基础面的用例不该把整张可选路由表拖进来（那会让它在降配变体里编不过，
+// 从而在 `make check-tags` 的 `go vet ./...` 上把一个基础面判据整条丢掉）。
 func buildRouterWithDB(t *testing.T, db *sql.DB) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
-	dir := t.TempDir()
 	r := gin.New()
 	Register(r, Deps{
 		DB:            db,
@@ -44,11 +42,6 @@ func buildRouterWithDB(t *testing.T, db *sql.DB) *gin.Engine {
 		Channel:       channel.NewHandlers(),
 		PortalAdmin:   portal.NewAdminHandlers(db),
 		ClientRelease: clientrelease.NewHandlers(func() string { return "2.7.2" }, "official"),
-		Market:        marketplace.NewHandlers(db, dir+"/skills-cache"),
-		Agentshare:    agentshare.NewHandlers(db, dir+"/agent-presets-cache"),
-		Shared:        sharedskills.NewHandlers(db, dir+"/shared-skills-cache"),
-		Capability:    capabilities.NewHandlers(db, dir+"/skills-cache"),
-		Connector:     connectors.NewHandlers(db),
 		Telemetry:     telemetry.NewHandlers(db),
 		Gateway:       llmgateway.NewHandlers(db),
 		Reports:       reports.NewHandlers(db),

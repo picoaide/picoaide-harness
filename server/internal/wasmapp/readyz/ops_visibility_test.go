@@ -32,7 +32,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
+	"github.com/picoaide/picoaide/internal/limits"
 )
 
 // readyzBody 取一次 /readyz 的原始响应体与状态码。

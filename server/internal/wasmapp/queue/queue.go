@@ -28,8 +28,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // Options 是调度器上限（零值字段用 limits 缺省填充）。

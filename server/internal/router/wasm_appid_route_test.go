@@ -1,3 +1,9 @@
+//go:build apps
+
+// 本文件判的是 `app_id` 与 WASM 操作面路由静态段的同名冲突（X4-1/S7-2）。
+// `WasmClientRouteBase` / `WasmAppIDReservedSegments` 与整片 `/apps/wasm/*` 路由
+// 都属于 `apps` 模块 —— 关闭 apps 时它们不存在，判据按模块分文件（P1 第二片，
+// 2026-10-14）；断言一条都没有删。
 package router
 
 // wasm_appid_route_test.go —— X4-1 的判据面（第二十四轮审计）。

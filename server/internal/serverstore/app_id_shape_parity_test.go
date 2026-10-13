@@ -10,8 +10,8 @@ import (
 	"testing"
 
 	"github.com/picoaide/picoaide/internal/archiveutil"
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/skillmanifest"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // ---------------------------------------------------------------------------
@@ -21,7 +21,7 @@ import (
 // **单向、固定语料**的抽样(llmgateway/app_attribution_test.go:只证明副本 ⊆ 真源,
 // 真源被放宽/收紧都不打红)。
 //
-// 修法:真源唯一 = `wasmapp/limits.AppIDPattern`(平台全部标识形态/数值的唯一
+// 修法:真源唯一 = `internal/limits.AppIDPattern`(平台全部标识形态/数值的唯一
 // 真源);消费者一律 import 它;`wasm_app_opens.go` 保留的那一份**必须登记在
 // 本用例里**(它是"收窄副本",存在的理由是依赖方向)。本用例是**真对拍**:
 // 读对方源码(不是各自钉自己的字面量)、文件缺席即红、集合相等而非抽样。
@@ -41,7 +41,7 @@ const appIDPatternLiteral = `^[a-z0-9]+(?:-[a-z0-9]+)*$`
 // 把副本改成引用真源后必须从本表移除,否则同样红 —— 两个方向都会逼人回来
 // 更新这份登记表,不会静默漂移。
 var appIDPatternSourceRegistry = []string{
-	filepath.Join("wasmapp", "limits", "limits.go"),   // 真源
+	filepath.Join("limits", "limits.go"),              // 真源
 	filepath.Join("serverstore", "wasm_app_opens.go"), // 登记在案的收窄副本(依赖方向)
 	// manifest.go 里的那一处是**引用上游源码的注释**(skill/src/index.ts 的
 	// SKILL_NAME),不是规则定义 —— 定义点在下面这份"编译点"登记表里被禁止。
@@ -52,7 +52,7 @@ var appIDPatternSourceRegistry = []string{
 // 引用真源的消费者不在表内 —— 把 manifest.go 改回 `regexp.MustCompile(<字面量>)`
 // 会立刻打红(ID-03 的根因)。
 var appIDPatternDefRegistry = map[string]bool{
-	filepath.Join("wasmapp", "limits", "limits.go"):   true,
+	filepath.Join("limits", "limits.go"):              true,
 	filepath.Join("serverstore", "wasm_app_opens.go"): true,
 }
 
@@ -73,7 +73,7 @@ func TestAppIDShapeHasASingleSource(t *testing.T) {
 	if limits.AppIDPattern != appIDPatternLiteral {
 		t.Fatalf("真源 limits.AppIDPattern = %q, want %q", limits.AppIDPattern, appIDPatternLiteral)
 	}
-	limitsSrc := readRepoFile(t, filepath.Join("..", "wasmapp", "limits", "limits.go"))
+	limitsSrc := readRepoFile(t, filepath.Join("..", "limits", "limits.go"))
 	if !strings.Contains(limitsSrc, "`"+appIDPatternLiteral+"`") {
 		t.Fatalf("真源文件里没有形态字面量(消费者会失去可引用的常量)")
 	}

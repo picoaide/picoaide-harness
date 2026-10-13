@@ -258,7 +258,7 @@ var appIDCallSites = []struct {
 	{"internal/skillmanifest/normalize.go", "NormalizeSkillMD", "写侧闸门：管理端规范化重打包（产出新版本）"},
 	{"internal/appstore/admin.go", "transferOwner", "写（既有行）：归属转移 —— 只冻结，不影响读面"},
 	{"internal/sharedskills/routes.go", "removeLock", "写（既有行）：解除锁记录 —— 只冻结，不影响读面"},
-	{"internal/wasmapp/skillseed/skillseed.go", "loadSkill", "随包内置技能的自举校验（内容随包；实测零命中）"},
+	{"internal/skillseed/skillseed.go", "loadSkill", "随包内置技能的自举校验（内容随包；实测零命中）"},
 }
 
 // TestIsAppIDCallSitesAreWriteGatesOnly 是④。

@@ -21,8 +21,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // rpcFrame 是测试侧的应答线格式：`Result` 取 `json.RawMessage` 再二次解码成具体类型

@@ -47,15 +47,15 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/abi"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // 路径常量（**只有这一处**：SKILL 换位置时改这里）。
 const (
 	limitsSourceFile = "limits.go"
-	jsonRelPath      = "internal/wasmapp/limits/limits.json"
-	mdRelPath        = "internal/wasmapp/limits/limits.md"
+	jsonRelPath      = "internal/limits/limits.json"
+	mdRelPath        = "internal/limits/limits.md"
 	// skillDirRelPath 是内置技能目录（仓库根相对）。源头只有这一个 ——
 	// 技能源就在服务端仓库内的 `server/skills/`（2026-09-19 从客户端 vendored 包
 	// packages/vendor/memory-evolve 搬来）：随服务端镜像分发
@@ -68,7 +68,7 @@ const (
 	// authorDocRelPath 是仓库级作者指南：它和 SKILL 一样是"面向作者的数字载体"，
 	// 因此同样受"数字必须来自 limits 表"的门禁约束（同一份纪律，两处落地）。
 	authorDocRelPath      = "docs/wasm-app-authoring.md"
-	regenerateHint        = "跑 `go generate ./internal/wasmapp/limits` 重新生成"
+	regenerateHint        = "跑 `go generate ./internal/limits` 重新生成"
 	frontmatterABIVersion = "x-abi-version"
 )
 
@@ -1174,7 +1174,7 @@ func moduleRootOf(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("取工作目录: %v", err)
 	}
-	root := filepath.Clean(filepath.Join(wd, "..", "..", ".."))
+	root := filepath.Clean(filepath.Join(wd, "..", ".."))
 	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
 		t.Fatalf("推断的模块根 %s 不含 go.mod: %v", root, err)
 	}
@@ -1210,7 +1210,7 @@ func writeFile(t *testing.T, path string, data []byte) {
 	}
 }
 
-// goGenerateDirective 供人工核对：`go generate ./internal/wasmapp/limits` 会执行本文件里的
+// goGenerateDirective 供人工核对：`go generate ./internal/limits` 会执行本文件里的
 // //go:generate 指令（go 命令扫描包的测试文件，见 cmd/go/internal/generate 的 InternalGoFiles）。
 //
-//go:generate go run ../../../cmd/picoaide-limits-gen
+//go:generate go run ../../cmd/picoaide-limits-gen

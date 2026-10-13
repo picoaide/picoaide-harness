@@ -27,21 +27,23 @@
  *   ② **依赖面**：`go list -deps -tags=<组合> ./cmd/server` 里，**开着的**模块包树必须
  *      在，**关掉的**模块包树必须不在。
  *
- * ## ⚠️ 第二片接线前，② 里"关掉的那一半"必然不成立
+ * ## ② 的"关掉的那一半"自 2026-10-14 起**生效**（P1 第二片）
  *
- * 本片（P1 第一片）只做 tag 接线与判据，**不做**真正的裁剪：`internal/features` 已经
- * 如实报告开关状态，但没有任何包按 `features.Has*()` 做条件编译，所以关掉模块时
- * `internal/wasmapp/**` / `internal/{marketplace,sharedskills,agentshare,capabilities}` /
- * `internal/connectors` 照样进二进制。"包树消失"因此**现在必然失败**。
+ * 第一片只做 tag 接线与判据，不做真正的裁剪 —— 那时关掉模块，包树照样进二进制，
+ * 这一段只能按"预期失败（⏳）"报告。第二片把三个模块的路由注册、`cmd/server` 的装配
+ * 与 handler 包全部接成**构建期条件注册**之后，"包树消失"成了可断言的事实：
  *
- * 这条判据刻意写成**显式的预期失败标记**，而不是现在就红的门禁：
- *   · 缺省（不带 `--expect-cut`）= 裁剪断言只**报告**，不影响退出码；
- *   · `--expect-cut` = 裁剪断言变成拦门禁 —— **P1 第二片把条件化编译接上线之后**，
- *     第二片应当把本开关写进它自己的调用点（`make check-tags TAGS_ARGS=--expect-cut`，
- *     或升格进 `yarn check` / CI）。在此之前它必然红，红了才是判据还活着。
+ *   · `make -C server check-tags` 的缺省参数就是 `--expect-cut`（裁剪断言**拦门禁**）；
+ *   · 想临时看"只报账"的形态：`make check-tags TAGS_ARGS=`（显式传空）；
+ *   · `--expect-cut=<模块,…>` 仍是**探针**形态：对所有组合套一组指定的裁剪集，
+ *     必须变红，用来证明这条判据不是空转。
  *
- * 判据"明知现在不成立"也要留在这里的理由：它是第二片的**验收面**。没有它，第二片的
- * 验收只剩"我改了代码"，而"包树真的消失了"这件事没人量。
+ * 关闭态的三种装配形态（判据测的是结果，这里是"为什么结果成立"）：
+ *   ① 路由：`internal/router/optional_*_on.go` / `_off.go` 一对 build-tag 文件，
+ *      关闭态给同名**空类型**与空实现 ⇒ 注册代码编不进来（不是"注册了但 handler 为 nil"）；
+ *   ② 装配：`cmd/server/optional_*_on.go` / `_off.go` 一对，关闭态不构造 handler；
+ *   ③ 包边界：`internal/limits`（上限数值真源）与 `internal/skillseed`（内置技能下发面）
+ *      按"谁真的用它"归位 —— 前者是基础面，后者属 skills。见决策记录 §2。
  *
  * ## 用法
  *
@@ -49,7 +51,7 @@
  * node server/scripts/check-go-build-tags.mjs                    # 全部组合，裁剪断言只报告
  * node server/scripts/check-go-build-tags.mjs --no-vet            # 不跑 go vet（快一点）
  * node server/scripts/check-go-build-tags.mjs --only=apps        # 只跑一个组合
- * node server/scripts/check-go-build-tags.mjs --expect-cut        # 裁剪断言转为拦门禁
+ * node server/scripts/check-go-build-tags.mjs --expect-cut        # 裁剪断言转为拦门禁（make check-tags 的缺省）
  * node server/scripts/check-go-build-tags.mjs --expect-cut=apps   # 探针：对所有组合都套
  *                                                                # "apps 应被裁掉"，必红
  * node server/scripts/check-go-build-tags.mjs --self-test         # 只自证判据引擎（不碰 go）
@@ -80,6 +82,13 @@ const MODULE_TREES = {
     'internal/sharedskills',
     'internal/agentshare',
     'internal/capabilities',
+    // 内置技能下发面（平台内置技能随镜像发布，`/api/client/v2/skills/builtin*`）。
+    // 它**服务的是 skills**：应用中心关闭时它必须还在（技能面照常下发），技能面关闭
+    // 时它必须消失。P1 第二片因此把它从 `internal/wasmapp/skillseed` 挪到
+    // `internal/skillseed` —— 留在 wasmapp 树下会让上面两条**同时**不可能成立
+    // （apps 关 ⇒ 整棵 wasmapp 消失 ⇒ 技能面拿不到内置技能）。
+    // 归位依据（P0 规划 §5 第 4 条）：`/opt/picoaide/skills` 的唯一消费方就是它。
+    'internal/skillseed',
   ],
   apps: ['internal/wasmapp'],
   connectors: ['internal/connectors'],
@@ -347,16 +356,15 @@ function main() {
       if (options.expectCut) failures.push(`[${combo.variant}] ${item.detail}`)
       else pending.push(`[${combo.variant}] ${item.detail}`)
     }
-    if (!options.expectCut) console.log(`  ⏳ 裁剪断言未成立（${cutFailures.length} 条）—— 本片预期如此`)
+    if (!options.expectCut) console.log(`  ⏳ 裁剪断言未成立（${cutFailures.length} 条）—— 本次按"只报告"运行（TAGS_ARGS 显式传空）`)
   }
 
   console.log()
   if (pending.length > 0) {
-    console.log(`⏳ 裁剪断言待生效（第二片接线后才成立，本片按"预期失败"报告，不影响退出码）：`)
+    console.log(`⏳ 裁剪断言未成立（${pending.length} 条）—— 本次是"只报告"形态，不影响退出码：`)
     for (const item of pending) console.log(`  · ${item}`)
-    console.log('  依据：P1 第一片只做 tag 接线与判据，不做条件化编译 ——')
-    console.log('  见 docs/decisions/2026-10-14-server-build-tags.md §4。')
-    console.log(`  第二片把本开关打开：${'`make -C server check-tags TAGS_ARGS=--expect-cut`'}`)
+    console.log('  缺省（`make -C server check-tags`）带 `--expect-cut`，这些条目会直接判失败。')
+    console.log('  只有显式 `TAGS_ARGS=`（空）才会走到这里；见 docs/decisions/2026-10-14-server-build-tags.md §4。')
     console.log()
   }
 

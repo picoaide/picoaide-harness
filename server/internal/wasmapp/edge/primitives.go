@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
+	"github.com/picoaide/picoaide/internal/limits"
 )
 
 // 本文件是 `edge` 包在 W4 之后**保留下来的全部原语**（总纲 §8.4 的精确保留列）：

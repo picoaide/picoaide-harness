@@ -1,3 +1,5 @@
+//go:build apps
+
 package router
 
 // wasm_appid_segments.go —— app_id 与 WASM 操作面**路由静态段**的同名冲突

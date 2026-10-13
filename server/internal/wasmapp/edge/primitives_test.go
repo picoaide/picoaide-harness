@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
+	"github.com/picoaide/picoaide/internal/limits"
 )
 
 // 本文件是 `edge` 包在 W4 之后**保留下来的原语**的行为判据。

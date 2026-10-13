@@ -184,21 +184,23 @@ check-fast:
 	$(MAKE) test-server-fast
 	cd webadmin && npm test
 
-# 变体矩阵判据（P1 第一片）：4 个 skills/apps 组合 + 基线组合各 build（缺省再加 vet）一次，
-# 并断言"开着的模块包树在、关掉的模块包树不在"（`go list -deps ./cmd/server`）。
+# 变体矩阵判据（P1 第二片起：**裁剪断言生效**）：4 个 skills/apps 组合 + 基线组合各
+# build（缺省再加 vet）一次，并断言"开着的模块包树在、关掉的模块包树不在"
+# （`go list -deps ./cmd/server`）。
 #
-# ⚠️ **裁剪断言现在是"预期失败"**：本片不做条件化编译，所以"包树消失"还不成立，
-# 脚本按 PENDING 报告且**不影响退出码**；`--expect-cut` 才把它转成拦门禁 ——
-# 那是 P1 第二片接线完成后要做的动作（`make check-tags TAGS_ARGS=--expect-cut`）。
-# 详见 docs/decisions/2026-10-14-server-build-tags.md §4 与脚本头部注释。
+# ⚠️ **`--expect-cut` 是缺省值**（2026-10-14 P1 第二片翻转）：第一片时"包树消失"还不成立，
+# 只能按 PENDING 报告；第二片把三个模块的路由/装配全部接成构建期条件注册之后，
+# 关掉某模块它**必须**从依赖图里消失 —— 这条断言从此拦门禁，红了就是条件化被拆了。
+# 想临时看"只报账"的形态：`make check-tags TAGS_ARGS=`（显式传空）。详见
+# docs/decisions/2026-10-14-server-build-tags.md §4 与脚本头部注释。
 #
 # 本目标**刻意不进 `check`/`check-fast`**：它跑 5 次全仓 build(+vet)，是分钟级的判据，
-# 不该塞进每个人的开发循环；第二片把它接进 `yarn check` / CI 时再决定位置。
+# 不该塞进每个人的开发循环；CI 侧由 `.github/workflows/ci.yml` 的 server job 单列一步。
 #
 # 用法：
-#   make check-tags                      # 全部组合：build + vet
-#   make check-tags TAGS_ARGS=--no-vet   # 只 build（快）
-#   make check-tags TAGS_ARGS=--expect-cut   # 第二片：裁剪断言拦门禁
-TAGS_ARGS ?=
+#   make check-tags                            # 全部组合：build + vet + 裁剪断言（拦门禁）
+#   make check-tags TAGS_ARGS=--no-vet         # 只 build（快）
+#   make check-tags TAGS_ARGS=--expect-cut=apps  # 探针：对每个组合都要求"apps 被裁掉"（必红）
+TAGS_ARGS ?= --expect-cut
 check-tags:
 	node scripts/check-go-build-tags.mjs $(TAGS_ARGS)

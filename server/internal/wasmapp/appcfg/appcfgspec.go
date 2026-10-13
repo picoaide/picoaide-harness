@@ -21,8 +21,8 @@
 package appcfg
 
 import (
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/abi"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // FieldSpec 是**一个字段**的机器可读规格。

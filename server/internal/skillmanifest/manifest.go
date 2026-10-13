@@ -21,8 +21,8 @@ import (
 	"github.com/goccy/go-yaml"
 
 	"github.com/picoaide/picoaide/internal/archiveutil"
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/util"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // 稳定错误码:直接进 serverauth.WriteError 的 envelope,客户端按码分流、
@@ -298,7 +298,7 @@ const ProvenanceDir = ".picoaide/"
 
 // appIDRe 是 app_id / 技能名 / 智能体名共用的**形态**规则。
 //
-// 真源唯一:`wasmapp/limits.AppIDPattern`(平台全部标识数值/形态的唯一真源,
+// 真源唯一:`internal/limits.AppIDPattern`(平台全部标识数值/形态的唯一真源,
 // 见该包的文件头铁律)。此前这里是**第三份字面量副本**,注释还把真源指向
 // 上游 SKILL_NAME —— 而 limits.go 的注释又把真源指向这里,两份注释互相指认、
 // 谁都不是真源(审计 2026-09-23 ID-03)。现在改为引用真源常量,形态只有一处;

@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/compile/testdata/wasmtest"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // 本文件覆盖**缓存回收**（§10.3 第 35 项：磁盘缓存同时满足体积与条目两个上限）。

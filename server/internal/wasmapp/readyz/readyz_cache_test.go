@@ -29,7 +29,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
+	"github.com/picoaide/picoaide/internal/limits"
 )
 
 // countingOpts 是"每个字段都可观测"的探针配置：每次真活都会让计数 +1。

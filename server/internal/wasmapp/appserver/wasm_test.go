@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/abi"
 	"github.com/picoaide/picoaide/internal/wasmapp/edge"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // assertHostSecurityHeaders 断言宿主独占的响应安全头（§4.8；含 4xx/5xx）。

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "source": "server/internal/wasmapp/limits/limits.go",
+  "source": "server/internal/limits/limits.go",
   "items": [
     {
       "Key": "max_app_id_len",
