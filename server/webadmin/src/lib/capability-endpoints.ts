@@ -26,9 +26,11 @@
  *    调用方必须**不渲染或禁用**该入口并给出明确文案,不得留必然 404 的入口。
  *
  * 路径与动词的**唯一真源**是 `server/internal/router/` 的路由声明 —— `router.go`
- * 的基础面 **加上**按 build tag 分片的 `optional_<module>_on.go`（skills / apps /
- * connectors 三个可选模块的路由在 2026-10-14 从 `router.go` 搬进分片，只读
- * `router.go` 会让 87 条管理面路由静默掉出对拍面）；
+ * 的基础面 **加上**含 `AdminRoute(` 声明的分片（skills / apps / connectors 三个可选模块
+ * 的路由在 2026-10-14 从 `router.go` 搬进 `optional_<module>_on.go`；只读 `router.go`
+ * 会让模块面的管理面路由静默掉出对拍面）。口径细节：分片里共 87 条声明，本判据覆盖
+ * 其中 `authed` 组的 **69 条** —— 另 18 条在 `/admin/wasm-apps` 组内，由 wasm 应用平台
+ * 自己的对拍判据负责，本判据的 `authed` 面从不覆盖它们；
  * 本模块的每一条都被 `capability-endpoints.spec.ts` **读服务端源码**逐条对拍
  * (路径不存在 / 动词不符 / 命名空间拿错 ⇒ 红)。
  */
