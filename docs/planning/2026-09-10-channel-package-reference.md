@@ -137,6 +137,15 @@ picoaide/channels  (私有仓)
     "synopsis": "Acme 企业内部助手",          // 可选;缺省 = product_name
     // ↓ 数据根(运行期;见 §4.4)。**除 official 外每个渠道都必填**(2026-09-12 起)
     "home_dir": ".acme-harness"              // `~` 下的单段目录名
+  },
+  // 功能模块声明（可选；缺省全开 = 基础功能恒开）。取值必须是布尔，
+  // 未知模块名/非法类型会让**构建期中止**（该渠道本次没有产物）。
+  // 契约（变体标识的消费面 + 哨兵串的两条硬约束）见
+  // docs/decisions/2026-10-13-channel-feature-modules.md。
+  "features": {
+    "skills": true,
+    "apps": true,
+    "connectors": false                      // 本渠道不交付连接器
   }
 }
 ```
@@ -146,6 +155,7 @@ picoaide/channels  (私有仓)
 | 字段 | 生效位置 | 效果 |
 |---|---|---|
 | `defaults.server_url` | `profile.ts` → `picoaide-auth-gate` 的 `defaultServer` | 登录页跳过 Step1 直连服务端；若只配了浏览器 SSO 方式(纯 OIDC/OpenID),直接发起跳转 |
+| `features` | 构建期取值 → 随包 `build/channel.json` 的 `features` / `features_variant` | 功能模块开关（缺省全开）。**本轮只到取值与输出点**：消费端（Go `-tags` / 客户端组装 / webadmin `--build-arg`）尚未接线，改它不改变产物内容 |
 | `desktop.product_name` / `window_title` | `profile.ts` → `desktop-shell` 行配置 | 窗口标题 / 托盘 / 通知文案 / 插件加载失败弹窗 / 渲染失败页 |
 | `desktop.product_name` | `src/main.ts` 的 `PRODUCT_NAME` | 通知发送者 / `app.setName` 数据目录 |
 | `identity.*` / `copy.*`（品牌文案） | `profile.ts` → `picoaide-auth-gate` + `picoaide-channel-sync` 的 `brand` | 登录页标题与品牌区、客户端侧边栏/顶栏、服务端不可达时的兜底内容 |
