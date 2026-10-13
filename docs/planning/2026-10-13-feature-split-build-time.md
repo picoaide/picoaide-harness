@@ -33,7 +33,10 @@
 - 官方渠道模板键表（`packages/host/desktop/scripts/channel-constants.ts` 的 `CHANNEL_TEMPLATE_KEYS`）必须含 `features`；
 - 校验落在 `scripts/ci-channels.sh`，报错**不回显取值**（沿用 `desktop.platforms` 的形态）。
 
-**落地顺序（避免 CI 红窗）**：`features` 一旦进模板键表，CI 的 `--require-template` 会让官方渠道缺该键即红 —— 而私有渠道仓目前只声明了 `desktop.platforms`。所以顺序必须是：**harness 侧契约合并 → 私有仓补 `features`（官方显式，其余渠道可缺省=全开）→ 之后才允许打 tag**。这与上一批 `desktop.platforms` 的节奏相同，但这次多一层：`features` 还会被构建期消费，私有仓补键前不得启用任何"按变体裁剪"的构建路径。
+**落地顺序（避免 CI 红窗；2026-10-13 实测更正）**：`features` 一旦进模板键表，`--require-template` 会让官方渠道缺该键即红 —— 而**这个校验在 PR 的打包 job 上就跑**（不只 tag 期）：PR #181 的 `Desktop (Linux)` 与 `Desktop (Windows installer)` 正是红在这里（macOS 那条路径不跑该步，所以它当时是绿的）。
+所以顺序必须是：**先补私有渠道仓 → 再合 harness 侧契约**（我最初写反了）。先补私有仓是安全的：现行校验器对**未知字段只告警、不拦发布**（`scripts/ci-channels.sh:851`），旧版看到 `features` 不会拒。
+补键口径：四个渠道逐键显式写 `"features": {"skills": true, "apps": true, "connectors": true}`（值 = 现行兜底值，显式化不改变行为）；理由与 `desktop.platforms` 同 —— 官方渠道是新增渠道的模板，缺键意味着行为藏在代码兜底里。
+另有一层：`features` 会被构建期消费，**私有仓补键前不得启用任何"按变体裁剪"的构建路径**（否则会出现"镜像按旧配置构建、客户端按新配置排包"的半通状态）。
 
 ### 2.2 变体标识与哨兵串
 
