@@ -183,6 +183,8 @@ for channel in "${CHANNELS[@]}"; do
         for candidate in client-assets/client/$glob; do
           if [ -f "$candidate" ]; then
             echo "::error::渠道 ${INDEX}/${TOTAL} 带了未声明平台(${label})的安装包 —— 渠道配置没声明它,镜像里就不该有它。" >&2
+            # 诊断行刻意打**声明集合 / 平台列 / 通配**,不打文件名(文件名由 slug 派生 = 品牌)。
+            echo "::error::诊断:声明=[$(printf '%s' "$DECLARED_PLATFORMS" | tr '\n' ' ')] 平台列=[${platform}] 通配=[${glob}] token 表=[${PLATFORM_TOKENS}]" >&2
             echo "::error::请在渠道配置 desktop.platforms 里声明该平台,或核对该平台的产物为何被归集到本渠道" >&2
             exit 1
           fi
@@ -197,6 +199,7 @@ for channel in "${CHANNELS[@]}"; do
       if [ -z "$platform_file" ]; then
         # 报错只报序号 + 平台标签 + 通配,不回显渠道 id 与文件名(公开日志纪律)。
         echo "::error::渠道 ${INDEX}/${TOTAL} 缺少 ${label} 的客户端安装包(通配 ${glob})。" >&2
+        echo "::error::诊断:声明=[$(printf '%s' "$DECLARED_PLATFORMS" | tr '\n' ' ')] 平台列=[${platform}] token 表=[${PLATFORM_TOKENS}]" >&2
         echo "::error::该平台在渠道配置 desktop.platforms 里声明了,却没有产物 —— 更新面/门户会静默少一个平台。" >&2
         echo "::error::请核对该平台的 desktop job 是否把产物归集到了本渠道的 artifacts 目录。" >&2
         exit 1
