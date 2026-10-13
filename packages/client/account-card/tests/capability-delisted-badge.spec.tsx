@@ -38,8 +38,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   CapabilityCenterPanel,
   type CapabilityItem,
-} from '../../capability-center/src/client/CapabilityCenterPanel.tsx'
-import { setActiveLocale, t } from '../../capability-center/src/client/locales.ts'
+} from '../../../host/capability-center/src/client/CapabilityCenterPanel.tsx'
+import { setActiveLocale, t } from '../../../host/capability-center/src/client/locales.ts'
 
 ;(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
