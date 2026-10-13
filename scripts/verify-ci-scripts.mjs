@@ -5823,6 +5823,119 @@ esac
     '失败信息不得把已取回的平台也算成缺失(点名必须精确)')
 }
 
+// ---- 7e. R2 中转按渠道声明的平台收窄（2026-10-13，desktop.platforms）----
+//
+// 两侧都要收窄，而且理由不同：
+//   · push：没声明的平台**不该上传** —— 桶是公开读的，少一份对象就少一份暴露面与流量；
+//   · pull：齐全判据只要求**声明过的**平台 —— 不收窄的话，声明 win+mac 的渠道会恒红在
+//     "缺 Linux"，而那个平台本来就不该存在（假红会逼出"把判据删掉"这种更坏的处置）。
+{
+  const work = tempDir('ci-transfer-platforms-')
+  const list = join(work, 'channels.list')
+  const stage = join(work, 'client-assets')
+  const out = join(work, 'release-artifacts')
+  const store = join(work, 'store')
+  writeFileSync(list, 'official\nexample-brand\n')
+  const writeChannel = platforms => {
+    mkdirSync(join(work, 'channels', 'example-brand'), { recursive: true })
+    writeFileSync(join(work, 'channels', 'example-brand', 'channel.json'), JSON.stringify({
+      schema: 1,
+      channel_id: 'example-brand',
+      identity: { display_name: 'Example Brand', short_name: 'Example' },
+      desktop: { platforms, slug: 'Example-Brand', product_name: 'Example Brand' },
+    }))
+  }
+  writeChannel(['win', 'mac'])
+
+  const fakeAws = join(work, 'aws')
+  writeFileSync(fakeAws, `#!/usr/bin/env bash
+set -euo pipefail
+store="${store}"
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --endpoint-url) shift 2 ;;
+    --only-show-errors) shift ;;
+    --recursive) shift ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+case "\${args[0]:-} \${args[1]:-}" in
+  "s3 cp")
+    src="\${args[2]}"; dst="\${args[3]}"
+    if [[ "$src" == s3://* ]]; then
+      key="\${src#s3://*/}"; key="\${key%/}"
+      mkdir -p "$dst"; [ -d "$store/$key" ] && cp -a "$store/$key/." "$dst/"
+    else
+      key="\${dst#s3://*/}"; key="\${key%/}"
+      mkdir -p "$store/$key"; cp -a "$src/." "$store/$key/"
+    fi
+    ;;
+  "s3 rm") prefix="\${args[2]}"; rm -rf "$store/\${prefix#s3://*/}" ;;
+esac
+`)
+  execFileSync('chmod', ['+x', fakeAws])
+
+  const brandFiles = [
+    'Example-Brand-9.9.9-x64-Setup.exe',
+    'Example-Brand-9.9.9-mac.dmg',
+    'Example-Brand-9.9.9-x86_64.AppImage',
+  ]
+  const stageAll = () => {
+    mkdirSync(join(stage, 'example-brand'), { recursive: true })
+    for (const name of brandFiles) writeFileSync(join(stage, 'example-brand', name), 'x')
+  }
+  const transfer = (mode, extra = []) => spawnSync('bash', [
+    transferScript, mode, '--list', list, ...extra,
+  ], {
+    cwd: work,
+    encoding: 'utf8',
+    env: {
+      PATH: `${work}:${process.env.PATH ?? ''}`,
+      HOME: process.env.HOME ?? '',
+      GITHUB_RUN_ID: '4242',
+      GITHUB_RUN_ATTEMPT: '1',
+      ...R2_CREDENTIALS,
+    },
+  })
+  const prefixOf = () => {
+    const base = join(store, '_transfer')
+    if (!existsSync(base)) return ''
+    return readdirSync(base)[0] ?? ''
+  }
+
+  // ① push：只声明 win+mac ⇒ Linux 安装包不得上传（也不得留在暂存目录里）。
+  stageAll()
+  const pushed = transfer('push', ['--stage', stage])
+  check(pushed.status === 0, `声明 win+mac 时 push 应成功,实际退出 ${String(pushed.status)}:${(pushed.stderr ?? '').slice(0, 200)}`)
+  const prefix = prefixOf()
+  check(prefix !== '', 'push 后应存在本次中转前缀')
+  const uploaded = existsSync(join(store, '_transfer', prefix, 'ch-2'))
+    ? readdirSync(join(store, '_transfer', prefix, 'ch-2')).sort()
+    : []
+  check(uploaded.length === 2, `只应上传声明过的两个平台,实际 ${JSON.stringify(uploaded)}`)
+  check(uploaded.includes('Example-Brand-9.9.9-x64-Setup.exe') && uploaded.includes('Example-Brand-9.9.9-mac.dmg'),
+    `声明过的两个平台都应在中转前缀里,实际 ${JSON.stringify(uploaded)}`)
+  check(!uploaded.some(name => name.endsWith('.AppImage')),
+    '未声明平台(Linux)的安装包不得上传到公开读的桶')
+
+  // ② pull：齐全判据只看声明过的平台 ⇒ 不得因为"没有 Linux"而红。
+  const pulled = transfer('pull', ['--to', out])
+  check(pulled.status === 0,
+    `声明 win+mac 且产物齐全时 pull 必须成功(不得假红在"缺 Linux"):${(pulled.stderr ?? '').slice(0, 200)}`)
+  for (const name of ['Example-Brand-9.9.9-x64-Setup.exe', 'Example-Brand-9.9.9-mac.dmg']) {
+    check(existsSync(join(out, 'example-brand', name)), `pull 应还原声明的平台产物:${name}`)
+  }
+
+  // ③ 对照：把交付面改成三端之后,同一次 pull 必须红并点名 macOS
+  //    （证明 ② 的绿是"判据面真的收窄了",而不是判据被掏空）。
+  writeChannel(['win', 'mac', 'linux'])
+  const pulledThree = transfer('pull', ['--to', join(work, 'release-artifacts-3')])
+  check(pulledThree.status !== 0, '声明三端时缺平台必须失败(对照组:证明齐全判据仍然有牙)')
+  check((pulledThree.stderr ?? '').includes('缺少平台'), '对照组失败信息应说明「缺少平台」')
+  check((pulledThree.stderr ?? '').includes('Linux'), '对照组应点名缺的平台(前缀里只有 win+mac ⇒ 缺的是 Linux)')
+}
+
 // ---- 8. 敏感路径不得入库(忽略规则是唯一防线,补一条硬守卫) ----
 {
   const tracked = execFileSync('git', ['ls-files', '--full-name'], { cwd: root, encoding: 'utf8' })
@@ -7116,6 +7229,128 @@ exit 0
     '`SchemaMismatchError.Error()` 应保留「库比二进制**新**」那条分支（e.AppliedMax > e.MaxFile）'
     + '—— 文档里"跨代回滚会被拒绝启动"正是它')
 }
+// ---- 9b. 渠道声明的交付平台收窄镜像装配（2026-10-13，desktop.platforms）----
+//
+// 语义：渠道声明 `desktop.platforms` 之后，**没声明的平台不进镜像**（省的就是它的体积），
+// 而**声明了却没有产物**必须 fail-loud 并点名平台 —— 缺平台在旧实现里表现为
+// "CLIENT-RELEASE.json 少一个键"，流水线全绿、客户少一个安装包。
+{
+  const imagesScript = join(root, 'scripts', 'ci-build-channel-images.sh')
+
+  // 与第 9 节同形的假 docker：只记录调用，并按需造出 image.tar。
+  const writeFakeDocker = work => {
+    const fakeDocker = join(work, 'docker')
+    writeFileSync(fakeDocker, `#!/usr/bin/env bash
+set -euo pipefail
+case "\${1:-}" in
+  save)
+    prev=""
+    for a in "$@"; do
+      if [ "$prev" = "-o" ]; then : > "$a"; fi
+      prev="$a"
+    done
+    exit 0 ;;
+esac
+exit 0
+`)
+    execFileSync('chmod', ['+x', fakeDocker])
+  }
+  const runAssembly = (work, list, artifacts) => spawnSync('bash', [
+    imagesScript, '--list', list, '--artifacts', artifacts, '--out', join(work, 'release-bundle'),
+  ], {
+    cwd: work,
+    encoding: 'utf8',
+    env: {
+      PATH: `${work}:${process.env.PATH ?? ''}`,
+      HOME: process.env.HOME ?? '',
+      CI_IMAGE_BUILD_ROOT: work,
+      VERSION: 'v9.9.9',
+    },
+  })
+  const readManifest = work => {
+    const p = join(work, 'client-assets', 'CLIENT-RELEASE.json')
+    if (!existsSync(p)) return null
+    try { return JSON.parse(readFileSync(p, 'utf8')) } catch { return null }
+  }
+
+  // ① 只声明 win+mac：Linux 安装包即使被上游 job 产出了也不进镜像与清单。
+  {
+    const work = tempDir('ci-platforms-drop-')
+    const list = join(work, 'channels.list')
+    // 列表里必须有 official(装配脚本的下限判据:公开 Release 要有载体);
+    // 断言只看**最后处理的**那个渠道的装配结果 ⇒ 把 example-brand 放在后面。
+    writeFileSync(list, 'official\nexample-brand\n')
+    for (const id of ['official', 'example-brand']) {
+      mkdirSync(join(work, 'channels', id), { recursive: true })
+    }
+    writeFileSync(join(work, 'channels', 'official', 'channel.json'), JSON.stringify({
+      schema: 1, channel_id: 'official', identity: { display_name: 'Official', short_name: 'Official' },
+    }))
+    mkdirSync(join(work, 'channels', 'example-brand'), { recursive: true })
+    writeFileSync(join(work, 'channels', 'example-brand', 'channel.json'), JSON.stringify({
+      schema: 1,
+      channel_id: 'example-brand',
+      identity: { display_name: 'Example Brand', short_name: 'Example' },
+      desktop: { platforms: ['win', 'mac'], slug: 'Example-Brand', product_name: 'Example Brand' },
+    }))
+    const artifacts = join(work, 'release-artifacts')
+    mkdirSync(join(artifacts, 'example-brand'), { recursive: true })
+    for (const name of ['Example-Brand-9.9.9-x86_64.AppImage', 'Example-Brand-9.9.9-mac.dmg',
+      'Example-Brand-9.9.9-x64-Setup.exe']) {
+      writeFileSync(join(artifacts, 'example-brand', name), 'x')
+    }
+    // official 也要产物:装配脚本对列表里**每个**渠道都要求"至少有一个安装包"
+    // (它没有 desktop.platforms ⇒ 三端全要),缺了就当场红。
+    mkdirSync(join(artifacts, 'official'), { recursive: true })
+    for (const name of ['Official-9.9.9-x86_64.AppImage', 'Official-9.9.9-mac.dmg',
+      'Official-9.9.9-x64-Setup.exe']) {
+      writeFileSync(join(artifacts, 'official', name), 'x')
+    }
+    writeFakeDocker(work)
+
+    const result = runAssembly(work, list, artifacts)
+    check(result.status === 0,
+      `声明 win+mac 的渠道应装配成功,实际退出 ${String(result.status)}:${(result.stderr ?? '').slice(0, 300)}`)
+    const clientDir = join(work, 'client-assets', 'client')
+    check(existsSync(join(clientDir, 'Example-Brand-9.9.9-mac.dmg')), '声明过的 macOS 安装包必须在镜像里')
+    check(existsSync(join(clientDir, 'Example-Brand-9.9.9-x64-Setup.exe')), '声明过的 Windows 安装包必须在镜像里')
+    check(!existsSync(join(clientDir, 'Example-Brand-9.9.9-x86_64.AppImage')),
+      '未声明平台(Linux)的安装包不得进镜像 —— 省的就是它的体积')
+    const manifest = readManifest(work)
+    check(manifest !== null, '声明 win+mac 时清单仍必须是合法 JSON')
+    const assets = manifest?.client?.assets ?? {}
+    check(Object.keys(assets).sort().join(',') === 'mac-universal,win-x64',
+      `清单应恰好含 mac-universal/win-x64 两个键,实际 ${JSON.stringify(Object.keys(assets))}`)
+    check(assets['linux-x64'] === undefined, '清单不得出现未声明平台的键(客户端据此判断有无更新)')
+  }
+
+  // ② 声明了却没有产物 ⇒ fail-loud 并点名平台（不许静默少一个入口）。
+  {
+    const work = tempDir('ci-platforms-missing-')
+    const list = join(work, 'channels.list')
+    writeFileSync(list, 'example-brand\n')
+    mkdirSync(join(work, 'channels', 'example-brand'), { recursive: true })
+    writeFileSync(join(work, 'channels', 'example-brand', 'channel.json'), JSON.stringify({
+      schema: 1,
+      channel_id: 'example-brand',
+      identity: { display_name: 'Example Brand', short_name: 'Example' },
+      desktop: { platforms: ['win', 'mac'], slug: 'Example-Brand', product_name: 'Example Brand' },
+    }))
+    const artifacts = join(work, 'release-artifacts')
+    mkdirSync(join(artifacts, 'example-brand'), { recursive: true })
+    // 只给 Windows:macOS 声明了却没有产物。
+    writeFileSync(join(artifacts, 'example-brand', 'Example-Brand-9.9.9-x64-Setup.exe'), 'x')
+    writeFakeDocker(work)
+
+    const result = runAssembly(work, list, artifacts)
+    check(result.status !== 0, '声明了 macOS 却没有产物时必须失败(静默少一个平台 = 客户少一个安装包)')
+    check((result.stderr ?? '').includes('macOS'),
+      `失败信息必须点名缺的平台,实际:${(result.stderr ?? '').trim().slice(0, 200)}`)
+    check((result.stderr ?? '').includes('desktop.platforms'),
+      '失败信息应说明"该平台在渠道配置里声明了"(把病根指向配置/产物,而不是让人猜)')
+  }
+}
+
 for (const dir of scratch) rmSync(dir, { recursive: true, force: true })
 if (failures.length > 0) {
   process.stderr.write(`\nverify-ci-scripts: ${failures.length} 项断言失败\n`)
@@ -7142,4 +7377,6 @@ process.stdout.write('verify-ci-scripts: OK — ref 形态判定唯一真源(tag
   + '回滚段 `SERVER_IMAGE` 不得写裸 tag、跨代回滚那段必须自给可执行顺序、'
   + '归档边界版本与 git 真值对拍;并锚到 ci-build-channel-images.sh 的三 tag 与'
   + 'serverstore 反向对账**真的驱动 fail-loud 分支**)/'
-  + 'clean 的旧格式前缀清扫(缺 GITHUB_RUN_ID ⇒ 显式跳过,绝不退化成删掉所有 local-* 前缀)\n')
+  + 'clean 的旧格式前缀清扫(缺 GITHUB_RUN_ID ⇒ 显式跳过,绝不退化成删掉所有 local-* 前缀)/'
+  + '渠道交付平台收窄(desktop.platforms:镜像装配丢弃未声明平台 + 声明了却没有产物即 fail-loud 并点名;'
+  + 'R2 中转 push 不上传未声明平台、pull 的齐全判据只要求声明平台,并用三端对照组证明判据仍有牙)\n')
