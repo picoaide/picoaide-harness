@@ -96,7 +96,7 @@ PicoAide Harness 是一个三层系统：**桌面客户端 / 本地 Harness 服�
 |---|---|---|
 | **上游行（原样）** | agent、session、tools、settings、webserver、sandbox、llm 适配器 | 固定版本、按上游语义运行 |
 | **我们新增的行** | `desktop-shell`、`desktop-diagnostics`、`desktop-updates`、`desktop-loop-notify`、`desktop-asar-fs`、`desktop-asar-guidance` | 由桌面层的组装补丁插入 |
-| **我们新增的 bundle 层** | 九个自有包：`@picoaide/dsh-enterprise`、`-account-card`、`-wasm-apps`、`-foot-menu`、`-wasm-apps-host`、`-connectors`、`-browser`、`-cron` 与 `dsh-memory-evolve`；另有上游的实验性语音输入 bundle | 自有包各带一层组装补丁，加上桌面包自身的 `cordis.patch.yml`（由 `@picoaide/dsh-enterprise` 的 bundle 列表首项携带）合计十层，作为 profile 的 bundle 层进入组合，顺序固定 |
+| **我们新增的 bundle 层** | 十个自有包：`@picoaide/dsh-enterprise`、`-capability-center`、`-account-card`、`-wasm-apps`、`-foot-menu`、`-wasm-apps-host`、`-connectors`、`-browser`、`-cron` 与 `dsh-memory-evolve`；另有上游的实验性语音输入 bundle | 自有包各带一层组装补丁，加上桌面包自身的 `cordis.patch.yml`（由 `@picoaide/dsh-enterprise` 的 bundle 列表首项携带）合计十一层，作为 profile 的 bundle 层进入组合，顺序固定 |
 | **显式禁用的上游行** | 见下一节 | 关闭都有具体理由，不是「用不到就关」 |
 
 ### 被显式禁用的上游行

@@ -245,7 +245,7 @@ const server = createServer((req, res) => {
   }
   // 平台内置技能清单（**未安装**）：用来验证「未装 ⇒ 出现在市场分区」这条口径，
   // 以及长描述在卡片里被截成固定两行（全文进详情弹层）。
-  // 形状来自 packages/host/enterprise/src/client/BuiltinSkillsStrip.tsx 的 BuiltinSkillsPayload。
+  // 形状来自 packages/client/capability-center/src/client/BuiltinSkillsStrip.tsx 的 BuiltinSkillsPayload。
   if (url.pathname === '/api/pico/skills/builtin' || url.pathname === '/api/client/v2/skills/builtin') {
     res.end(JSON.stringify({
       skills: [

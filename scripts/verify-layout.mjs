@@ -80,6 +80,11 @@ const packageNameTable = new Map([
   // **中列整页装载器 + 视觉语言**叶子包（零 `@picoaide/*` 依赖，被消费方的 client
   // bundle 内联）—— 它替掉了"cron 自持 DOM 装载 + 其余三个各写一套模态"的分叉。
   ['packages/client/panel-surface', '@picoaide/dsh-panel-surface'],
+  // 2026-10-13：能力中心（技能商店）的**客户端面**（整页面板 + 内置技能区 +
+  // `capability.*` 字典 + 底部「更多」条目），从 `packages/host/enterprise` 整块搬到
+  // 独立的客户端包 —— 拆它的目的就是让"关掉技能商店 = 整包不进产物"成为可能。
+  // 目录名跟角色走（capability-center ↔ @picoaide/dsh-capability-center）。
+  ['packages/client/capability-center', '@picoaide/dsh-capability-center'],
   // 2026-09-21：侧边栏底部**并道行** —— 一个「更多」行 + 向上浮层，条目经客户端
   // Cordis 服务 `picoFootMenu` 从五个面板插件收集（它们不再各自注册一整行）。
   ['packages/client/foot-menu', '@picoaide/dsh-foot-menu'],

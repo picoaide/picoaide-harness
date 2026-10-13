@@ -93,13 +93,16 @@ describe('desktop profile composition', {
     }
   })
 
-  it('puts the required layers first (Web surface, then the ten launcher-owned layers) and keeps third-party bundles', async () => {
+  it('puts the required layers first (Web surface, then the eleven launcher-owned layers) and keeps third-party bundles', async () => {
     // 2026-09-28：十个自有组装层（desktop 自己 + enterprise/account-card/wasm-apps/
     // foot-menu/wasm-apps-host/connectors/browser/memory-evolve/cron）改由 **bundle 层**
     // 承载（各自 `dsh.bundle.patch`），顺序就是下面这份清单 —— 它同时是
     // 「`readProfilePatches` 复算得出真实装配」的前提（见 `src/profile.ts` 的
     // `REQUIRED_BUNDLES` 注释）。历史 manifest 里的 `dsh-plugin-desktop` 条目仍然被丢弃
     // （它无法把自己解析成 bundle，改由 `@picoaide/dsh-enterprise` 的 patch 列表携带桌面层）。
+    // 2026-10-13：第十一层 `@picoaide/dsh-capability-center`（能力中心的客户端面从
+    // enterprise 拆出）插在 enterprise 与 account-card 之间 —— 它自己的补丁只插一行、
+    // 不 patch 别人的行，位置对装配语义无影响；**这一层就是技能商店的开关**。
     expect(desktopBundleList([
       '@deepseek-ai/dsh-base',
       'third-party-one',
@@ -109,6 +112,7 @@ describe('desktop profile composition', {
       '@deepseek-ai/dsh-base',
       '@deepseek-ai/dsh-web-app',
       '@picoaide/dsh-enterprise',
+      '@picoaide/dsh-capability-center',
       '@picoaide/dsh-account-card',
       '@picoaide/dsh-wasm-apps',
       '@picoaide/dsh-foot-menu',
@@ -145,6 +149,7 @@ describe('desktop profile composition', {
       '@deepseek-ai/dsh-base',
       '@deepseek-ai/dsh-web-app',
       '@picoaide/dsh-enterprise',
+      '@picoaide/dsh-capability-center',
       '@picoaide/dsh-account-card',
       '@picoaide/dsh-wasm-apps',
       '@picoaide/dsh-foot-menu',
@@ -186,6 +191,7 @@ describe('desktop profile composition', {
       '@deepseek-ai/dsh-base',
       '@deepseek-ai/dsh-web-app',
       '@picoaide/dsh-enterprise',
+      '@picoaide/dsh-capability-center',
       '@picoaide/dsh-account-card',
       '@picoaide/dsh-wasm-apps',
       '@picoaide/dsh-foot-menu',

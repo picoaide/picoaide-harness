@@ -20,7 +20,7 @@ import {
   mergeItems,
   planCardAction,
   type CapabilityItem,
-} from '../src/client/CapabilityCenterPanel.tsx'
+} from '../../../client/capability-center/src/client/CapabilityCenterPanel.tsx'
 
 describe('R4-D-1 的用户可见后果：不得把降级当升级、不得漏更新', () => {
   const approved = (version: string, versions: string[]): CapabilityItem => ({

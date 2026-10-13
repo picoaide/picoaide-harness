@@ -348,7 +348,9 @@ export default defineConfig({
 
 describe('真实工作区的声明面对拍（静态读取，不扫 lib/）', () => {
   it('每个 workspace 包都能读出声明产物（否则该包会静默退回纯 mtime 判定）', () => {
-    expect(WORKSPACE_PACKAGES.length).toBeGreaterThanOrEqual(13)
+    // 2026-10-13：13 → 14（能力中心的客户端面搬进 `@picoaide/dsh-capability-center`）。
+    // 棘轮只允许上调：这条下限的用途是"表被整段掏空 / 删行"时立刻红，贴着真值最有效。
+    expect(WORKSPACE_PACKAGES.length).toBeGreaterThanOrEqual(14)
     for (const pkg of WORKSPACE_PACKAGES) {
       const packageRoot = join(repoRoot, pkg.dir)
       const declared = [...declaredExportArtifacts(packageRoot), ...tsdownEntryKeys(packageRoot)]

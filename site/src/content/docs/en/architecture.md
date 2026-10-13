@@ -96,7 +96,7 @@ So "what we add" and "what upstream provides" live on the same assembly surface 
 |---|---|---|
 | **Upstream rows (unchanged)** | agent, session, tools, settings, webserver, sandbox, llm adapters | Pinned version, upstream semantics |
 | **Rows we add** | `desktop-shell`, `desktop-diagnostics`, `desktop-updates`, `desktop-loop-notify`, `desktop-asar-fs`, `desktop-asar-guidance` | Inserted by the desktop layer's composition patch |
-| **Bundle layers we add** | Nine owned packages: `@picoaide/dsh-enterprise`, `-account-card`, `-wasm-apps`, `-foot-menu`, `-wasm-apps-host`, `-connectors`, `-browser`, `-cron` and `dsh-memory-evolve`; plus upstream's experimental voice-input bundle | Each owned package carries one composition patch layer; together with the desktop package's own `cordis.patch.yml` (carried as the first entry of `@picoaide/dsh-enterprise`'s bundle list) that is ten layers, entering the profile as bundle layers in a fixed order |
+| **Bundle layers we add** | Ten owned packages: `@picoaide/dsh-enterprise`, `-capability-center`, `-account-card`, `-wasm-apps`, `-foot-menu`, `-wasm-apps-host`, `-connectors`, `-browser`, `-cron` and `dsh-memory-evolve`; plus upstream's experimental voice-input bundle | Each owned package carries one composition patch layer; together with the desktop package's own `cordis.patch.yml` (carried as the first entry of `@picoaide/dsh-enterprise`'s bundle list) that is eleven layers, entering the profile as bundle layers in a fixed order |
 | **Upstream rows we disable** | see the next section | Each has a concrete reason; these are not "we don't need it, so off" |
 
 ### Upstream rows we explicitly disable

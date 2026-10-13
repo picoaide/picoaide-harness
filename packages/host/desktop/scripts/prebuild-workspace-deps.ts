@@ -99,6 +99,21 @@ export const WORKSPACE_PACKAGES: readonly WorkspacePackage[] = [
   //     connectors / browser / wasm-apps）的类型面读它的 `./client` 声明
   //     （type-only import），所以它们又都排在它之后 —— 无环。
   { workspace: '@picoaide/dsh-foot-menu', dir: 'packages/client/foot-menu', deps: ['packages/client/panel-surface'] },
+  // 0c) 能力中心（技能商店）的**客户端面**（2026-10-13 从 `@picoaide/dsh-enterprise`
+  //     整块搬出）：`@picoaide/dsh-panel-surface` 被内联进它的 client bundle
+  //     （读 panel-surface 的 lib/types + lib/client.js）⇒ 必须排在 panel-surface
+  //     之后；`@picoaide/dsh-foot-menu` 的 `./client` 声明是它的 type-only 输入
+  //     （`ctx.picoFootMenu`）⇒ 排在 foot-menu 之后。两条边都不成环（两个依赖都
+  //     没有通往本包的出边）。
+  //
+  //     与 `scripts/check-workspaces.mjs` 的 `PACKAGES[*].needs` 有**一处刻意不同**：
+  //     那边另有 enterprise / account-card → 本包两条边，那是两者的**测试**读本包
+  //     源码（不产生产物输入）⇒ 只影响"何时重跑"，不进这张**构建**输入表。
+  {
+    workspace: '@picoaide/dsh-capability-center',
+    dir: 'packages/client/capability-center',
+    deps: ['packages/client/panel-surface', 'packages/client/foot-menu'],
+  },
   // 1) connectors：只读两个叶子包（`host-copy.ts` / `user-scope.ts`）—— 路线 A 扩展
   //    之后它**不再** import 桌面包，所以排在叶子包之后即可。
   {

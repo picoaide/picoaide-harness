@@ -45,8 +45,10 @@ const SETTINGS_ROOT_TSX = join(
 const SETTINGS_ROOT_CSS = join(
   workspaceRoot, 'deepseek-harness', 'packages', 'client', 'ui-settings-general', 'src', 'client', 'SettingsRoot.module.css',
 )
+// 2026-10-13：能力中心的客户端面（含这个全视口蒙版模态）从 `packages/host/enterprise`
+// 整块搬到 `packages/client/capability-center` —— 面板源码逐字节未变，只是路径跟着走。
 const CAPABILITY_PANEL_TSX = join(
-  workspaceRoot, 'packages', 'host', 'enterprise', 'src', 'client', 'CapabilityCenterPanel.tsx',
+  workspaceRoot, 'packages', 'client', 'capability-center', 'src', 'client', 'CapabilityCenterPanel.tsx',
 )
 
 /** 修复规则的选择器：只用 html:has() + 我们自己的稳定类名。 */

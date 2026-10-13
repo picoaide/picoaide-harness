@@ -8,8 +8,10 @@
  * 历史：这里原来是 `position:fixed` 的模态浮层（`OVERLAY`/`MASK`/`PANEL` +
  * Esc 关闭 + Tab 焦点陷阱）。2026-09-20 与连接器、应用中心一起改成中列整页 ——
  * 模态的焦点陷阱与"面板住在侧边栏槽位树里"这两件事都不再需要。
+ * 2026-10-13 随能力中心的客户端面一起从 `@picoaide/dsh-enterprise` 搬到本包
+ * （逐字搬迁，面板 id 与装载语义未变）。
  *
- * @module @picoaide/dsh-enterprise/client/capability-surface
+ * @module @picoaide/dsh-capability-center/client/capability-surface
  */
 
 import { createElement } from 'react'

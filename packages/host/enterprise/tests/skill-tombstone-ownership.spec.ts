@@ -44,7 +44,7 @@ import {
   localRemoveEndpoint,
   planCardAction,
   uninstallRequestUrl,
-} from '../src/client/CapabilityCenterPanel.tsx'
+} from '../../../client/capability-center/src/client/CapabilityCenterPanel.tsx'
 import type { Session } from '../src/server-connector/config.ts'
 import { isolateRuntimeSkillRoots } from './helpers/runtime-skill-roots.ts'
 
@@ -271,7 +271,7 @@ describe('C2-1 面板接线：归属证明不了时把 `ownership=unknown` 拼�
  * `uninstallRequestUrl` 自己的用例照样全绿（实测过）。
  */
 describe('C2-1 接线判据：卸载请求真的走 uninstallRequestUrl', () => {
-  const source = readFileSync(fileURLToPath(new URL('../src/client/CapabilityCenterPanel.tsx', import.meta.url)), 'utf8')
+  const source = readFileSync(fileURLToPath(new URL('../../../client/capability-center/src/client/CapabilityCenterPanel.tsx', import.meta.url)), 'utf8')
 
   it('卸载那一发用 uninstallRequestUrl 拼 URL（旧写法不得留在卸载路径上）', () => {
     expect(source).toContain("fetch(uninstallRequestUrl(item, { overwrite: true }), { method: 'POST' })")

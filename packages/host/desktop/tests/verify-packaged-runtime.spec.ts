@@ -2520,9 +2520,9 @@ describe('packaged ASAR bigint semantics smoke (issue #130)', () => {
 })
 
   it('profile 锚点表与真实的 bundle 层解析结果逐条对拍（防新增插件漏登记）', () => {
-    // 判据来源（2026-09-28 改口径）：十个自有组装补丁层**不再**由 `src/profile.ts` 逐个
+    // 判据来源（2026-09-28 改口径）：十一个自有组装补丁层**不再**由 `src/profile.ts` 逐个
     // `resolve('<pkg>/package.json')` 手工解析 —— 它们现在是 profile 的 **bundle 层**
-    // （`REQUIRED_BUNDLES` 列出九个自有包，各自 `dsh.bundle.patch` 指向自己的
+    // （`REQUIRED_BUNDLES` 列出十个自有包，各自 `dsh.bundle.patch` 指向自己的
     // `cordis.patch.yml`；桌面自己那一层由 `@picoaide/dsh-enterprise` 用相对路径携带）。
     // 所以"哪些包目录必须在产物里"这条推导改为**读真实的 bundle 清单与各自的 patch 列表**：
     // 每个自有 bundle 的 `package.json` 与它声明的每个补丁文件都必须在锚点表里

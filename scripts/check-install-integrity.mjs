@@ -584,6 +584,14 @@ export const EXECUTION_POINT_REGISTRY = [
   'packages/client/branding/tsconfig.client.json',
   'packages/client/branding/tsconfig.json',
   'packages/client/branding/tsdown.config.ts',
+  // 2026-10-13：能力中心（技能商店）的客户端面从 `packages/host/enterprise` 整块搬进
+  // 新包 `packages/client/capability-center` ⇒ 派生面（{@link deriveExecutionPoints} 来源
+  // (d)：包根的 `tsconfig*.json` / `tsdown.config.ts` / `vitest.config.ts`）多出四条。
+  // 双向登记：派生却未登记即红，所以这四条必须在这里出现，否则"新包的判定面"整片隐形。
+  'packages/client/capability-center/tsconfig.client.json',
+  'packages/client/capability-center/tsconfig.json',
+  'packages/client/capability-center/tsdown.config.ts',
+  'packages/client/capability-center/vitest.config.ts',
   'packages/client/foot-menu/tsconfig.client.json',
   'packages/client/foot-menu/tsconfig.json',
   'packages/client/foot-menu/tsdown.config.ts',

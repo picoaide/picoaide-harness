@@ -265,6 +265,17 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'node_modules/@picoaide/dsh-foot-menu/lib/client.js',
   'node_modules/@picoaide/dsh-foot-menu/package.json',
   'node_modules/@picoaide/dsh-foot-menu/cordis.patch.yml',
+  // 能力中心（技能商店）的客户端面（2026-10-13 从 `@picoaide/dsh-enterprise`
+  // 整块搬出）：`lib/index.js` 是 profile 行 `picoaide-capability-center` 的入口
+  // （宿主半边是 no-op），`lib/client.js` 是那个装了整页面板与底部「更多」条目的
+  // 客户端 bundle —— 缺它会被 `dsh-client-modules` 判成"declares dsh.client but
+  // exports no ./client bundle"，界面上的技能商店整块消失。`package.json` +
+  // `cordis.patch.yml` 是 profile 组装期按包名解析要读的两份（与其余自有包同形）。
+  // 本包**没有** `lib/invariant.js`（没有伴生不变量行），所以只列真实声明的入口。
+  'node_modules/@picoaide/dsh-capability-center/lib/index.js',
+  'node_modules/@picoaide/dsh-capability-center/lib/client.js',
+  'node_modules/@picoaide/dsh-capability-center/package.json',
+  'node_modules/@picoaide/dsh-capability-center/cordis.patch.yml',
   'node_modules/@picoaide/dsh-wasm-apps/lib/index.js',
   'node_modules/@picoaide/dsh-wasm-apps/lib/client.js',
   'node_modules/@picoaide/dsh-wasm-apps/lib/invariant.js',
@@ -1441,6 +1452,11 @@ function desktopProductRoot(): string {
 export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE: readonly WorkspacePackageCoverageFloor[] = [
   { package: 'dsh-account-card', flattened: 5, effective: 5, library: 3 },
   { package: 'dsh-browser', flattened: 7, effective: 7, library: 5 },
+  // 能力中心的客户端面（2026-10-13 从 enterprise 搬出）：4 条扁平条目
+  // （`lib/index.js` / `lib/client.js` / `package.json` / `cordis.patch.yml`），
+  // 生效清单同样 4 条（锚点表里的 package.json + cordis.patch.yml 与扁平表**同一条**，
+  // 并集不增）；`lib/` 产物 2 条。
+  { package: 'dsh-capability-center', flattened: 4, effective: 4, library: 2 },
   // connectors / enterprise 的条目**全部**在 `REQUIRED_ASAR_EXPORTS`（specifier + 落点）里，
   // 扁平清单里一条都没有 ⇒ `flattened: 0` 是有意的，不是漏登记。
   { package: 'dsh-connectors', flattened: 0, effective: 7, library: 5 },
@@ -1463,8 +1479,12 @@ export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE: readonly WorkspacePackageCover
  * 以及 `@picoaide/*` 之外的条目（build/、lib/preload/、上游 node_modules）。
  *
  * 2026-09-29：122 → 129（语音输入默认开启，+7 条 voice-input 链）。
+ * 2026-10-13：129 → 133（能力中心的客户端面搬进 `@picoaide/dsh-capability-center`，
+ * 该包 4 条扁平条目：`lib/index.js` / `lib/client.js` / `package.json` /
+ * `cordis.patch.yml`）。enterprise 侧的条目一条未减 —— 搬走的是客户端面，不是它的
+ * 宿主代理或基础面。
  */
-export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR = 129
+export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR = 133
 // 111 → 114（2026-09-23 合并 origin/master 的 #138）：那条线给必需清单加了
 // `@deepseek-ai/dsh-plugin-manager` 的 3 个 `lib/**` 条目，生效清单随之增长 3 条。
 // 棘轮语义是"贴住下限、只允许上调" ⇒ 合并后同步上调（删条目仍会打破等式）。
@@ -1991,6 +2011,11 @@ export const REQUIRED_PROFILE_PATCH_ANCHORS: readonly string[] = [
   'node_modules/@picoaide/dsh-wasm-apps-host/cordis.patch.yml',
   'node_modules/@picoaide/dsh-cron/package.json',
   'node_modules/@picoaide/dsh-cron/cordis.patch.yml',
+  // 2026-10-13：能力中心的客户端面（`@picoaide/dsh-capability-center`）同样是
+  // profile 的一层 bundle ⇒ 它的 `package.json` + `cordis.patch.yml` 必须随包
+  // （缺任一份，`prepareDesktopProfile()` 组装期解析即抛错、应用根本起不来）。
+  'node_modules/@picoaide/dsh-capability-center/package.json',
+  'node_modules/@picoaide/dsh-capability-center/cordis.patch.yml',
   'node_modules/dsh-memory-evolve/package.json',
   'node_modules/dsh-memory-evolve/cordis.patch.yml',
 ]

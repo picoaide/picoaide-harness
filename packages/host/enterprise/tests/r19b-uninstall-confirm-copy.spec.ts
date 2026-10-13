@@ -26,12 +26,18 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { en, setActiveLocale, t, zh } from '../src/client/locales.ts'
+import { en, setActiveLocale, t, zh } from '../../../client/capability-center/src/client/locales.ts'
 import { afterEach } from 'vitest'
 
 const PKG_ROOT = fileURLToPath(new URL('..', import.meta.url))
-const LOCALE_FILE = join(PKG_ROOT, 'src', 'client', 'locales.ts')
-const PANEL_FILE = join(PKG_ROOT, 'src', 'client', 'CapabilityCenterPanel.tsx')
+/**
+ * 能力中心的面板与字典（2026-10-13 起住在 `@picoaide/dsh-capability-center`）。
+ * 判据本身没变：文案仍必须只有字典里那一份、面板仍必须经 `t()` 引用它们 ——
+ * 只是面板/字典的**归属包**换了，盘上的路径跟着走。
+ */
+const CAPABILITY_ROOT = fileURLToPath(new URL('../../../client/capability-center', import.meta.url))
+const LOCALE_FILE = join(CAPABILITY_ROOT, 'src', 'client', 'locales.ts')
+const PANEL_FILE = join(CAPABILITY_ROOT, 'src', 'client', 'CapabilityCenterPanel.tsx')
 const INSTALL_FILE = join(PKG_ROOT, 'src', 'skill-install.ts')
 
 const CJK = /[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/u

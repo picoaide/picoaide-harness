@@ -11,7 +11,7 @@ Upstream is DeepSeek Harness (`deepseek-ai/deepseek-harness`), and this product 
 
 | | Upstream | This product |
 |---|---|---|
-| What it provides | The Cordis plugin framework, core capabilities (agent, session, tools, sandbox), the Web UI, the `@deepseek-ai/dsh-*` package family with its official bundles (`dsh-base`, `dsh-web-app`, and the presets), and the plugin-authoring skills the agent reads | The desktop shell and three platform clients, the enterprise server (auth / gateway / metering / capability hub / audit), channel white-labelling, ten product-owned composition layers, and a small number of upstream patches that each carry criteria |
+| What it provides | The Cordis plugin framework, core capabilities (agent, session, tools, sandbox), the Web UI, the `@deepseek-ai/dsh-*` package family with its official bundles (`dsh-base`, `dsh-web-app`, and the presets), and the plugin-authoring skills the agent reads | The desktop shell and three platform clients, the enterprise server (auth / gateway / metering / capability hub / audit), channel white-labelling, eleven product-owned composition layers, and a small number of upstream patches that each carry criteria |
 | How plugins are installed | Loader composition: bundle layers → profile layer → user layer → overlays; packages come from npm into the profile | The same Loader semantics; additionally one fixed `desktop` profile and a narrowed interface to raw Electron capabilities |
 | Ecosystem shape | **No plugin marketplace**; the install path is "author a bundle, install it into the profile with a package manager" | No marketplace either. Two routes for third-party plugins: the user patch layer (takes effect on restart) or bundled distribution (see [Plugin Development](/en/plugin-development/)) |
 
@@ -25,7 +25,7 @@ Three things worth knowing:
 
 The three rules are both requirements for plugin authors and the rules this product follows itself:
 
-1. **Composition first**: compose capabilities through official bundle layers, services, slots, and patches; never assume or override another plugin's internals. The desktop shell is the example — it is ten patch layers plus one `desktopRuntime` registration contract, with no privileges.
+1. **Composition first**: compose capabilities through official bundle layers, services, slots, and patches; never assume or override another plugin's internals. The desktop shell is the example — it is eleven patch layers plus one `desktopRuntime` registration contract, with no privileges.
 2. **Declare clearly**: state the services and slots you depend on, and state your external module requests explicitly; do not rely on runtime coincidences (such as "some slot has probably been declared by now").
 3. **Compatibility first**: prefer upstream's stable seams (services, slots, config schemas) over row ordering, DOM structure, or internal fields.
 
