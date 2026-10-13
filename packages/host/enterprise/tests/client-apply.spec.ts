@@ -4,7 +4,7 @@
  * 本文件的前身是 `client-foot-entry.spec.ts` —— 那时它跑真 `apply` 断言的是
  * **能力中心的底部条目**（id/order/title/activate）与面板装载。能力中心的客户端面
  * 整块搬进 `@picoaide/dsh-capability-center` 之后，那几条断言**逐条搬到了**
- * `packages/client/capability-center/tests/client-plugin.spec.ts`（一条不少），
+ * `packages/host/capability-center/tests/client-plugin.spec.ts`（一条不少），
  * 本文件改成断言企业包**留下的**那一半，并补上搬迁的**反向不变量**：
  *
  *   - 企业包仍然登记它自己的全部面（字典 / 品牌槽位 / 账号设置页 / favicon /

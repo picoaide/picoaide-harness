@@ -64,7 +64,10 @@ const attempts: Array<{ server: string; path: string; token?: string }> = []
 let fetchShouldFail = false
 /** 非 null 时挂起请求(S07-02 的在飞去重用例需要一次"尚未返回"的上报)。 */
 let fetchGate: Promise<void> | null = null
-vi.mock('../src/server-connector/auth.ts', () => ({
+// 2026-10-13（P0-b）：`fetchJSON` 的实现搬到叶子包 `@picoaide/dsh-gateway-client`
+// （enterprise 保留同名 re-export）。mock 必须打在**实现模块**的 id 上 —— 打在
+// re-export 上会拦不到（被测插件 import 的是叶子包），Sentry 摄取账本会恒空。
+vi.mock('@picoaide/dsh-gateway-client/auth', () => ({
   fetchJSON: vi.fn(async (serverURL: string, path: string, opts: { body?: unknown; token?: string }) => {
     // token 决定服务端把那行状态 upsert 到**哪个用户**(S07-02 复核 2026-09-17):
     // 每个用例只读 server/path,但"两个用户 = 两行"要靠它区分。
@@ -827,6 +830,7 @@ describe('退出冲刷的 disposer 契约(F-05)', () => {
         disposers.push(fn())
         return () => {}
       },
+      provide: (name: string, value: unknown) => { (ctx as unknown as Record<string, unknown>)[`__svc_${name}`] = value },
       get: () => undefined,
     } as unknown as Context
     return { ctx, disposers }

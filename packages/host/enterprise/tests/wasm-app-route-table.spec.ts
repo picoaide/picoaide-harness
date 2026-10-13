@@ -21,7 +21,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
-const SOURCE = readFileSync(fileURLToPath(new URL('../src/wasm-apps.ts', import.meta.url)), 'utf8')
+const SOURCE = readFileSync(fileURLToPath(new URL('../../wasm-apps-host/src/wasm-apps.ts', import.meta.url)), 'utf8')
 
 /** 路由表所在的那段 JSDoc（找不到即抛：文档搬家时必须同步改本用例的锚）。 */
 function routeTableDoc(): string {

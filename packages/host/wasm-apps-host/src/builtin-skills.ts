@@ -15,8 +15,8 @@
  */
 import { stat } from 'node:fs/promises'
 import { join } from 'node:path'
-import { resolveSkillsDir } from './skill-install.ts'
-import { DEFAULT_HOST_LOCALE, hostCopy, type HostLocale } from 'dsh-plugin-desktop/host-locale'
+import { resolveSkillsDir } from '@picoaide/dsh-host-home'
+import { DEFAULT_HOST_LOCALE, hostCopy, type HostLocale } from './locale.ts'
 
 /**
  * 平台内置的 WASM 应用作者手册技能名（服务端资产目录名 = 技能运行时名）。

@@ -39,6 +39,7 @@ import { parseAppDeepLink, parseForeignAppDeepLink } from './deep-link.ts'
 import type { AppSchemeRequestHandler, WasmAppsHostAdapter, WasmAppsWindowAdapter } from './electron-adapter.ts'
 import { createAppSchemeHandler } from './handler.ts'
 import { createHostRequestSurface, type SurfaceReply } from './host-request.ts'
+import { registerAppRoutes, type HostLocalRouteFence } from './app-routes.ts'
 import { hostCopy, hostLocaleFrom, type HostLocale } from './locale.ts'
 import { browserPartitionFor, serverPartitionHash } from './partition.ts'
 import { createScopeReset } from './scope-reset.ts'
@@ -75,7 +76,7 @@ export const WASM_APPS_FEATURE_SENTINEL = 'picoaide.feature.apps.v1'
  * 适配器**不进 inject**：它是桌面壳 `provide` 进来的普通值，且允许缺席（纯 Node
  * 宿主/单测）—— 缺席时协议注册是 no-op 并记一条 warn，本机路由 fail-closed。
  */
-export const inject = ['picoSession', 'webServer']
+export const inject = ['picoSession', 'webServer', 'picoLocalRoutes']
 
 /** 桌面壳 `provide` 适配器用的服务名。 */
 export const WASM_APPS_HOST_ADAPTER_SERVICE = 'wasmAppsHostAdapter'
@@ -1019,6 +1020,24 @@ export function apply(ctx: Context, config: Config = {}): void {
     })
     return () => { surface.dispose() }
   }, 'pico wasm apps host: local request surface')
+
+  // ---- 应用中心（应用平台）的宿主面：`/api/pico/apps/wasm*` + 宿主工具面 ----
+  //
+  // 2026-10-13（P0-b）自 `@picoaide/dsh-enterprise` 的 auth-gate 搬入：那一整块
+  // （目录 / 预检 / 发布编排 / 生命周期代理 / `wasm_app_*` 工具）是**应用模块**的
+  // 内容，留在必需包里就等于"关掉应用中心它的代码照样进产物"。
+  //
+  // 围栏不在这里重实现：auth-gate 经服务 `picoLocalRoutes` 交出同一批闭包
+  // （回环 + 同源 + 持有性证明、审计只读、按请求解析的语言），本行只做结构探测。
+  ctx.effect(() => {
+    const fence = ctx.get('picoLocalRoutes') as HostLocalRouteFence | undefined
+    if (fence === undefined) {
+      // 组合被改坏时的**可见**失败：安静地少掉整块本机 API 正是本仓要消灭的形态。
+      ctx.logger?.error?.('pico-wasm-apps-host: picoLocalRoutes is absent — the /api/pico/apps/wasm* routes and the wasm_app_* tools were NOT registered')
+      return () => {}
+    }
+    return registerAppRoutes(ctx, fence)
+  }, 'pico wasm apps host: app store routes')
 }
 
 /** 应用源 scheme 前缀（导出给跨包对拍用例：渲染层拼接分享链接时必须用它）。 */

@@ -66,8 +66,8 @@ import {
   installSkillArchive,
   listInstalledSkills,
   packSkill,
-} from '../src/skill-install.ts'
-import { SKILL_TEXT_BINARY_SAMPLE_BYTES, decodeSkillTextBytes } from '../src/skill-frontmatter.ts'
+} from '../../capability-center/src/host/skill-install.ts'
+import { SKILL_TEXT_BINARY_SAMPLE_BYTES, decodeSkillTextBytes } from '../../capability-center/src/host/skill-frontmatter.ts'
 import { isolateRuntimeSkillRoots } from './helpers/runtime-skill-roots.ts'
 import {
   listRuntimeSkills,

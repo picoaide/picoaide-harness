@@ -40,9 +40,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { apply, type Config as AuthGateConfig } from '../src/auth-gate.ts'
-import { AI_ROWS_CONSENT_BODY_MAX_BYTES, WASM_APPS_PREFIX } from '../src/wasm-apps.ts'
-import { AI_ROWS_NOT_AUTHORIZED } from '../src/wasm-app-tools.ts'
+import { type Config as AuthGateConfig } from '../src/auth-gate.ts'
+import { applyFullComposition as apply } from './helpers/apply-full-composition.ts'
+import { AI_ROWS_CONSENT_BODY_MAX_BYTES, WASM_APPS_PREFIX } from '../../wasm-apps-host/src/wasm-apps.ts'
+import { AI_ROWS_NOT_AUTHORIZED } from '../../wasm-apps-host/src/wasm-app-tools.ts'
 import {
   AI_ROWS_CONSENT_FILE_NAME,
   AI_ROWS_CONSENT_FORMAT_VERSION,
@@ -52,7 +53,7 @@ import {
   isAiRowsConsentScopeError,
   parseAiRowsConsent,
   serializeAiRowsConsent,
-} from '../src/wasm-apps-ai-rows-consent.ts'
+} from '../../wasm-apps-host/src/wasm-apps-ai-rows-consent.ts'
 import type { Session } from '../src/server-connector/config.ts'
 
 const SESSION: Session = {
@@ -122,6 +123,7 @@ function harness(
   const outbound: Outbound[] = []
   const ctx = {
     effect: (fn: () => unknown) => { fn() },
+    provide: (name: string, value: unknown) => { (ctx as unknown as Record<string, unknown>)[`__svc_${name}`] = value },
     // `connection.requestRejection` 的替身：持 `dsh-auth-*` cookie 才给持有性证明
     //（与 tests/wasm-apps.spec.ts 的 browserFence 同款）—— 否则"裸 curl 读不到/改不了
     // 授权状态"这条判据就是恒真的。

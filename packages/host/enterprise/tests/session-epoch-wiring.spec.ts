@@ -202,9 +202,13 @@ const ENTRY_EXEMPTIONS: Readonly<Record<string, EntryExemption>> = {
   // 11 + 2 = 13 条 `await-outside-guard` 豁免行 —— 那是拿假精度换假绿。
   // ── 第三十三轮 FIX-49 ④：`wasm-apps-host/src/index.ts` **收口代际守卫**，于是
   //    FIX-44 ② 那条"整文件豁免"按双向陈旧检测自行退场（见下面的 AWAIT_EXEMPTIONS）。
-  'packages/host/enterprise/src/skill-telemetry.ts': {
+  'packages/host/capability-center/src/host/skill-telemetry.ts': {
     reason: 'FIX-40 ③ 收口、FIX-44 ② 复核为**等价机制**：上报是**事件归属**，不是"当前会话的投影" —— 事件发生在哪一代就记在哪一代名下，代际守卫会把换代窗口里的真实调用**整份丢掉**（既错记 vs 丢记，前者可修、后者不可观测）。机制 = **作用域在观察点、第一个 await 之前同步取**：两个观察点都先 `const session = ctx.picoSession.getSession()` 再 `void installedVersion(...)`，而 `reportSkillCall` 的去重键 `reportKey(session, …)` 自带账号 + 服务端地址 + 令牌 ⇒ 每条上报自带归属身份。判据 `tests/skill-telemetry-session-capture.spec.ts`（3 例；读文件由用例控闸，会话在读取期间从 ALICE 切到 BOB，断言这一笔仍记在 ALICE）。**负控**：把取用挪到 `installedVersion` 的续体里（修前形状）⇒ 同一份 spec 当场红（2026-09-23 实跑，日志 temp/r21/fix-44/probe/logs/nc-b-skill-telemetry.log）。**装代际是错的**：实测装上会让规则 C 对 `reportSkillCall`（`await fetchJSON`）与 `installedVersion`（`await readFile`）报红，而这两处 await 之后只返回值 / 只写"自带作用域身份的已报键集合"，没有跨代落地路径。',
-    witness: 'const session = ctx.picoSession.getSession()',
+    // 2026-10-13（P0-b）：观察点仍是在第一个 await **之前**同步取会话，但取值面从
+    // `ctx.picoSession.getSession()` 改成结构探测（`currentSession(ctx)`）—— 那两处
+    // `const session = ...` 的**位置与语义都没变**，变的是它怎么拿到服务（本包不能再
+    // 依赖 provider 的 `declare module`）。见证字面量跟着改。
+    witness: 'const session = currentSession(ctx)',
   },
 }
 
@@ -220,7 +224,7 @@ const ENTRY_EXEMPTIONS: Readonly<Record<string, EntryExemption>> = {
  * 全部内容是"摘掉登记后 `analyze()` 还会不会产出 `entry-not-guarded`"，而那条判定的
  * 取值域是 `begin()`/`isCurrent()`/`StillCurrent` 谓词。**用等价机制收口的站点放进这张
  * 表不会被自清理** —— 那正是 `wasm-apps-host/src/index.ts` 与
- * `enterprise/src/skill-telemetry.ts` 卡在这里两轮的原因（FIX-40 ③ 已经收口，但机制是
+ * `capability-center/src/host/skill-telemetry.ts` 卡在这里两轮的原因（FIX-40 ③ 已经收口，但机制是
  * 排序链 / 调用时刻归属，登记项怎么都不会变红）。**等价机制的归宿是
  * `ENTRY_EXEMPTIONS`**（`witness` 钉机制 + `reason` 写明由谁保证），见第二十九轮
  * FIX-44 ②。把"应当有代际但没装"与"用别的机制收口了"混在一张表里，会让前者永远

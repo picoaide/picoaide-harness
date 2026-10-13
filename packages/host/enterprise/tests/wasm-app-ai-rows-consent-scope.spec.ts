@@ -33,9 +33,10 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { apply, type Config as AuthGateConfig } from '../src/auth-gate.ts'
-import { WASM_APPS_PREFIX } from '../src/wasm-apps.ts'
-import { AI_ROWS_NOT_AUTHORIZED } from '../src/wasm-app-tools.ts'
+import { type Config as AuthGateConfig } from '../src/auth-gate.ts'
+import { applyFullComposition as apply } from './helpers/apply-full-composition.ts'
+import { WASM_APPS_PREFIX } from '../../wasm-apps-host/src/wasm-apps.ts'
+import { AI_ROWS_NOT_AUTHORIZED } from '../../wasm-apps-host/src/wasm-app-tools.ts'
 import {
   AI_ROWS_CONSENT_FILE_NAME,
   AI_ROWS_CONSENT_FORMAT_VERSION,
@@ -43,7 +44,7 @@ import {
   createAiRowsConsentStore,
   isAiRowsConsentScopeError,
   parseAiRowsConsent,
-} from '../src/wasm-apps-ai-rows-consent.ts'
+} from '../../wasm-apps-host/src/wasm-apps-ai-rows-consent.ts'
 import type { Session } from '../src/server-connector/config.ts'
 
 /** 员工 A（租户 1）。 */
@@ -127,6 +128,7 @@ function harness(initial: Session | null): Harness {
   let current: Session | null = initial
   const ctx = {
     effect: (fn: () => unknown) => { fn() },
+    provide: (name: string, value: unknown) => { (ctx as unknown as Record<string, unknown>)[`__svc_${name}`] = value },
     get: (name: string) => (name === 'connection'
       ? {
           requestRejection: (request: { headers: Record<string, unknown> }) => {
@@ -302,7 +304,7 @@ describe('换服务端地址不得继承（同一个用户名、同一台机器�
   })
 
   it('源码级：读面与写面共用**同一个**键构造点（只允许一份实现）', () => {
-    const source = readFileSync(fileURLToPath(new URL('../src/wasm-apps-ai-rows-consent.ts', import.meta.url)), 'utf8')
+    const source = readFileSync(fileURLToPath(new URL('../../wasm-apps-host/src/wasm-apps-ai-rows-consent.ts', import.meta.url)), 'utf8')
     const isEnabledBody = /async isEnabled\(appId: string\): Promise<boolean> \{([\s\S]*?)\n {4}\},/u.exec(source)?.[1]
     const setEnabledBody = /setEnabled\(appId: string, enabled: boolean\): Promise<void> \{([\s\S]*?)\n {4}\},\n {2}\}/u.exec(source)?.[1]
     expect(isEnabledBody, 'isEnabled 方法体没找到（源码形状变了，请同步这条判据）').toBeDefined()

@@ -33,8 +33,9 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // @ts-expect-error vendored plain JS (no types)
 import { BUILTIN_SKILLS, syncBuiltinSkills } from '../../../vendor/memory-evolve/lib/coi/skills-sync.js'
-import { apply, type Config } from '../src/auth-gate.ts'
-import { SKILL_REMOVED_DIR } from '../src/skill-install.ts'
+import { type Config } from '../src/auth-gate.ts'
+import { applyFullComposition as apply } from './helpers/apply-full-composition.ts'
+import { SKILL_REMOVED_DIR } from '../../capability-center/src/host/skill-install.ts'
 import type { Session } from '../src/server-connector/config.ts'
 import { isolateRuntimeSkillRoots } from './helpers/runtime-skill-roots.ts'
 
@@ -128,6 +129,7 @@ function harness(): { call: (method: string, url: string) => Promise<{ code: num
   const routes: Route[] = []
   const ctx = {
     effect: (fn: () => unknown) => { fn() },
+    provide: (name: string, value: unknown) => { (ctx as unknown as Record<string, unknown>)[`__svc_${name}`] = value },
     get: (name: string) => (name === 'connection'
       ? { requestRejection: (r: { headers: Record<string, unknown> }) => (r.headers['cookie'] === undefined ? (401 as const) : undefined) }
       : undefined),
@@ -226,7 +228,8 @@ describe('C2-1 取值面：无法识别的 `?ownership` 必须 fail-loud（400�
  * 把校验挪到写盘之后，① 仍然可能全绿。
  */
 describe('C2-1 取值面接线：校验必须在算 localOwnership 之前、且在卸载分支之前', () => {
-  const source = readFileSync(fileURLToPath(new URL('../src/auth-gate.ts', import.meta.url)), 'utf8')
+  // 2026-10-13（P0-b）：`?source=local` 的取值校验随本机路由搬到 capability-center。
+  const source = readFileSync(fileURLToPath(new URL('../../capability-center/src/host/skill-routes.ts', import.meta.url)), 'utf8')
 
   it('非法取值早退（400 INVALID_OWNERSHIP）出现在 `const localOwnership =` 之前', () => {
     const guard = source.indexOf("code: 'INVALID_OWNERSHIP'")

@@ -29,7 +29,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as tar from 'tar'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { installSkillArchive, provenanceServerVerdict, writeProvenance } from '../src/skill-install.ts'
+import { installSkillArchive, provenanceServerVerdict, writeProvenance } from '../../capability-center/src/host/skill-install.ts'
 import type { Session } from '../src/server-connector/config.ts'
 import { fakeReq, fakeRes, harness, stubGateway } from './helpers/auth-gate-harness.ts'
 import { isolateRuntimeSkillRoots } from './helpers/runtime-skill-roots.ts'
@@ -180,7 +180,7 @@ describe('R19A-S2-08：`channel: plugin` 只能由库内写者落下（归档伪
     // 故意**不给** version：安装器就不会覆写 `.install-version`，归档那份是否还在盘上
     // 完全取决于"安装器独占面"的清除（这就是这条判据咬得到的地方）。
     await installSkillArchive({ name: 'forged', archive, skillsDir, channel: 'market', server: SERVER })
-    const { INSTALL_VERSION_FILE, readProvenance } = await import('../src/skill-install.ts')
+    const { INSTALL_VERSION_FILE, readProvenance } = await import('../../capability-center/src/host/skill-install.ts')
     const prov = await readProvenance(join(skillsDir, 'forged'))
     console.log('[S2-08] 落地后的溯源 =', JSON.stringify(prov))
     expect(prov?.channel, '归档不得自证"随包"').toBe('market')

@@ -41,7 +41,7 @@ import {
   sweepStaleSkillTemps,
   type SkillCleanupRecord,
   type SkillInstallLog,
-} from '../src/skill-install.ts'
+} from '../../capability-center/src/host/skill-install.ts'
 
 /**
  * TOCTOU 插桩的控制器（`vi.mock` 的工厂在 import 期求值，所以状态必须 `vi.hoisted`）。

@@ -25,6 +25,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { subscribeSessionChanges } from '@picoaide/dsh-host-locale/session-events'
+import type { Session } from '@picoaide/dsh-gateway-client/config'
 
 /**
  * 员工会话变化事件（唯一实现在叶子包 `@picoaide/dsh-host-locale/session-events`；
@@ -49,6 +50,52 @@ export interface PicoSessionLike {
   isRestored?: () => boolean
   isLoggedIn?: () => boolean
   clear?: () => void
+  /**
+   * 只清"发起这次请求时的那一个会话"（R22-V1-N3：迟到的 401 不得清掉新登录）。
+   *
+   * 2026-10-13（P0-b）：应用面的编排与工具原本直接写 `ctx.picoSession…`（那时它们
+   * 住在 `@picoaide/dsh-enterprise` 里，服务由同一个包提供）。搬进本包后不能再依赖
+   * provider 的 `declare module`，改回本模块既有的**结构探测**读法
+   * （{@link picoSessionOf}）。
+   */
+  clearIfCurrent?: (token: string) => void
+}
+
+/**
+ * 应用面（本机路由编排 + `wasm_app_*` 工具）需要的会话服务**读写面**。
+ *
+ * 返回的是 `@picoaide/dsh-gateway-client/config` 的 `Session`（而不是上面的
+ * `AppSession`）：应用的写面要判 `role === 'auditor'`、并把会话原样交给编排，
+ * 那几个字段必须可见。
+ */
+export interface PicoSessionHostFace {
+  getSession: () => Session | null
+  /**
+   * 只清"发起这次调用时的那一个会话"（迟到 401 不得清掉新登录；R22-V1-N3）。
+   *
+   * 可选：探测面**只以 `getSession` 为必需**（读面与写面是两条独立能力，最小组合/
+   * 夹具可以只提供读面），缺席时出站路径的 401 分支不清会话 —— 与
+   * `PicoSessionLike` 里那批可选方法同一口径。
+   */
+  clearIfCurrent?: (token: string) => void
+}
+
+/**
+ * 探测 `picoSession` 的读写面。
+ *
+ * 服务缺席或形状不符时返回 null，调用方按"未登录"处理（绝不猜）—— 与
+ * {@link readAppSession} 同一口径。
+ * @param ctx - Cordis 上下文。
+ * @returns 结构面，或不可用时的 null。
+ */
+export function picoSessionOf(ctx: Context): PicoSessionHostFace | null {
+  // 结构探测而不是必需依赖：最小组合（单测、无头嵌入）里 `get` 可能整个缺席 ——
+  // 那时按"没有会话服务"处理（调用方回 AUTH_REQUIRED），与 `readAppSession` 同口径。
+  const probe = (typeof ctx.get === 'function' ? ctx.get('picoSession') : undefined) as Partial<PicoSessionHostFace> | undefined
+  if (typeof probe?.getSession !== 'function') return null
+  const face: PicoSessionHostFace = { getSession: probe.getSession.bind(probe) }
+  if (typeof probe.clearIfCurrent === 'function') face.clearIfCurrent = probe.clearIfCurrent.bind(probe)
+  return face
 }
 
 declare module '@deepseek-ai/cordis' {

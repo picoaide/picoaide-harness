@@ -97,7 +97,7 @@ describe('技能用量上报的会话归属（FIX-40 ③：观察点同步取会
   it('tools/result：读版本期间换账号 ⇒ 这一笔仍记在**发起时**那一代名下', async () => {
     let session: Session | null = ALICE
     const { handlers, ctx } = drivenContext(() => session)
-    const { apply } = await import('../src/skill-telemetry.ts')
+    const { apply } = await import('../../capability-center/src/host/skill-telemetry.ts')
     apply(ctx)
 
     handlers.get('tools/result')!(EXEC as never, OK_RESULT as never)
@@ -117,7 +117,7 @@ describe('技能用量上报的会话归属（FIX-40 ③：观察点同步取会
   it('session/event（用户 /name 手势）：同一条归属判据', async () => {
     let session: Session | null = ALICE
     const { handlers, ctx } = drivenContext(() => session)
-    const { apply } = await import('../src/skill-telemetry.ts')
+    const { apply } = await import('../../capability-center/src/host/skill-telemetry.ts')
     apply(ctx)
 
     handlers.get('session/event')!(
@@ -140,7 +140,7 @@ describe('技能用量上报的会话归属（FIX-40 ③：观察点同步取会
     // 修前的形态逐字复刻：会话在 await 的续体里才读。
     const preFixShape = (): void => {
       void Promise.resolve()
-        .then(async () => await (await import('../src/skill-telemetry.ts')).reportSkillCall(session, 'codeql', '9.9.9', 'c-legacy'))
+        .then(async () => await (await import('../../capability-center/src/host/skill-telemetry.ts')).reportSkillCall(session, 'codeql', '9.9.9', 'c-legacy'))
     }
     session = ALICE
     preFixShape()

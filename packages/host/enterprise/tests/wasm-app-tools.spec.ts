@@ -32,10 +32,11 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { apply, inject as authGateInject, type Config as AuthGateConfig } from '../src/auth-gate.ts'
-import * as authConnector from '../src/server-connector/auth.ts'
-import * as wasmApps from '../src/wasm-apps.ts'
-import { CLIENT_UPLOAD_TIMEOUT_MS, WASM_APPS_PREFIX } from '../src/wasm-apps.ts'
+import { inject as authGateInject, type Config as AuthGateConfig } from '../src/auth-gate.ts'
+import { applyFullComposition as apply } from './helpers/apply-full-composition.ts'
+import * as authConnector from '@picoaide/dsh-gateway-client/auth'
+import * as wasmApps from '../../wasm-apps-host/src/wasm-apps.ts'
+import { CLIENT_UPLOAD_TIMEOUT_MS, WASM_APPS_PREFIX } from '../../wasm-apps-host/src/wasm-apps.ts'
 import {
   APP_CONFIG_ACCESS_MODES,
   APP_CONFIG_DEFAULT_ACCESS,
@@ -46,27 +47,30 @@ import {
   WASM_APP_TOOL_TIMEOUT_MS,
   skillHintAppliesTo,
   wasmAppToolHeadroomMs,
-} from '../src/wasm-app-tools.ts'
-import { APP_BUILDER_SKILL } from '../src/builtin-skills.ts'
+} from '../../wasm-apps-host/src/wasm-app-tools.ts'
+import { APP_BUILDER_SKILL } from '../../wasm-apps-host/src/builtin-skills.ts'
 import {
   AI_ROWS_CONSENT_FILE_NAME,
   aiRowsConsentKey,
   serializeAiRowsConsent,
-} from '../src/wasm-apps-ai-rows-consent.ts'
+} from '../../wasm-apps-host/src/wasm-apps-ai-rows-consent.ts'
 import type { Session } from '../src/server-connector/config.ts'
 
 // `publishApp` 换成计数 spy（实现不变）：这样"路由"与"工具"两条路径是否命中**同一个
 // 函数"就成了可断言的事实，而不是靠人读代码。mock 是文件级的 —— auth-gate（路由）
 // 与 wasm-app-tools（工具）拿到的都是这个 spy。
-vi.mock('../src/wasm-apps.ts', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../src/wasm-apps.ts')>()
+vi.mock('../../wasm-apps-host/src/wasm-apps.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../wasm-apps-host/src/wasm-apps.ts')>()
   return { ...actual, publishApp: vi.fn(actual.publishApp) }
 })
 
 // 出站原语也换成计数 spy：它是**跨模块**导入（wasm-apps.ts ← server-connector/auth.ts），
 // 因此路由与工具两条路径都会命中它 —— 这是"两条路径共用同一条出站链路"的直接计数器。
-vi.mock('../src/server-connector/auth.ts', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../src/server-connector/auth.ts')>()
+// 2026-10-13（P0-b）：`gatewayFetch` 的实现搬到叶子包 `@picoaide/dsh-gateway-client`
+// （enterprise 保留同名 re-export）。mock 必须打在**实现模块**的 id 上 —— 打在
+// re-export 上拦不到被测方（它们 import 的是叶子包），计数会恒 0。
+vi.mock('@picoaide/dsh-gateway-client/auth', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@picoaide/dsh-gateway-client/auth')>()
   return { ...actual, gatewayFetch: vi.fn(actual.gatewayFetch) }
 })
 
@@ -151,7 +155,10 @@ function harness(
   const state = { cleared: 0 }
   const ctx = {
     effect: (fn: () => unknown) => { fn() },
+    provide: (name: string, value: unknown) => { (ctx as unknown as Record<string, unknown>)[`__svc_${name}`] = value },
     get: (name: string) => {
+      const provided = (ctx as unknown as Record<string, unknown>)[`__svc_${name}`]
+      if (provided !== undefined) return provided
       if (name === 'connection') return { requestRejection: () => undefined }
       if (name === 'workspaceRegistry') {
         const path = (options.workspacePath ?? ((): string | null => workspace))()
@@ -1004,7 +1011,7 @@ describe('wasm_app_publish：错误信封与本地闸门', () => {
 // ---------------------------------------------------------------------------
 
 describe('路由与工具命中同一个实现（防"复制一份编排"）', () => {
-  const TOOL_SOURCE = readFileSync(fileURLToPath(new URL('../src/wasm-app-tools.ts', import.meta.url)), 'utf8')
+  const TOOL_SOURCE = readFileSync(fileURLToPath(new URL('../../wasm-apps-host/src/wasm-app-tools.ts', import.meta.url)), 'utf8')
 
   it('工具只调共享编排：文件里没有任何上游路径 / 出站原语 / 分片实现', () => {
     // 结构性判据：编排（路径拼装、90 s 预算、分片续传、错误信封）只允许住在

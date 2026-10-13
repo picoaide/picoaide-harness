@@ -25,7 +25,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { computeSkillContentHash } from '../src/skill-install.ts'
+import { computeSkillContentHash } from '../../capability-center/src/host/skill-install.ts'
 // @ts-expect-error vendored plain JS (no types)
 import { skillContentChecksum } from '../../../vendor/memory-evolve/lib/coi/skills-sync.js'
 // @ts-expect-error vendored plain JS (no types)
@@ -34,7 +34,9 @@ import { toggleDisableFlag } from '../../../vendor/memory-evolve/lib/skill-manif
 const HERE = dirname(fileURLToPath(import.meta.url))
 /** 仓库根：从本文件（`packages/host/enterprise/tests/`）往上走四级（读 Go 真源用）。 */
 const REPO_ROOT = resolve(HERE, '..', '..', '..', '..')
-const ENTERPRISE_FILE = join(HERE, '..', 'src', 'skill-install.ts')
+// 2026-10-13（P0-b）：安装器随技能面搬到 `packages/host/capability-center/src/host/`。
+// 对拍对象没变（还是那一份唯一实现），路径跟着走。
+const ENTERPRISE_FILE = join(HERE, '..', '..', 'capability-center', 'src', 'host', 'skill-install.ts')
 const VENDOR_FILE = join(HERE, '..', '..', '..', 'vendor', 'memory-evolve', 'lib', 'coi', 'skills-sync.js')
 /** 禁用字段（N1b）的唯一实现：vendored 的 `lib/skill-manifest.js`。 */
 const VENDOR_MANIFEST_FILE = join(HERE, '..', '..', '..', 'vendor', 'memory-evolve', 'lib', 'skill-manifest.js')
@@ -170,7 +172,7 @@ describe('F4 跨端契约对拍（读对方源码文本，找不到即 throw）'
 // R4-D-8：技能名语法**四处**同源
 //
 // 同一 grammar `/^[a-z0-9]+(?:-[a-z0-9]+)*$/` 在四个文件里各写一份：
-//   ① `src/skill-install.ts`（安装器，**有**对拍：`skill-install.spec.ts` 读 pinned 上游
+//   ① `capability-center/src/host/skill-install.ts`（安装器，**有**对拍：`skill-install.spec.ts` 读 pinned 上游
 //      的 `isSkillName` 逐例比）；
 //   ②③④ `packages/vendor/memory-evolve/lib/{skills.js,skills-manager.js,coi/skills-sync.js}`
 //      ——此前只有一句"与 dsh-skill 一致"的注释，**没有任何判据**读上游或读彼此。

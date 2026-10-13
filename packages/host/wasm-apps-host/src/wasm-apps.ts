@@ -41,16 +41,17 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { dshHomeSafe } from 'dsh-plugin-desktop/desktop-home'
-import { hostCopy, type HostLocale } from 'dsh-plugin-desktop/host-locale'
+import { dshHomeSafe } from '@picoaide/dsh-host-home'
+import { hostCopy, type HostLocale } from './locale.ts'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { open, realpath, stat } from 'node:fs/promises'
 import type { Stats } from 'node:fs'
 import type { FileHandle } from 'node:fs/promises'
 import { isAbsolute, join, relative } from 'node:path'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
-import { gatewayFetch, normalizeServerURL } from './server-connector/auth.ts'
-import type { Session } from './server-connector/config.ts'
+import { gatewayFetch, normalizeServerURL } from '@picoaide/dsh-gateway-client/auth'
+import type { Session } from '@picoaide/dsh-gateway-client/config'
+import { picoSessionOf } from './session.ts'
 import type { AiRowsConsentStore } from './wasm-apps-ai-rows-consent.ts'
 import { isAiRowsConsentScopeError } from './wasm-apps-ai-rows-consent.ts'
 
@@ -580,7 +581,7 @@ async function upstreamResponse(upstream: Response): Promise<WasmResponse> {
  * @returns 信封。
  */
 async function forwardAuthAware(ctx: Context, upstream: Response, session: Session): Promise<WasmResponse> {
-  if (upstream.status === 401) ctx.picoSession.clearIfCurrent(session.token)
+  if (upstream.status === 401) picoSessionOf(ctx)?.clearIfCurrent?.(session.token)
   return await upstreamResponse(upstream)
 }
 
@@ -1338,7 +1339,7 @@ async function publishChunked(
     }
     if (upstream.ok || upstream.status === 204) return null
     const detail = await readUpstreamError(upstream)
-    if (upstream.status === 401) ctx.picoSession.clearIfCurrent(session.token)
+    if (upstream.status === 401) picoSessionOf(ctx)?.clearIfCurrent?.(session.token)
     return { kind: 'upstream', status: detail.status, text: detail.text }
   }
 

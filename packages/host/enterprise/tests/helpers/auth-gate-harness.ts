@@ -14,7 +14,8 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { vi } from 'vitest'
-import { apply, type Config } from '../../src/auth-gate.ts'
+import { type Config } from '../src/auth-gate.ts'
+import { applyFullComposition as apply } from './apply-full-composition.ts'
 import type { Session } from '../../src/server-connector/config.ts'
 
 /** 一条被注册的路由（`webServer.register` 的入参形状）。 */

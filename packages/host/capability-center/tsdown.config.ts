@@ -8,6 +8,12 @@ export default defineConfig([
     name: PACKAGE_NAME,
     entry: {
       index: 'src/index.ts',
+      // 技能库变更的匿名计数插件（2026-10-13 自 `@picoaide/dsh-enterprise`
+      // 搬入）：它是**独立的一行**（`cordis.patch.yml` 的 `picoaide-skill-telemetry`），
+      // 因此必须是自己的入口 —— 与搬出前 enterprise 的 `skill-telemetry` 入口同形。
+      // 声明了的入口就必须真的构建（本仓已踩过"声明了 ./app-proof 却没构建 ⇒
+      // 打包版启动即挂"的坑）。
+      'skill-telemetry': 'src/host/skill-telemetry.ts',
     },
     outDir: 'lib',
     format: 'esm',
@@ -19,6 +25,9 @@ export default defineConfig([
     sourcemap: true,
     external: [
       '@deepseek-ai/cordis',
+      '@deepseek-ai/dsh-session',
+      '@deepseek-ai/dsh-tools',
+      '@deepseek-ai/dsh-host-webserver',
     ],
   },
   {

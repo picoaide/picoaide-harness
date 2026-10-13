@@ -35,10 +35,6 @@
       "types": "./lib/types/error-reporting.d.ts",
       "default": "./lib/error-reporting.js"
     },
-    "./skill-telemetry": {
-      "types": "./lib/types/skill-telemetry.d.ts",
-      "default": "./lib/skill-telemetry.js"
-    },
     "./session-identity": {
       "types": "./lib/types/session-identity.d.ts",
       "default": "./lib/session-identity.js"
@@ -112,6 +108,7 @@
     "@deepseek-ai/dsh-tool-skill": "0.2.0-rc.2",
     "@deepseek-ai/dsh-tools": "0.2.0-rc.2",
     "@deepseek-ai/schemastery": "^3.18.4",
+    "@picoaide/dsh-gateway-client": "workspace:*",
     "@picoaide/dsh-host-locale": "workspace:*",
     "@sentry/node": "^7.120.0",
     "adm-zip": "^0.6.0",

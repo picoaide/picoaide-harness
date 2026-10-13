@@ -20,7 +20,10 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { apply, decodePathSegment, type Config } from '../src/auth-gate.ts'
+import { type Config } from '../src/auth-gate.ts'
+// 2026-10-13（P0-b）：解码 helper 与它的 11 个调用点随四条技能路由搬到本包。
+import { decodePathSegment } from '../../capability-center/src/host/skill-routes.ts'
+import { applyFullComposition as apply } from './helpers/apply-full-composition.ts'
 import type { Session } from '../src/server-connector/config.ts'
 
 /** 与 wasm-apps 的 FIX-40 同一份畸形语料（含截断的多字节序列与裸 %）。 */
@@ -89,7 +92,8 @@ function harness(session: Session | null): { call: (url: string, method: string)
   const routes: Route[] = []
   const ctx = {
     effect: (fn: () => unknown) => { fn() },
-    get: (name: string) => (name === 'connection' ? { requestRejection: () => undefined } : undefined),
+    provide: (name: string, value: unknown) => { (ctx as unknown as Record<string, unknown>)[`__svc_${name}`] = value },
+    get: (name: string) => ((ctx as unknown as Record<string, unknown>)[`__svc_${name}`] ?? ((name === 'connection' ? { requestRejection: () => undefined } : undefined))),
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     picoSession: {
       isRestored: () => true,
@@ -164,10 +168,13 @@ describe('R6-B P3：本机路由的路径段解码不得让 URIError 抛穿 hand
     expect(out.body?.code).toBeUndefined()
   })
 
-  it('源码级对拍：本文件的 11 条端点覆盖了 auth-gate 里全部解码语句', async () => {
+  it('源码级对拍：本文件的 11 条端点覆盖了技能路由里全部解码语句', async () => {
     const { readFileSync } = await import('node:fs')
     const { fileURLToPath } = await import('node:url')
-    const source = readFileSync(fileURLToPath(new URL('../src/auth-gate.ts', import.meta.url)), 'utf8')
+    // 2026-10-13（P0-b）：这 11 条端点与 helper 一起从 `auth-gate.ts` 搬到
+    // `capability-center/src/host/skill-routes.ts`。判据的**强度不变**（还是「裸
+    // decodeURIComponent 只允许一处 + 每个调用点紧跟 null 检查」），只是读的文件跟着走。
+    const source = readFileSync(fileURLToPath(new URL('../../capability-center/src/host/skill-routes.ts', import.meta.url)), 'utf8')
     // **注释行不算**（helper 的 JSDoc 里就写着 `decodeURIComponent('%zz')` 这个例子）。
     const codeLines = source.split('\n').filter(line => {
       const trimmed = line.trim()
@@ -179,7 +186,7 @@ describe('R6-B P3：本机路由的路径段解码不得让 URIError 抛穿 hand
     expect(calls, '裸 decodeURIComponent 只允许出现在 decodePathSegment 内部').toBe(1)
     const guarded = [...code.matchAll(/decodePathSegment\(/gu)].length
     // 11 次调用（组织技能 install 那一处名字+版本各一次，共 2 次）+ 1 次 helper 定义。
-    // 原始形态核对：`git show HEAD:…/auth-gate.ts | grep -c 'decodeURIComponent('` = 11。
+    // 原始形态核对：`git show HEAD:…/enterprise/src/auth-gate.ts | grep -c 'decodeURIComponent('` = 11。
     expect(guarded).toBe(12)
     // 每一处后面都必须紧跟 null 检查（不能"只解码不判"）。
     const unchecked = [...code.matchAll(/decodePathSegment\([^\n]*\)\n(?!\s*if \(\w+ === null\))/gu)]

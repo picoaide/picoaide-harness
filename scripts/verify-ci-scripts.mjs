@@ -4117,7 +4117,8 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
     return problems
   }
   const SENTINEL_SITES = {
-    skills: 'packages/host/enterprise/src/skill-telemetry.ts',
+    // 2026-10-13（P0-b）：技能遥测行随技能面从 enterprise 搬进能力中心包。
+    skills: 'packages/host/capability-center/src/host/skill-telemetry.ts',
     apps: 'packages/host/wasm-apps-host/src/index.ts',
     connectors: 'packages/host/connectors/src/index.ts',
   }

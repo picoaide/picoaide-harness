@@ -4,8 +4,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as tar from 'tar'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { apply, type Config } from '../src/auth-gate.ts'
-import { writeProvenance } from '../src/skill-install.ts'
+import { type Config } from '../src/auth-gate.ts'
+import { applyFullComposition as apply } from './helpers/apply-full-composition.ts'
+import { writeProvenance } from '../../capability-center/src/host/skill-install.ts'
 import type { Session } from '../src/server-connector/config.ts'
 import { isolateRuntimeSkillRoots } from './helpers/runtime-skill-roots.ts'
 
@@ -143,7 +144,8 @@ function harness(session: Session | null, fence?: ReturnType<typeof browserFence
   const auth: Array<string | undefined> = []
   const ctx = {
     effect: (fn: () => unknown) => { fn() },
-    get: (name: string) => (name === 'connection' ? fence : undefined),
+    provide: (name: string, value: unknown) => { (ctx as unknown as Record<string, unknown>)[`__svc_${name}`] = value },
+    get: (name: string) => ((ctx as unknown as Record<string, unknown>)[`__svc_${name}`] ?? ((name === 'connection' ? fence : undefined))),
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     picoSession: {
       isRestored: () => true,

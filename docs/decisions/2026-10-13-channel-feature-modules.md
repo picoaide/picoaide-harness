@@ -155,7 +155,7 @@ webadmin 这两条路要么由同一个解析器在镜像构建期解析私有�
 
 | 模块 | 落点（模块**自己的装配点**） |
 | --- | --- |
-| `skills` | `packages/host/enterprise/src/skill-telemetry.ts` 的 `apply()`（技能模块的 loader 行） |
+| `skills` | `packages/host/capability-center/src/host/skill-telemetry.ts` 的 `apply()`（技能模块的 loader 行 `picoaide-skill-telemetry`；2026-10-13 P0-b 起随技能面从 `packages/host/enterprise` 搬入，见[功能模块的 host 面归属](./2026-10-13-module-host-face-ownership.md)） |
 | `apps` | `packages/host/wasm-apps-host/src/index.ts` 的 `apply()` |
 | `connectors` | `packages/host/connectors/src/index.ts` 的 `apply()` |
 

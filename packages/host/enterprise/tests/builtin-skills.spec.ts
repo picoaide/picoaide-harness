@@ -29,7 +29,8 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as tar from 'tar'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { apply, type Config } from '../src/auth-gate.ts'
+import { type Config } from '../src/auth-gate.ts'
+import { applyFullComposition as apply } from './helpers/apply-full-composition.ts'
 import {
   builtinAction,
   builtinInstallEndpoint,
@@ -38,9 +39,9 @@ import {
   planBuiltinCards,
   selectBuiltinCards,
   type BuiltinSkill,
-} from '../../../client/capability-center/src/client/BuiltinSkillsStrip.tsx'
-import { APP_BUILDER_SKILL, builtinSkillInstallHint, isBuiltinSkillInstalled } from '../src/builtin-skills.ts'
-import { readProvenance, resolveSkillsDir, SKILL_LOCK_DIR } from '../src/skill-install.ts'
+} from '../../capability-center/src/client/BuiltinSkillsStrip.tsx'
+import { APP_BUILDER_SKILL, builtinSkillInstallHint, isBuiltinSkillInstalled } from '../../wasm-apps-host/src/builtin-skills.ts'
+import { readProvenance, resolveSkillsDir, SKILL_LOCK_DIR } from '../../capability-center/src/host/skill-install.ts'
 import type { Session } from '../src/server-connector/config.ts'
 
 const SOURCE_SKILL_DIR = join(__dirname, '..', '..', '..', '..', 'server', 'skills', 'app-builder')
@@ -102,7 +103,8 @@ function harness(session: Session | null): { call: (url: string, method?: string
   const routes: Route[] = []
   const ctx = {
     effect: (fn: () => unknown) => { fn() },
-    get: (name: string) => (name === 'connection' ? browserFence() : undefined),
+    provide: (name: string, value: unknown) => { (ctx as unknown as Record<string, unknown>)[`__svc_${name}`] = value },
+    get: (name: string) => ((ctx as unknown as Record<string, unknown>)[`__svc_${name}`] ?? ((name === 'connection' ? browserFence() : undefined))),
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     picoSession: {
       isRestored: () => true,
@@ -811,7 +813,7 @@ describe('R21-A2-04 内置技能清单：读失败 ≠ 没有内置技能（404 
   })
 
   it('接线：hook 用 builtinSkillsLoadOutcome 分流，并把非 404 失败写进 error 态（可 reload）', () => {
-    const source = readFileSync(fileURLToPath(new URL('../../../client/capability-center/src/client/BuiltinSkillsStrip.tsx', import.meta.url)), 'utf8')
+    const source = readFileSync(fileURLToPath(new URL('../../capability-center/src/client/BuiltinSkillsStrip.tsx', import.meta.url)), 'utf8')
     expect(source, 'hook 必须用纯函数做三态判定').toContain('builtinSkillsLoadOutcome(res.status, res.ok)')
     // 只钉**语句**形态（注释里引用旧写法不算）：整行以 `if (!res.ok) return` 开头即旧形态。
     expect(source, '旧形态（把所有 !res.ok 当成"没有"）必须消失').not.toMatch(/^\s*if \(!res\.ok\) return/mu)

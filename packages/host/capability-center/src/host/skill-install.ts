@@ -67,7 +67,7 @@ import { assertArchiveSafe, archiveFormat, extractTar, extractZip, MAX_ARCHIVE_B
 import { invocationBooleanVerdict, LEGACY_INVOCATION, precheckSkillPackage } from './manifest-precheck.ts'
 import { decodeSkillTextBytes, readSkillFrontmatterStrict, readSkillTextStrict } from './skill-frontmatter.ts'
 import { isWindowsReservedDeviceNameSegment } from './skill-name-rules.ts'
-import { normalizeServerURL } from './server-connector/auth.ts'
+import { normalizeServerURL } from '@picoaide/dsh-gateway-client/auth'
 import {
   isSameSkillRoot,
   RUNTIME_SKILL_ROOT_RANKS,
@@ -75,8 +75,7 @@ import {
   skillRootPathKey,
   type RuntimeSkillRoot,
 } from './skill-runtime-roots.ts'
-import { DEFAULT_HOST_LOCALE, hostCopy, type HostLocale } from 'dsh-plugin-desktop/host-locale'
-import { dshHomeSafe } from 'dsh-plugin-desktop/desktop-home'
+import { DEFAULT_HOST_LOCALE, hostCopy, type HostLocale } from '@picoaide/dsh-host-locale'
 
 /**
  * 运行时技能名规则 —— **单一真源指向上游**：
@@ -2765,15 +2764,19 @@ export async function synthesizeSkillFrontmatter(dir: string, fallbackName: stri
 }
 
 /**
- * Resolve the user skill root from the environment (product home default).
+ * 技能库根（`<数据根>/skills`）—— **同名 re-export**。
  *
- * 2026-09-11:缺省值走共享的 `dshHomeSafe()`(数据目录唯一权威) —— 数据根随渠道,
- * 自己抄一份 `~/.picoaide-harness` 会在改渠道目录时漏掉,技能就落回官方目录。
+ * 2026-09-11：缺省值走共享的 `dshHomeSafe()`（数据目录唯一权威）—— 数据根随渠道，
+ * 自己抄一份 `~/.picoaide-harness` 会在改渠道目录时漏掉，技能就落回官方目录。
+ *
+ * 2026-10-13（P0-b）：**实现搬到叶子包** `@picoaide/dsh-host-home`。理由是消费方
+ * 横跨两个可选模块 —— 应用模块的 `wasm_app_*` 工具也要按同一路径判断"内置作者
+ * 手册装没装"（`packages/host/wasm-apps-host/src/builtin-skills.ts`），而应用包
+ * 指向技能包会得到"关掉技能就发布不了应用"，复制一份路径拼接则违反单一真源。
+ * 本文件保留同名导出：本包内的相对 import 与 `@picoaide/dsh-capability-center`
+ * 的导出面都不变。**改判定请只改叶子包那份。**
  */
-export function resolveSkillsDir(env: NodeJS.ProcessEnv = process.env): string {
-  // 审计 2026-08-25 P2-3:DSH_HOME 不得指向系统关键目录(同机注入面)。
-  return join(dshHomeSafe({ env }), 'skills')
-}
+export { resolveSkillsDir } from '@picoaide/dsh-host-home'
 
 /** 上游 `skipSystem` 根里唯一被跳过的目录名（skill-filesystem 的 `roots()`）。 */
 export const SKILL_SYSTEM_DIR = '.system'

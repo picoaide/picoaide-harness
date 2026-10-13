@@ -35,10 +35,11 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
-import { hostCopy, type HostLocale } from 'dsh-plugin-desktop/host-locale'
+import { hostCopy, type HostLocale } from './locale.ts'
 import { APP_BUILDER_SKILL, builtinSkillInstallHint, isBuiltinSkillInstalled } from './builtin-skills.ts'
-import type { Session } from './server-connector/config.ts'
+import type { Session } from '@picoaide/dsh-gateway-client/config'
 import type { AiRowsConsentStore } from './wasm-apps-ai-rows-consent.ts'
+import { picoSessionOf } from './session.ts'
 import {
   CLIENT_UPLOAD_TIMEOUT_MS,
   errorEnvelopeOf,
@@ -431,7 +432,7 @@ export function registerWasmAppTools(ctx: Context, options: WasmAppToolOptions):
     locale: HostLocale,
     kind: 'read' | 'write',
   ): { ok: true, session: Session } | { ok: false, response: WasmResponse } => {
-    const session = ctx.picoSession.getSession()
+    const session = picoSessionOf(ctx)?.getSession() ?? null
     if (session === null) {
       return {
         ok: false,

@@ -13,7 +13,7 @@
  * 取文案(`{ zh, en }` 两份, zh 是原文逐字保留), 语言由调用方**按请求**解析
  * 后传入(见 `dsh-plugin-desktop/host-locale`)—— 绝不在模块级捕获。
  */
-import { DEFAULT_HOST_LOCALE, hostCopy, type HostLocale } from 'dsh-plugin-desktop/host-locale'
+import { DEFAULT_HOST_LOCALE, hostCopy, type HostLocale } from '@picoaide/dsh-host-locale'
 import { parse as parseYaml } from 'yaml'
 import { splitSkillFrontmatter } from './skill-frontmatter.ts'
 import { isWindowsReservedDeviceNameSegment, reservedDeviceNameInArchivePath } from './skill-name-rules.ts'

@@ -349,8 +349,10 @@ export default defineConfig({
 describe('真实工作区的声明面对拍（静态读取，不扫 lib/）', () => {
   it('每个 workspace 包都能读出声明产物（否则该包会静默退回纯 mtime 判定）', () => {
     // 2026-10-13：13 → 14（能力中心的客户端面搬进 `@picoaide/dsh-capability-center`）。
+    // 同日 P0-b：14 → 15（该包 host 面搬入并把包移到 `packages/host/`，另加宿主侧
+    // 网关客户端叶子包 `@picoaide/dsh-gateway-client`）。
     // 棘轮只允许上调：这条下限的用途是"表被整段掏空 / 删行"时立刻红，贴着真值最有效。
-    expect(WORKSPACE_PACKAGES.length).toBeGreaterThanOrEqual(14)
+    expect(WORKSPACE_PACKAGES.length).toBeGreaterThanOrEqual(15)
     for (const pkg of WORKSPACE_PACKAGES) {
       const packageRoot = join(repoRoot, pkg.dir)
       const declared = [...declaredExportArtifacts(packageRoot), ...tsdownEntryKeys(packageRoot)]

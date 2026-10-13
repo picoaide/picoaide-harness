@@ -44,7 +44,7 @@ import {
   uninstallSkill,
   writeSkillTombstone,
   type SkillInstallLog,
-} from '../src/skill-install.ts'
+} from '../../capability-center/src/host/skill-install.ts'
 import { isolateRuntimeSkillRoots } from './helpers/runtime-skill-roots.ts'
 
 /** 一份最小的、可加载的 SKILL.md。 */

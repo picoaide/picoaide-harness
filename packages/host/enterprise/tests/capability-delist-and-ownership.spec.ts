@@ -37,14 +37,14 @@ import {
   planCardAction,
   uninstallEndpoint,
   type CapabilityItem,
-} from '../../../client/capability-center/src/client/CapabilityCenterPanel.tsx'
-import { en, setActiveLocale, t, zh } from '../../../client/capability-center/src/client/locales.ts'
+} from '../../capability-center/src/client/CapabilityCenterPanel.tsx'
+import { en, setActiveLocale, t, zh } from '../../capability-center/src/client/locales.ts'
 import { afterEach } from 'vitest'
 
 afterEach(() => { setActiveLocale('zh') })
 
-const PANEL = fileURLToPath(new URL('../../../client/capability-center/src/client/CapabilityCenterPanel.tsx', import.meta.url))
-const LOCALES = fileURLToPath(new URL('../../../client/capability-center/src/client/locales.ts', import.meta.url))
+const PANEL = fileURLToPath(new URL('../../capability-center/src/client/CapabilityCenterPanel.tsx', import.meta.url))
+const LOCALES = fileURLToPath(new URL('../../capability-center/src/client/locales.ts', import.meta.url))
 
 /**
  * 宿主 `?source=local` 下发的"本机行"形状（`auth-gate.ts` 的 `localRows`）：

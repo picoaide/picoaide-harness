@@ -130,9 +130,8 @@ const REQUIRED_ASAR_EXPORT_PATHS = [
   'node_modules/@picoaide/dsh-enterprise/lib/bootstrap.js',
   'node_modules/@picoaide/dsh-enterprise/lib/client.js',
   // P1-1(2026-09-16):error-reporting 静态 import @sentry/node,掉出 asar 时整个插件
-  // 模块加载失败且零日志;同批补漏的 skill-telemetry / channel-sync / invariant。
+  // 模块加载失败且零日志;同批补漏的 channel-sync / invariant。
   'node_modules/@picoaide/dsh-enterprise/lib/error-reporting.js',
-  'node_modules/@picoaide/dsh-enterprise/lib/skill-telemetry.js',
   'node_modules/@picoaide/dsh-enterprise/lib/channel-sync.js',
   'node_modules/@picoaide/dsh-enterprise/lib/invariant.js',
   // 2026-09-23（第三轮审计反向 oracle）：这 7 条此前不在任何一张表里，而产物里

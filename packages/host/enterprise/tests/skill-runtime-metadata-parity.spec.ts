@@ -55,12 +55,15 @@ import {
   installSkillArchive,
   listInstalledSkills,
   synthesizeSkillFrontmatter,
-} from '../src/skill-install.ts'
+} from '../../capability-center/src/host/skill-install.ts'
 import { isolateRuntimeSkillRoots } from './helpers/runtime-skill-roots.ts'
 import { listRuntimeSkills, UPSTREAM_SKILL_FILESYSTEM_SOURCE } from './helpers/upstream-skill-registry.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const SRC = join(HERE, '..', 'src')
+// 2026-10-13（P0-b）：技能面（frontmatter/安装器/预检）随四条本机路由搬到
+// `packages/host/capability-center/src/host/`。判据的对象与强度都不变（还是读那
+// **同一份唯一实现**的源码），只是目录跟着走。
+const SRC = join(HERE, '..', '..', 'capability-center', 'src', 'host')
 
 /** 读被测源码；读不到即 throw（判据失去输入必须红，不许静默跳过）。 */
 function readSrc(file: string): string {

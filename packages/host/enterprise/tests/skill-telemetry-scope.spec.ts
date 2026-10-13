@@ -25,7 +25,7 @@
  * 拦下的。`reportSkillCall` 修复前后都在，静态导入。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { reportSkillCall } from '../src/skill-telemetry.ts'
+import { reportSkillCall } from '../../capability-center/src/host/skill-telemetry.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Session } from '../src/server-connector/config.ts'
 
@@ -43,7 +43,7 @@ const BOB = fakeSession('bob')
 const posts: string[] = []
 
 /** 动态 import 拿到的永远是同一个模块实例（同一 specifier，`reported` 是模块级 Map）。 */
-const telemetry = async () => await import('../src/skill-telemetry.ts')
+const telemetry = async () => await import('../../capability-center/src/host/skill-telemetry.ts')
 
 beforeEach(() => {
   posts.length = 0

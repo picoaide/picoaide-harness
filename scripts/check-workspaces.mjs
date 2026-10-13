@@ -289,7 +289,11 @@ const PACKAGES = [
   // `prebuild-workspace-deps.ts` 的**构建**输入表刻意不同：enterprise 的 `build`
   // 不读新包（那边只有 test 读源码），所以 prebuild 表里不加这条 —— 但 `needs`
   // 管的是"何时重跑"，`check:fast` 漏跑消费方是静默的，宁可多跑一轮。
-  { name: '@picoaide/dsh-enterprise', dir: 'packages/host/enterprise', needs: ['dsh-plugin-desktop', '@picoaide/dsh-host-locale', '@picoaide/dsh-panel-surface', '@picoaide/dsh-foot-menu', '@picoaide/dsh-capability-center'] },
+  // 2026-10-13（P0-b）：`server-connector/{auth,config,electron}` 的实现收敛到叶子包
+  // `@picoaide/dsh-gateway-client`（本包保留同名 re-export，对外子路径不变）⇒ 多一条
+  // `needs` 边。抽它的理由与 `host-locale`/`host-home` 同族：功能模块包的本机路由也要
+  // 调网关，而它们指向本包会闭合出 `desktop → wasm-apps-host → enterprise → desktop`。
+  { name: '@picoaide/dsh-enterprise', dir: 'packages/host/enterprise', needs: ['dsh-plugin-desktop', '@picoaide/dsh-host-locale', '@picoaide/dsh-panel-surface', '@picoaide/dsh-foot-menu', '@picoaide/dsh-capability-center', '@picoaide/dsh-gateway-client'] },
   // 2026-09-20（路线 A / A 扩展）：`host-copy.ts` 的语言解析直接 import 叶子包
   // `@picoaide/dsh-host-locale`；`user-scope.ts` 的 DSH-home 权威改成
   // `@picoaide/dsh-host-home` ⇒ **connectors 不再 import 桌面包**，
@@ -322,7 +326,16 @@ const PACKAGES = [
   // client bundle（它读 panel-surface 的 lib/types 与 lib/client.js），
   // `@picoaide/dsh-foot-menu` 的 `./client` 声明是 type-only 输入（`ctx.picoFootMenu`
   // 的类型面）。两者都无出边通往本包 ⇒ 不引入新的构建环。
-  { name: '@picoaide/dsh-capability-center', dir: 'packages/client/capability-center', needs: ['@picoaide/dsh-panel-surface', '@picoaide/dsh-foot-menu'] },
+  //
+  // 2026-10-13（P0-b）：**host 面也搬进来了**（`src/host/**`：四条本机路由 +
+  // 安装器/预检/归档/根表/frontmatter/内置技能事实/技能遥测），包从
+  // `packages/client/` 移到 `packages/host/` —— 一个包同时有 host 与 client 两面，
+  // 就是 `packages/host/connectors` 的标准形态。needs 因此多三条真实构建边：
+  //   · `@picoaide/dsh-host-locale`（`hostCopy`/`HostLocale`）、
+  //   · `@picoaide/dsh-host-home`（`dshHomeSafe` + 技能库根 `resolveSkillsDir`）、
+  //   · `@picoaide/dsh-gateway-client`（网关调用与错误分类）。
+  // 三条边都指向没有出边通往本包的叶子 ⇒ 不引入新的构建环。
+  { name: '@picoaide/dsh-capability-center', dir: 'packages/host/capability-center', needs: ['@picoaide/dsh-panel-surface', '@picoaide/dsh-foot-menu', '@picoaide/dsh-host-locale', '@picoaide/dsh-host-home', '@picoaide/dsh-gateway-client'] },
   // 侧边栏底部**并道行**（2026-09-21）：一个「更多」行 + 向上浮层，条目经客户端
   // Cordis 服务 `picoFootMenu` 从五个面板插件收集。它读 panel-surface 的
   // `activePanelId` / `PANEL_ACTIVE_ATTR`（内联进自己的 client bundle）⇒ 必须排在
@@ -342,6 +355,13 @@ const PACKAGES = [
   // `desktop → wasm-apps-host → browser → connectors` 一起构成四边环。
   // desktop 保留 `./desktop-home` 子路径作为 re-export（对外 API 面不变）。
   { name: '@picoaide/dsh-host-home', dir: 'packages/host/host-home', needs: [] },
+  // 宿主侧**网关客户端**的共享叶子包（2026-10-13，P0-b）：实现自
+  // `packages/host/enterprise/src/server-connector/{auth,config,electron}.ts` 逐字迁入
+  // （enterprise 保留同名 re-export）。它只 import `@picoaide/dsh-host-locale`
+  // （本地化鉴权文案）⇒ 任何模块包指向它都不成环 —— 这正是它存在的理由：功能模块
+  // 包的本机路由必须真的调网关，而它们指向 enterprise 会闭合出
+  // `desktop → wasm-apps-host → enterprise → desktop`。
+  { name: '@picoaide/dsh-gateway-client', dir: 'packages/host/gateway-client', needs: ['@picoaide/dsh-host-locale'] },
   // browser 的三条构建边（都实测过，别再凭"看起来是运行期惰性解析"删边）：
   //   1. `@picoaide/dsh-host-locale` —— 5 个文件 import 它（原先是
   //      `dsh-plugin-desktop/host-locale`，那条边正是
@@ -383,7 +403,14 @@ const PACKAGES = [
   // 2026-09-24（R13）：`src/session.ts` 的会话订阅收口到零依赖叶子包
   // `@picoaide/dsh-host-locale/session-events` ⇒ 真实构建边多一条（叶子包无出边，
   // 不会引入新的环；`temp/wasm-client-only/cycle-check.mjs` 会逐条对拍）。
-  { name: '@picoaide/dsh-wasm-apps-host', dir: 'packages/host/wasm-apps-host', needs: ['@picoaide/dsh-browser', '@picoaide/dsh-host-locale'] },
+  // 2026-10-13（P0-b）：应用中心（应用平台）的 host 面也搬进来了
+  // （`src/wasm-apps.ts` + `src/wasm-app-tools.ts` + `src/wasm-apps-ai-rows-consent.ts`
+  // + `src/app-routes.ts` 注册块）⇒ 三条新构建边：
+  //   · `@picoaide/dsh-host-home`（`dshHomeSafe`：AI 行授权的落盘根 / 应用数据根）、
+  //   · `@picoaide/dsh-gateway-client`（网关调用 + 会话形状）、
+  //   · `@picoaide/dsh-host-locale` 本就在表里（`./locale` re-export）。
+  // 三条边都不通往 browser/desktop ⇒ 不引入新的构建环。
+  { name: '@picoaide/dsh-wasm-apps-host', dir: 'packages/host/wasm-apps-host', needs: ['@picoaide/dsh-browser', '@picoaide/dsh-host-locale', '@picoaide/dsh-host-home', '@picoaide/dsh-gateway-client'] },
   // 2026-09-16:vendored 第三方插件(随三平台安装包分发)的测试此前**不在任何门禁
   // 链里**(verify-inventories 的 CHECK_CHAIN_EXEMPTIONS 显式豁免),本地加固
   // (同源守卫/符号链接写落点断言/失败软着陆)只有"手工跑"这一条保证 —— 升级
@@ -424,11 +451,12 @@ const PATH_OWNERS = [
   ['packages/client/wasm-apps/', '@picoaide/dsh-wasm-apps'],
   ['packages/client/branding/', '@picoaide/dsh-branding'],
   ['packages/client/panel-surface/', '@picoaide/dsh-panel-surface'],
-  ['packages/client/capability-center/', '@picoaide/dsh-capability-center'],
+  ['packages/host/capability-center/', '@picoaide/dsh-capability-center'],
   ['packages/client/foot-menu/', '@picoaide/dsh-foot-menu'],
   ['packages/host/connectors/', '@picoaide/dsh-connectors'],
   ['packages/host/host-locale/', '@picoaide/dsh-host-locale'],
   ['packages/host/host-home/', '@picoaide/dsh-host-home'],
+  ['packages/host/gateway-client/', '@picoaide/dsh-gateway-client'],
   ['packages/host/browser/', '@picoaide/dsh-browser'],
   ['packages/host/wasm-apps-host/', '@picoaide/dsh-wasm-apps-host'],
   ['packages/host/cron/', '@picoaide/dsh-cron'],
@@ -470,6 +498,13 @@ const DEPENDENTS = {
   // （两者的**测试**读新包的源码：面板纯函数/字典、两条真挂载用例）⇒ 两条反向条目。
   '@picoaide/dsh-enterprise': ['@picoaide/dsh-account-card'],
   '@picoaide/dsh-capability-center': ['@picoaide/dsh-enterprise', '@picoaide/dsh-account-card'],
+  // 2026-10-13（P0-b）：网关客户端叶子包的三个消费方（enterprise 的 re-export、
+  // 技能模块的 host 面、应用模块的 host 面）—— 改它的错误分类会波及三条链路。
+  '@picoaide/dsh-gateway-client': [
+    '@picoaide/dsh-enterprise',
+    '@picoaide/dsh-capability-center',
+    '@picoaide/dsh-wasm-apps-host',
+  ],
   // 叶子包是 browser / connectors / desktop 的构建输入，而 desktop 的
   // `lib/types/{host-locale,desktop-home}.d.ts` 又是 enterprise / cron 的输入 ⇒
   // `--changed` 只展开一层，所以这里把两跳的消费者也列全（宁可多跑几个包）。
@@ -480,6 +515,10 @@ const DEPENDENTS = {
     'dsh-plugin-desktop',
     '@picoaide/dsh-enterprise',
     '@picoaide/dsh-cron',
+    // 2026-10-13（P0-b）：两个模块包的 host 面直接读它（文案/宿主语言类型），
+    // 网关客户端叶子包也读它（鉴权文案）。
+    '@picoaide/dsh-capability-center',
+    '@picoaide/dsh-gateway-client',
   ],
   '@picoaide/dsh-host-home': [
     '@picoaide/dsh-connectors',
@@ -489,6 +528,10 @@ const DEPENDENTS = {
     'dsh-plugin-desktop',
     '@picoaide/dsh-enterprise',
     '@picoaide/dsh-cron',
+    // 2026-10-13（P0-b）：技能库根 `resolveSkillsDir` 也住在它这里（消费方横跨技能与
+    // 应用两个模块包，见该函数的注释）⇒ 三条新反向边。
+    '@picoaide/dsh-capability-center',
+    '@picoaide/dsh-wasm-apps-host',
   ],
   // 面板叶子包的消费方直接依赖它（都是**一跳**，不需要像 host-locale 那样
   // 展开两跳：没有第二层包再 import 它）。2026-09-21 起 foot-menu 也读它的

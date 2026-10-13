@@ -51,7 +51,8 @@ import { dirname, join } from 'node:path'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { apply, type Config as AuthGateConfig } from '../src/auth-gate.ts'
+import { type Config as AuthGateConfig } from '../src/auth-gate.ts'
+import { applyFullComposition as apply } from './helpers/apply-full-composition.ts'
 import {
   base64Length,
   CLIENT_BUDGET_HEADER,
@@ -68,7 +69,7 @@ import {
   UPLOAD_CHUNK_MAX_BYTES,
   UPLOAD_CHUNK_MIN_BYTES,
   WASM_MAX_BYTES,
-} from '../src/wasm-apps.ts'
+} from '../../wasm-apps-host/src/wasm-apps.ts'
 import type { Session } from '../src/server-connector/config.ts'
 
 const WASM_APPS_PREFIX = '/api/pico/apps/wasm'
@@ -194,7 +195,8 @@ function harness(
   const state = { cleared: 0, current: session as Session | null }
   const ctx = {
     effect: (fn: () => unknown) => { fn() },
-    get: (name: string) => (name === 'connection' ? browserFence() : undefined),
+    provide: (name: string, value: unknown) => { (ctx as unknown as Record<string, unknown>)[`__svc_${name}`] = value },
+    get: (name: string) => ((ctx as unknown as Record<string, unknown>)[`__svc_${name}`] ?? ((name === 'connection' ? browserFence() : undefined))),
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     // `tools` 服务在场（生产由 `inject: ['tools']` 保证）：宿主工具面（wasm_app_*）
     // 就是在这一条真实装配路径上注册的，因此这个替身让"注册了没有"可断言。
@@ -1064,7 +1066,10 @@ describe('wasm_path：只允许会话工作区与 <数据根>/apps（FIX-39）',
     const outbound: Outbound[] = []
     const ctx = {
       effect: (fn: () => unknown) => { fn() },
+      provide: (name: string, value: unknown) => { (ctx as unknown as Record<string, unknown>)[`__svc_${name}`] = value },
       get: (name: string) => {
+        const provided = (ctx as unknown as Record<string, unknown>)[`__svc_${name}`]
+        if (provided !== undefined) return provided
         if (name === 'connection') return browserFence()
         if (name === 'workspaceRegistry') {
           return { list: () => (workspacePath === null ? [] : [{ id: 'w1', path: workspacePath }]) }
@@ -1516,7 +1521,7 @@ describe('分片上传字段契约：与服务端 upload.go 逐字对拍（FIX-4
   it('审计 P2-1：分片链路不再逐跳各给一份 90 秒（源级回归门禁）', () => {
     // 结构断言：publishChunked 里每一次出站都必须用**剩余额度**（perCallBudget），
     // 出现裸 CLIENT_UPLOAD_TIMEOUT_MS 即等于"每跳各 90 秒"，聚合必然溢出工具预算。
-    const source = readFileSync(fileURLToPath(new URL('../src/wasm-apps.ts', import.meta.url)), 'utf8')
+    const source = readFileSync(fileURLToPath(new URL('../../wasm-apps-host/src/wasm-apps.ts', import.meta.url)), 'utf8')
     const start = source.indexOf('async function publishChunked(')
     expect(start, 'publishChunked 必须存在（函数改名时同步改这条）').toBeGreaterThan(0)
     const body = source.slice(start, source.indexOf('\n/**\n * 分片链路 `complete` 的请求体', start))

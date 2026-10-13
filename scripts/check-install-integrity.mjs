@@ -584,14 +584,20 @@ export const EXECUTION_POINT_REGISTRY = [
   'packages/client/branding/tsconfig.client.json',
   'packages/client/branding/tsconfig.json',
   'packages/client/branding/tsdown.config.ts',
-  // 2026-10-13：能力中心（技能商店）的客户端面从 `packages/host/enterprise` 整块搬进
-  // 新包 `packages/client/capability-center` ⇒ 派生面（{@link deriveExecutionPoints} 来源
-  // (d)：包根的 `tsconfig*.json` / `tsdown.config.ts` / `vitest.config.ts`）多出四条。
+  // 2026-10-13：能力中心（技能商店）的 host + client 双面从 `packages/host/enterprise`
+  // 整块搬进新包 —— 客户端面搬进 `packages/client/capability-center`、P0-b 又把 host 面
+  // 搬进去并把包移到 `packages/host/capability-center` ⇒ 派生面（{@link deriveExecutionPoints}
+  // 来源 (d)：包根的 `tsconfig*.json` / `tsdown.config.ts` / `vitest.config.ts`）四条。
   // 双向登记：派生却未登记即红，所以这四条必须在这里出现，否则"新包的判定面"整片隐形。
-  'packages/client/capability-center/tsconfig.client.json',
-  'packages/client/capability-center/tsconfig.json',
-  'packages/client/capability-center/tsdown.config.ts',
-  'packages/client/capability-center/vitest.config.ts',
+  'packages/host/capability-center/tsconfig.client.json',
+  'packages/host/capability-center/tsconfig.json',
+  'packages/host/capability-center/tsdown.config.ts',
+  'packages/host/capability-center/vitest.config.ts',
+  // 2026-10-13（P0-b）：宿主侧网关客户端叶子包（`server-connector/{auth,config,electron}`
+  // 逐字迁入）—— 同样四条派生执行点。
+  'packages/host/gateway-client/tsconfig.json',
+  'packages/host/gateway-client/tsdown.config.ts',
+  'packages/host/gateway-client/vitest.config.ts',
   'packages/client/foot-menu/tsconfig.client.json',
   'packages/client/foot-menu/tsconfig.json',
   'packages/client/foot-menu/tsdown.config.ts',

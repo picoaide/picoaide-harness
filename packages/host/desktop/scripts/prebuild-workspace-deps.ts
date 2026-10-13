@@ -93,6 +93,10 @@ export const WORKSPACE_PACKAGES: readonly WorkspacePackage[] = [
   { workspace: '@picoaide/dsh-host-locale', dir: 'packages/host/host-locale', deps: [] },
   { workspace: '@picoaide/dsh-host-home', dir: 'packages/host/host-home', deps: [] },
   { workspace: '@picoaide/dsh-panel-surface', dir: 'packages/client/panel-surface', deps: [] },
+  // 0a) 宿主侧**网关客户端**的共享叶子包（2026-10-13 P0-b）：只读 host-locale 的
+  //     lib/types ⇒ 排在它之后；enterprise / 能力中心 / 应用宿主三个消费方又都排在
+  //     本包之后。它没有出边通往任何模块包，故不引入新的构建环。
+  { workspace: '@picoaide/dsh-gateway-client', dir: 'packages/host/gateway-client', deps: ['packages/host/host-locale'] },
   // 0b) 底部「更多」行（2026-09-21 并道改造）：它把 panel-surface 的
   //     `activePanelId` / `PANEL_ACTIVE_ATTR` 内联进自己的 client bundle，因此
   //     **必须排在 panel-surface 之后**；五个面板插件（cron / enterprise /
@@ -109,10 +113,15 @@ export const WORKSPACE_PACKAGES: readonly WorkspacePackage[] = [
   //     与 `scripts/check-workspaces.mjs` 的 `PACKAGES[*].needs` 有**一处刻意不同**：
   //     那边另有 enterprise / account-card → 本包两条边，那是两者的**测试**读本包
   //     源码（不产生产物输入）⇒ 只影响"何时重跑"，不进这张**构建**输入表。
+  //     2026-10-13（P0-b）：**host 面也搬进来了**（四条本机路由 + 安装器/预检/归档/
+  //     根表/frontmatter/内置技能事实），包随之从 `packages/client/` 移到
+  //     `packages/host/`。构建输入因此多三条：host-locale（文案 + 宿主语言类型）、
+  //     host-home（`dshHomeSafe` + 技能库根 `resolveSkillsDir`）、gateway-client
+  //     （网关调用与错误分类）。三条都是无出边的叶子节点。
   {
     workspace: '@picoaide/dsh-capability-center',
-    dir: 'packages/client/capability-center',
-    deps: ['packages/client/panel-surface', 'packages/client/foot-menu'],
+    dir: 'packages/host/capability-center',
+    deps: ['packages/client/panel-surface', 'packages/client/foot-menu', 'packages/host/host-locale', 'packages/host/host-home', 'packages/host/gateway-client'],
   },
   // 1) connectors：只读两个叶子包（`host-copy.ts` / `user-scope.ts`）—— 路线 A 扩展
   //    之后它**不再** import 桌面包，所以排在叶子包之后即可。
@@ -137,10 +146,14 @@ export const WORKSPACE_PACKAGES: readonly WorkspacePackage[] = [
   //    （desktop 的 main.ts/app-ai-runner.ts 静态 import 它）。
   // 2026-09-24：`src/session.ts` 的订阅契约收口到叶子包（`session-events` 子路径）
   // ⇒ 它也是 wasm-apps-host 的构建输入。
+  // 2026-10-13（P0-b）：应用中心（应用平台）的 host 面也搬进来了
+  // （`src/wasm-apps.ts` / `wasm-app-tools.ts` / `wasm-apps-ai-rows-consent.ts` /
+  // `app-routes.ts`）⇒ 构建输入多两条：host-home（`dshHomeSafe`）与 gateway-client
+  // （网关调用 + 会话形状）。两条都无出边通往本包的前置节点。
   {
     workspace: '@picoaide/dsh-wasm-apps-host',
     dir: 'packages/host/wasm-apps-host',
-    deps: ['packages/host/browser', 'packages/host/host-locale'],
+    deps: ['packages/host/browser', 'packages/host/host-locale', 'packages/host/host-home', 'packages/host/gateway-client'],
   },
   // 4) desktop：读叶子包与 wasm-apps-host 的 lib/types，产出全仓共用的
   //    lib/types + build/。
@@ -154,7 +167,9 @@ export const WORKSPACE_PACKAGES: readonly WorkspacePackage[] = [
   {
     workspace: '@picoaide/dsh-enterprise',
     dir: 'packages/host/enterprise',
-    deps: ['packages/host/host-locale', 'packages/host/desktop', 'packages/client/panel-surface', 'packages/client/foot-menu'],
+    // 2026-10-13（P0-b）：`server-connector/{auth,config,electron}` 的实现收敛到
+    // `packages/host/gateway-client`（本包保留同名 re-export）⇒ 多一条构建输入。
+    deps: ['packages/host/host-locale', 'packages/host/gateway-client', 'packages/host/desktop', 'packages/client/panel-surface', 'packages/client/foot-menu'],
   },
   { workspace: '@picoaide/dsh-account-card', dir: 'packages/client/account-card', deps: ['packages/host/desktop'] },
   { workspace: '@picoaide/dsh-wasm-apps', dir: 'packages/client/wasm-apps', deps: ['packages/client/panel-surface', 'packages/client/foot-menu'] },

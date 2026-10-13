@@ -48,7 +48,7 @@ import {
   SKILL_REMOVED_DIR,
   uninstallSkill,
   writeProvenance,
-} from '../src/skill-install.ts'
+} from '../../capability-center/src/host/skill-install.ts'
 
 const NAME = 'zeta'
 /**
