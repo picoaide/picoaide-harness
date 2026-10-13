@@ -15,7 +15,7 @@ Of the three possible approaches, only one stays maintainable:
 | Invent a separate renderer IPC plugin system | It runs in parallel with the official slot/service system, and ecosystem plugins can no longer be installed |
 | **Add your own bundle layers at the composition level** | Upstream runs unchanged; product capabilities participate as plugins, with the same rights as third parties |
 
-So the shape of this repository is: one fixed `desktop` profile plus ten product-owned composition layers (the patch in `packages/host/desktop/cordis.patch.yml` and one patch per product package), with a small number of upstream patches that each carry their own criteria (`patches/` and `docs/decisions/`). The desktop shell is not a privileged layer — the services and slots it registers are equally available to third-party plugins.
+So the shape of this repository is: one fixed `desktop` profile plus eleven product-owned composition layers (the patch in `packages/host/desktop/cordis.patch.yml` and one patch per product package), with a small number of upstream patches that each carry their own criteria (`patches/` and `docs/decisions/`). The desktop shell is not a privileged layer — the services and slots it registers are equally available to third-party plugins.
 
 ## Concepts and structure
 

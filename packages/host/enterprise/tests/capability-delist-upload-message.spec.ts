@@ -33,8 +33,8 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { apply, type Config } from '../src/auth-gate.ts'
-import { uploadFailureText } from '../src/client/CapabilityCenterPanel.tsx'
-import { en, setActiveLocale, t, zh } from '../src/client/locales.ts'
+import { uploadFailureText } from '../../../client/capability-center/src/client/CapabilityCenterPanel.tsx'
+import { en, setActiveLocale, t, zh } from '../../../client/capability-center/src/client/locales.ts'
 import type { Session } from '../src/server-connector/config.ts'
 
 afterEach(() => { setActiveLocale('zh') })
@@ -243,7 +243,7 @@ describe('uploadFailureText：判据只看错误码，其它码逐字沿用原�
 })
 
 describe('下架文案的字典与接线（两处都必须真的用上）', () => {
-  const PANEL = fileURLToPath(new URL('../src/client/CapabilityCenterPanel.tsx', import.meta.url))
+  const PANEL = fileURLToPath(new URL('../../../client/capability-center/src/client/CapabilityCenterPanel.tsx', import.meta.url))
   const AUTH_GATE = fileURLToPath(new URL('../src/auth-gate.ts', import.meta.url))
 
   it('「已下架」说明文字说清内容冻结与重新上架（中英各一条）', () => {

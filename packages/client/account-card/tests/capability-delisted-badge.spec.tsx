@@ -10,14 +10,15 @@
  * 才能打红。本文件就是那条真挂载判据：真 `createRoot + act` 挂载真
  * `CapabilityCenterPanel`，喂真形状的 `?source=local` 载荷，断言 DOM。
  *
- * ## 为什么这条判据住在 `@picoaide/dsh-account-card` 而不是 enterprise
+ * ## 为什么这条判据住在 `@picoaide/dsh-account-card` 而不在面板的归属包
  *
- * enterprise（面板的归属包）的测试环境是 node —— 它**没有** jsdom / react-dom 依赖
- * （同包 `tests/capability-center-panel.spec.ts` 已就此写明取舍），所以那条包内只能
- * 用源码级守卫。account-card 是**唯一**同时满足下面三条的客户端包，故真挂载判据落在这里：
- *   1. `package.json` 已声明 `@picoaide/dsh-enterprise`（依赖边本来就存在 ⇒ 这里的跨包
- *      源码 import 不新增构建图边，`temp/wasm-client-only/cycle-check.mjs` 的
- *      "声明 == 实测" 不变量不受影响）；
+ * 面板的归属包（2026-10-13 起是 `@picoaide/dsh-capability-center`，此前是 enterprise）
+ * 的测试环境是 node —— 它**没有** jsdom / react-dom 依赖（同族包内用例
+ * `capability-center-panel.spec.ts` 已就此写明取舍），所以那条包内只能用源码级守卫。
+ * account-card 是**唯一**同时满足下面三条的客户端包，故真挂载判据落在这里：
+ *   1. `package.json` 已声明 `@picoaide/dsh-capability-center`（`devDependencies`，
+ *      本来就是测试期源码 import ⇒ 这里的跨包源码 import 不新增**打包**图边，
+ *      `temp/wasm-client-only/cycle-check.mjs` 的 "声明 == 实测" 不变量不受影响）；
  *   2. 自带 jsdom + react-dom（挂载类用例在文件头切 `@vitest-environment jsdom`）；
  *   3. `vitest.config.ts` 把 react / react-dom 钉到本包的安装副本 —— 跨包源码用例
  *      必须共用同一个 React 实例，否则 hooks 全部读到 `null`
@@ -37,8 +38,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   CapabilityCenterPanel,
   type CapabilityItem,
-} from '../../../host/enterprise/src/client/CapabilityCenterPanel.tsx'
-import { setActiveLocale, t } from '../../../host/enterprise/src/client/locales.ts'
+} from '../../capability-center/src/client/CapabilityCenterPanel.tsx'
+import { setActiveLocale, t } from '../../capability-center/src/client/locales.ts'
 
 ;(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 

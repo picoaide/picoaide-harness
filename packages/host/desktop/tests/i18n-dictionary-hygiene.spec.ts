@@ -114,6 +114,9 @@ describe('i18n dictionaries stay complete and untranslated-free', () => {
       'packages/host/desktop/src/client/locales.ts',
       'packages/client/account-card/src/client/locales.ts',
       'packages/client/branding/src/client/locales.ts',
+      // 2026-10-13：能力中心的字典随面板搬到新包 —— 显式钉住它，让"搬包时漏带字典"
+      // （或新包被建在 `src/client/` 约定之外）变成一条失败，而不是静默少扫一份。
+      'packages/client/capability-center/src/client/locales.ts',
     ]) {
       expect(DICTIONARY_FILES, `missing ${required}`).toContain(required)
     }

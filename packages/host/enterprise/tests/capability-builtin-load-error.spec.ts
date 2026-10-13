@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { builtinLoadNotice } from '../src/client/CapabilityCenterPanel.tsx'
-import { setActiveLocale, zh, en } from '../src/client/locales.ts'
+import { builtinLoadNotice } from '../../../client/capability-center/src/client/CapabilityCenterPanel.tsx'
+import { setActiveLocale, zh, en } from '../../../client/capability-center/src/client/locales.ts'
 
 /**
  * R21 FIX-7 ②：内置技能**清单**读失败的错误态**必须画出来**（FIX-1 的 D1 残项）。
@@ -27,7 +27,7 @@ import { setActiveLocale, zh, en } from '../src/client/locales.ts'
  *     ⇒ 「空分区也必须渲染」红；
  *   - 重试按钮改接 `loadAll()`（刷新分区目录而不是重拉清单）⇒ 「重试接 reload」红。
  */
-const PANEL_SOURCE = readFileSync(fileURLToPath(new URL('../src/client/CapabilityCenterPanel.tsx', import.meta.url)), 'utf8')
+const PANEL_SOURCE = readFileSync(fileURLToPath(new URL('../../../client/capability-center/src/client/CapabilityCenterPanel.tsx', import.meta.url)), 'utf8')
 
 afterEach(() => { setActiveLocale('zh') })
 

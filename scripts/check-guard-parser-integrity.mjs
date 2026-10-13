@@ -363,7 +363,12 @@ const REGISTERED_INSTALL_INTEGRITY_BODIES = [
     // （`scripts/check-ci-parity.mjs` / `scripts/ci-parity-classifier.mjs`）⇒ 本件内容变了，
     // 摘要同步进 diff。**注意 `--print-digests` 在有未提交改动时打印的是 HEAD 那份**，
     // 登记值必须取**工作树**（= 提交后的 HEAD）那份：`sha256sum scripts/check-install-integrity.mjs`。
-    sha256: 'e9d70657dab99ab541b902582388d091e246e6d5e6e37895b791f479ced96b49',
+    //
+    // 2026-10-13：`EXECUTION_POINT_REGISTRY` 登记了新包
+    // `packages/client/capability-center` 的四条派生执行点（能力中心客户端面从
+    // `packages/host/enterprise` 拆出）⇒ 本件内容变了，摘要同步进 diff
+    // （取值 = `sha256sum scripts/check-install-integrity.mjs`，即提交后的 HEAD 那份）。
+    sha256: 'b14e865994da2f676f03fb2f6992255015fa164a8dd6b9bef6473f7c94bcc5a9',
     methods: [
       'judge-body-bytes-equal-head',
       'yarnrc-forbidden-keys',

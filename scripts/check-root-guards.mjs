@@ -157,7 +157,12 @@ const MINIMUM_REQUIRED_GUARDS = [
  * 重新生成：`node scripts/check-guard-parser-integrity.mjs --print-digests`。
  */
 const REGISTERED_GUARD_ENTRIES = new Map([
-  ['check:layout', { script: 'node scripts/verify-layout.mjs', argvTail: [], digest: '7f5f2073b0eec7fd0ea9ff47d86ba0b1e85bdbc3673544ed5680a20da6dd5cdc' }],
+  // 2026-10-13：`scripts/verify-layout.mjs` 的包名表新增
+  // `packages/client/capability-center` ↔ `@picoaide/dsh-capability-center`
+  // （能力中心客户端面从 enterprise 拆出）⇒ 该守卫脚本内容变了，按本表上方的
+  // 纪律在同一个改动里更新摘要（取值来自 `--print-digests` 的复算结果，
+  // 由 `check-guard-parser-integrity.mjs` 与 `verify-check-workspaces.mjs` 各自独立复算对拍）。
+  ['check:layout', { script: 'node scripts/verify-layout.mjs', argvTail: [], digest: '733757d29364f1ee3f90c58ce8576c660bfeafacdd5f8bc796ae85911401f979' }],
   ['check:workflows', { script: 'node scripts/check-workflows.mjs', argvTail: [], digest: '4752f083dafb3efa6658b7a7707c606ef814d6c014dac3804057b33a4246cd57' }],
   ['check:ci-scripts', { script: 'node scripts/verify-ci-scripts.mjs', argvTail: [], digest: 'c75c9026838cb08534d1de0f13e1a2ae8da7ebb95257e90daa8852d626bc6991' }],
   ['check:patch-resolutions', { script: 'node scripts/verify-patch-resolutions.mjs', argvTail: [], digest: '6dcde2281311235a57722608d91e6a1fa59734411ad65cda76ea2bdc43145c83' }],
@@ -179,7 +184,12 @@ const REGISTERED_GUARD_ENTRIES = new Map([
   // 守卫脚本**内容**的判据（第十轮审计 C-06/C-17）。它的判据面里同时包含:
   //   · 本表每条 `digest` ↔ 该守卫脚本的 sha256(内容替换/符号链接替换都红);
   //   · 门禁自己依赖的解析器(`node_modules/yaml`)的**文件集** sha256 ↔ 登记值。
-  ['check:guard-parser-integrity', { script: 'node scripts/check-guard-parser-integrity.mjs', argvTail: [], digest: '22c4a6c33a7d696944b063c214a6bdd3a47c8950af1557011849b2a9c248f64a' }],
+  // 2026-10-13：`scripts/check-install-integrity.mjs` 的 `EXECUTION_POINT_REGISTRY`
+  // 新增 `packages/client/capability-center` 的四条派生执行点（能力中心客户端面从
+  // enterprise 拆出）⇒ 该前置校验件内容变了，它在对方文件里的登记值也同步更新
+  // ⇒ 本判据脚本自身的摘要随之变化，按同一套纪律在这里同步（`--print-digests` 复算，
+  // 且必须取**工作树**=提交后 HEAD 那份）。
+  ['check:guard-parser-integrity', { script: 'node scripts/check-guard-parser-integrity.mjs', argvTail: [], digest: 'adb422eb7ed84fa27670f223878c585ef10aaabddd93f5c357cd014e9c631702' }],
 ])
 
 /**

@@ -38,7 +38,7 @@ import {
   planBuiltinCards,
   selectBuiltinCards,
   type BuiltinSkill,
-} from '../src/client/BuiltinSkillsStrip.tsx'
+} from '../../../client/capability-center/src/client/BuiltinSkillsStrip.tsx'
 import { APP_BUILDER_SKILL, builtinSkillInstallHint, isBuiltinSkillInstalled } from '../src/builtin-skills.ts'
 import { readProvenance, resolveSkillsDir, SKILL_LOCK_DIR } from '../src/skill-install.ts'
 import type { Session } from '../src/server-connector/config.ts'
@@ -811,7 +811,7 @@ describe('R21-A2-04 内置技能清单：读失败 ≠ 没有内置技能（404 
   })
 
   it('接线：hook 用 builtinSkillsLoadOutcome 分流，并把非 404 失败写进 error 态（可 reload）', () => {
-    const source = readFileSync(fileURLToPath(new URL('../src/client/BuiltinSkillsStrip.tsx', import.meta.url)), 'utf8')
+    const source = readFileSync(fileURLToPath(new URL('../../../client/capability-center/src/client/BuiltinSkillsStrip.tsx', import.meta.url)), 'utf8')
     expect(source, 'hook 必须用纯函数做三态判定').toContain('builtinSkillsLoadOutcome(res.status, res.ok)')
     // 只钉**语句**形态（注释里引用旧写法不算）：整行以 `if (!res.ok) return` 开头即旧形态。
     expect(source, '旧形态（把所有 !res.ok 当成"没有"）必须消失').not.toMatch(/^\s*if \(!res\.ok\) return/mu)

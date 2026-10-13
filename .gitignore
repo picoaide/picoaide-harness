@@ -62,6 +62,7 @@ image.tar
 packages/host/desktop/e2e-results/
 packages/host/enterprise/lib/
 packages/client/account-card/lib/
+packages/client/capability-center/lib/
 packages/client/branding/lib/
 packages/client/wasm-apps/lib/
 packages/client/panel-surface/lib/

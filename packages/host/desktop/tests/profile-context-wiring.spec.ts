@@ -326,7 +326,7 @@ describe('desktop profileContext wiring (issue #130)', () => {
     // 旧写法（"重算严格少于装配"）登记的是当时的**缺陷**：十个自有层只存在于 `prepared.patches`
     // 里，`readProfilePatches` 复算不到它们，于是上游 `config-editor.edit()` 每次设置写入前的
     // `reconcileProfilePatches(readProfilePatches(...))` 会把桌面壳与九个自研面**从运行树上摘掉**
-    // （`verify:profile` 的 `desktop shell was not registered`）。现在十层是真正的 bundle 层，
+    // （`verify:profile` 的 `desktop shell was not registered`）。现在十一层是真正的 bundle 层，
     // 复算必须**逐层等于**装配 —— 那是这条判据真正的牙齿。
     // 层数上允许恰好 +1：`readProfilePatches` 会在遥测行存在且 `telemetryDisabledEnv` 非空时
     // 追加**同一个** `session-telemetry-otel` 关闭补丁（`resolveTelemetryPatch`），而

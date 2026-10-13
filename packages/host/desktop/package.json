@@ -307,6 +307,7 @@
     "@deepseek-ai/schemastery": "^3.18.4",
     "@picoaide/dsh-account-card": "workspace:*",
     "@picoaide/dsh-browser": "workspace:*",
+    "@picoaide/dsh-capability-center": "workspace:*",
     "@picoaide/dsh-connectors": "workspace:*",
     "@picoaide/dsh-cron": "workspace:*",
     "@picoaide/dsh-enterprise": "workspace:*",

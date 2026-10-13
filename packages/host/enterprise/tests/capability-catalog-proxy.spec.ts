@@ -25,7 +25,7 @@ import {
   mergeItems,
   planCardAction,
   type CapabilityItem,
-} from '../src/client/CapabilityCenterPanel.tsx'
+} from '../../../client/capability-center/src/client/CapabilityCenterPanel.tsx'
 
 const SKILL_MD = `---
 name: codeql

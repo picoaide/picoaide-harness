@@ -15,7 +15,7 @@ description: 从零写一个 DSH 插件：Cordis 形态、宿主面与客户端�
 | 另造一套 renderer IPC 插件系统 | 与官方 slot/service 体系并行，生态里的插件再也装不进来 |
 | **在组合层加自己的 bundle 层** | 上游原样运行，产品能力以插件身份参与组合，与第三方同权 |
 
-所以本仓的形态是：固定的 `desktop` profile + 十层自有组装补丁层（`packages/host/desktop/cordis.patch.yml` 与九个自有包各自的补丁），加上少量**带判据的**上游补丁（`patches/` 与 `docs/decisions/`）。桌面壳不是特权层——它注册的服务和槽位，第三方插件同样可以用。
+所以本仓的形态是：固定的 `desktop` profile + 十一层自有组装补丁层（`packages/host/desktop/cordis.patch.yml` 与十个自有包各自的补丁），加上少量**带判据的**上游补丁（`patches/` 与 `docs/decisions/`）。桌面壳不是特权层——它注册的服务和槽位，第三方插件同样可以用。
 
 ## 概念与结构
 

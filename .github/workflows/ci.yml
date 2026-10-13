@@ -888,7 +888,7 @@ jobs:
             packages/host/host-home/lib \
             packages/client/account-card/lib packages/client/branding/lib \
             packages/client/wasm-apps/lib packages/client/panel-surface/lib \
-            packages/client/foot-menu/lib \
+            packages/client/foot-menu/lib packages/client/capability-center/lib \
       - name: Upload workspace build products (one build, three platforms)
         if: needs.changes.outputs.code != 'false'
         uses: actions/upload-artifact@v7

@@ -282,7 +282,14 @@ const PACKAGES = [
   // 2026-09-23：`loopback.ts` 四份合一（实现落在叶子包 `./loopback` 子路径）后，
   // enterprise / cron 也**直接**读叶子包（不再是"经 desktop 的两条 re-export"）。
   // 两条真实边写进表里 —— `temp/wasm-client-only/cycle-check.mjs` 会逐条对拍。
-  { name: '@picoaide/dsh-enterprise', dir: 'packages/host/enterprise', needs: ['dsh-plugin-desktop', '@picoaide/dsh-host-locale', '@picoaide/dsh-panel-surface', '@picoaide/dsh-foot-menu'] },
+  //
+  // 2026-10-13：能力中心（技能商店）的客户端面搬进 `@picoaide/dsh-capability-center`
+  // 后，enterprise 的**测试**改读新包的源码（面板纯函数 + 字典，见
+  // `tests/capability-*.spec.ts` 的 import 路径）⇒ 多一条 `needs` 边。它与
+  // `prebuild-workspace-deps.ts` 的**构建**输入表刻意不同：enterprise 的 `build`
+  // 不读新包（那边只有 test 读源码），所以 prebuild 表里不加这条 —— 但 `needs`
+  // 管的是"何时重跑"，`check:fast` 漏跑消费方是静默的，宁可多跑一轮。
+  { name: '@picoaide/dsh-enterprise', dir: 'packages/host/enterprise', needs: ['dsh-plugin-desktop', '@picoaide/dsh-host-locale', '@picoaide/dsh-panel-surface', '@picoaide/dsh-foot-menu', '@picoaide/dsh-capability-center'] },
   // 2026-09-20（路线 A / A 扩展）：`host-copy.ts` 的语言解析直接 import 叶子包
   // `@picoaide/dsh-host-locale`；`user-scope.ts` 的 DSH-home 权威改成
   // `@picoaide/dsh-host-home` ⇒ **connectors 不再 import 桌面包**，
@@ -295,7 +302,9 @@ const PACKAGES = [
   // （不是在测试里另写一份"遇到模态就让位"的替身：这条缺陷的全部机制就在装载器认不认
   // 这层模态上）⇒ 该用例 import `@picoaide/dsh-panel-surface/client`，于是多了一条
   // 真实构建边（测试读它的 lib）。`temp/wasm-client-only/cycle-check.mjs` 会逐条对拍。
-  { name: '@picoaide/dsh-account-card', dir: 'packages/client/account-card', needs: ['@picoaide/dsh-enterprise', '@picoaide/dsh-panel-surface'] },
+  // 2026-10-13：两条真挂载用例（`capability-delisted-badge` / `r16b-capability-load-error`）
+  // 的面板源码从 enterprise 换到新包 ⇒ 多一条测试期源码边（`devDependencies` 已声明）。
+  { name: '@picoaide/dsh-account-card', dir: 'packages/client/account-card', needs: ['@picoaide/dsh-enterprise', '@picoaide/dsh-panel-surface', '@picoaide/dsh-capability-center'] },
   // WASM 应用平台的客户端半边（应用中心 + 发布编排入口）：读 enterprise 的 lib/types。
   { name: '@picoaide/dsh-wasm-apps', dir: 'packages/client/wasm-apps', needs: ['@picoaide/dsh-panel-surface', '@picoaide/dsh-foot-menu'] },
   // 四个客户端面板共用的**中列整页装载器 + 视觉语言**叶子包（2026-09-20）：
@@ -304,6 +313,16 @@ const PACKAGES = [
   // 出边的节点，故不会引入新的构建环。消费方把它**内联**进 client bundle
   // （不进 tsdown 的 external），因此它不持有任何跨插件共享的可变状态。
   { name: '@picoaide/dsh-panel-surface', dir: 'packages/client/panel-surface', needs: [] },
+  // 能力中心（技能商店）的**客户端面**（2026-10-13，从 `@picoaide/dsh-enterprise`
+  // 整块搬出）：整页面板 + 内置技能区 + 版本比较 + `capability.*` 字典 + 底部「更多」
+  // 条目。宿主半边是 no-op 行（它调用的 `/api/client/v2/skills*` 仍由 enterprise 的
+  // auth-gate 提供），所以拆包不改任何接口调用点 —— 拆的**唯一**目的就是让"关掉技能
+  // 商店 = 整包不进产物"成为可能。
+  // needs 两条都是真实的**构建**输入：`@picoaide/dsh-panel-surface` 被内联进它的
+  // client bundle（它读 panel-surface 的 lib/types 与 lib/client.js），
+  // `@picoaide/dsh-foot-menu` 的 `./client` 声明是 type-only 输入（`ctx.picoFootMenu`
+  // 的类型面）。两者都无出边通往本包 ⇒ 不引入新的构建环。
+  { name: '@picoaide/dsh-capability-center', dir: 'packages/client/capability-center', needs: ['@picoaide/dsh-panel-surface', '@picoaide/dsh-foot-menu'] },
   // 侧边栏底部**并道行**（2026-09-21）：一个「更多」行 + 向上浮层，条目经客户端
   // Cordis 服务 `picoFootMenu` 从五个面板插件收集。它读 panel-surface 的
   // `activePanelId` / `PANEL_ACTIVE_ATTR`（内联进自己的 client bundle）⇒ 必须排在
@@ -383,6 +402,7 @@ const PATH_OWNERS = [
   ['packages/client/wasm-apps/', '@picoaide/dsh-wasm-apps'],
   ['packages/client/branding/', '@picoaide/dsh-branding'],
   ['packages/client/panel-surface/', '@picoaide/dsh-panel-surface'],
+  ['packages/client/capability-center/', '@picoaide/dsh-capability-center'],
   ['packages/client/foot-menu/', '@picoaide/dsh-foot-menu'],
   ['packages/host/connectors/', '@picoaide/dsh-connectors'],
   ['packages/host/host-locale/', '@picoaide/dsh-host-locale'],
@@ -422,7 +442,10 @@ const DEPENDENTS = {
   '@picoaide/dsh-browser': ['@picoaide/dsh-wasm-apps-host'],
   // 2026-09-24 C-11：account-card 的 needs 里有 enterprise（读它的 lib/types）——
   // 反向条目此前整条缺失。
+  // 2026-10-13：enterprise 与 account-card 的 needs 里各多一条 capability-center
+  // （两者的**测试**读新包的源码：面板纯函数/字典、两条真挂载用例）⇒ 两条反向条目。
   '@picoaide/dsh-enterprise': ['@picoaide/dsh-account-card'],
+  '@picoaide/dsh-capability-center': ['@picoaide/dsh-enterprise', '@picoaide/dsh-account-card'],
   // 叶子包是 browser / connectors / desktop 的构建输入，而 desktop 的
   // `lib/types/{host-locale,desktop-home}.d.ts` 又是 enterprise / cron 的输入 ⇒
   // `--changed` 只展开一层，所以这里把两跳的消费者也列全（宁可多跑几个包）。
@@ -452,6 +475,8 @@ const DEPENDENTS = {
     // 2026-09-23：account-card 的 Esc 分层回归挂真的装载器 ⇒ 它也算消费方。
     '@picoaide/dsh-account-card',
     '@picoaide/dsh-foot-menu',
+    // 2026-10-13：能力中心的客户端 bundle 把装载器**内联**进自己的产物（devDep）。
+    '@picoaide/dsh-capability-center',
   ],
   // 底部并道行：五个面板插件的 tsc 读它的 `./client` 声明（type-only），
   // desktop 的 profile 组装期解析它的 `cordis.patch.yml`（打包产物也要重建）。
@@ -461,6 +486,9 @@ const DEPENDENTS = {
     '@picoaide/dsh-browser',
     '@picoaide/dsh-cron',
     '@picoaide/dsh-wasm-apps',
+    // 2026-10-13：能力中心的客户端半边把底部「更多」条目登记进它提供的
+    // `picoFootMenu` 服务（原本由 enterprise 登记）。
+    '@picoaide/dsh-capability-center',
     'dsh-plugin-desktop',
   ],
 }

@@ -48,7 +48,7 @@ import {
   type SkillCleanupRecord,
 } from '../src/skill-install.ts'
 import { isWindowsReservedDeviceNameSegment, reservedDeviceNameInArchivePath } from '../src/skill-name-rules.ts'
-import { isDelistedItem, mergeItems, needsOverwriteConfirm, planCardAction, type CapabilityItem } from '../src/client/CapabilityCenterPanel.tsx'
+import { isDelistedItem, mergeItems, needsOverwriteConfirm, planCardAction, type CapabilityItem } from '../../../client/capability-center/src/client/CapabilityCenterPanel.tsx'
 import { listRuntimeSkills } from './helpers/upstream-skill-registry.ts'
 
 /** 一份合规技能（frontmatter 名可指定，与目录名解耦）。 */
