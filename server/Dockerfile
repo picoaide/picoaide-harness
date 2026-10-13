@@ -78,14 +78,16 @@ RUN mkdir -p /out/demo-apps \
 # 前端资源打进 wasm 自定义段（宿主按路径直出 `/static/*`，入口 `/` 由 wasm 读
 # `index.html` 返回 —— 这样"先判名单再给页面"才成立）。这一步需要 Node，而 Go
 # 构建阶段没有它 ⇒ 单独一个 node 阶段接力；用的打包脚本与随技能分发的那一份
-# **是同一个文件**（`skills/app-builder/scripts/pack-assets.mjs`），规则不会漂。
+# **是同一个文件**（`demoapps/scripts/pack-assets.mjs` —— 打包器已经与技能源码
+# 目录解耦，唯一实现放在**中性位置**，本阶段与技能目录都从这**同一个源** COPY）。
 FROM node:24-alpine AS demoassets
 WORKDIR /demo
 COPY --from=build /out/demo-apps /demo/apps
 COPY demoapps/showcase/web /demo/web/showcase
 COPY demoapps/forum/web /demo/web/forum
 COPY demoapps/board/web /demo/web/board
-COPY skills/app-builder/scripts/pack-assets.mjs /demo/pack-assets.mjs
+# 落点 1/2：本阶段的工作目录（打包三个演示应用时用）。
+COPY demoapps/scripts/pack-assets.mjs /demo/pack-assets.mjs
 RUN set -eu; mkdir -p /demo/packed \
  && for app in showcase forum board; do \
       node pack-assets.mjs --in apps/$app.wasm --out packed/$app.wasm \
@@ -197,7 +199,19 @@ ENV PICOAI_CLIENT_RELEASE_DIR=/opt/picoaide/client
 #      R1-pm-8 那类"装过的员工永远拿不到新版"会静默复发）。
 # 只想把某个目录留在仓库里而**不**随镜像下发 ⇒ 在 builtinSkillRegistry 里登记
 # {Shipped: false, Reason: …}（豁免逐条显式，不接受通配/整目录豁免）。
+#
+# ⚠️ 技能目录里**不由 skills/ 提供**的文件（唯一实现在中性位置、构建期注入）不是"第四处"，
+# 而是登记在 skillseed 的 `skillFileInjections`（技能 / 目录内落点 / 中性源 / 落点数）：
+# 本文件里凡把**非 skills/ 源**COPY 进 <PICOAI_SKILL_SEED_DIR> 的指令，都必须在那张表里
+# 逐条登记，否则判据 Fatal（"读不出清单"不等于"清单是空的"）。
 COPY skills/app-builder/ /opt/picoaide/skills/app-builder/
+# 落点 2/2：把打包器从**同一个中性源**注入技能目录，镜像内布局与解耦前逐字节一致
+# （`/opt/picoaide/skills/app-builder/scripts/pack-assets.mjs` 仍在，技能文档里的
+# `scripts/pack-assets.mjs` 相对路径照旧可用）。
+# ⚠️ 这一条不是"随手补的副本"：源树里只有 `demoapps/scripts/pack-assets.mjs` 这一份
+# 实现（技能目录下**不再有**该文件），两个落点同源 ⇒ 规则不可能漂。注入关系登记在
+# skillseed 的 `skillFileInjections`，判据会核对"同源 + 两个落点 + 摘要一致"。
+COPY demoapps/scripts/pack-assets.mjs /opt/picoaide/skills/app-builder/scripts/pack-assets.mjs
 # 目录位置固定，服务端直接读（无需 entrypoint 落盘）。可用该 env 覆盖成
 # 别的路径（如挂载宿主机目录做现场排查），照 clientrelease 的
 # PICOAI_CLIENT_RELEASE_DIR 风格。

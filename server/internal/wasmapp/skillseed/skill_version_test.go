@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -302,6 +303,21 @@ var appBuilderSkillDigests = map[string]string{
 	// 就地替换规则改写这一条，而不是为一个没出过门的内容再提一个版本号。
 	// ⚠️ 谁再动 `limits` 表并重新 `go generate`，整目录摘要就会再变一次 —— 必须同步改这里。
 	"b0f6228e87c8ff2633a735e278e03740001b21a6d1f8b36cabec6982f79b9fb3": "2.11.1",
+
+	// 2.12.0 = **打包器与技能源码目录解耦**（W4）：`scripts/pack-assets.mjs` 不再是技能源树里的
+	// 文件，唯一实现搬到中性位置 `server/demoapps/scripts/pack-assets.mjs`（演示应用的打包器与
+	// 它必须是同一份实现），构建镜像时由 Dockerfile 从那**同一个源**注入回
+	// `/opt/picoaide/skills/app-builder/scripts/pack-assets.mjs`。
+	//   - `SKILL.md` / `references/abi.md` / `references/publishing.md` / `scripts/README.md`：
+	//     写明"在**已安装的技能目录**里路径仍是 `scripts/pack-assets.mjs`，平台仓库里的唯一源在
+	//     `server/demoapps/scripts/`"（否则读者在仓库里按旧路径找文件会落空，或有人"修"回一份副本）；
+	//   - `SKILL.md` 的 version 随之提到 2.12.0（这些文件随镜像下发给员工）。
+	//
+	// ⚠️ 摘要口径（本条起）：登记的是**镜像里那一棵树** —— 磁盘技能树 + `skillFileInjections`
+	// 注入的文件（`skillContentDigestWithAdditions`）。所以 `scripts/pack-assets.mjs` 的字节仍然
+	// 算在这次交付里（它确实随技能下发），只是不再由 `server/skills/` 提供 —— "内容变 ⇒ 版本
+	// 必须变"这条纪律对**注入文件**同样成立。
+	"b45bd6e90ccd69ed60a08f13697a2cad366568870140040618997acf51e64d1e": "2.12.0",
 }
 
 // seededSkillDigests 是「**技能目录 → 内容摘要 → version**」的两级登记表：
@@ -329,6 +345,7 @@ func TestBuiltinSkillVersionTracksContent(t *testing.T) {
 	if len(seededSkillDigests) == 0 {
 		t.Fatal("seededSkillDigests 是空的 —— 内置技能摘要登记表被清掉了？")
 	}
+	injectionsByKey, _ := registeredSkillInjections(t)
 	for _, dir := range sortedKeys(seededSkillDigests) {
 		t.Run(dir, func(t *testing.T) {
 			root := repoSkillDirFor(dir)
@@ -336,7 +353,10 @@ func TestBuiltinSkillVersionTracksContent(t *testing.T) {
 			if len(table) == 0 {
 				t.Fatalf("%s 的摘要登记表是空的 —— 至少要登记当前内容的摘要（R1-pm-8）", dir)
 			}
-			digest, files := skillContentDigest(t, root)
+			// 摘要按**镜像里那一棵树**算：磁盘技能树 + 中性源注入的文件
+			//（与 builtin_skills_test.go 的四方对账同一口径；两处不一致会让"判据
+			// 钉住的内容"与"员工装到的内容"分叉）。
+			digest, files := effectiveSkillDigest(t, dir, injectionsByKey)
 			version := skillFrontmatterVersion(t, filepath.Join(root, SkillFile))
 			if files == 0 {
 				t.Fatalf("%s 一个普通文件都没摘要到（技能目录被搬走或变空？）", root)
@@ -379,6 +399,20 @@ func TestSeededSkillVersionMatchesManifestGate(t *testing.T) {
 	}
 }
 
+// skillContentAddition 是「技能目录里**由中性源注入**的文件」：镜像里的技能树 =
+// 磁盘上的 `server/skills/<name>/` + Dockerfile 从 `skillFileInjections`（见
+// builtin_skills_test.go）COPY 进来的文件。
+//
+// 为什么摘要要按"镜像里那一棵树"算：登记表守的是**下发出去的那份内容**（R1-pm-8：
+// 已安装的客户端靠 version 判「有更新」）。若注入文件不进摘要，判据钉住的就不是员工
+// 实际装到的那棵树 —— 而"判据描述的对象 ≠ 运行期读的对象"正是本仓反复登记的假绿形态。
+type skillContentAddition struct {
+	// Rel 是技能目录内的相对路径（POSIX；镜像落点 = <seed>/<技能>/<Rel>）。
+	Rel string
+	// Content 是逐字节内容（来自中性源文件）。
+	Content []byte
+}
+
 // skillContentDigest 把技能目录摘要成确定性 sha256（相对路径 + 逐字节内容，按路径排序）。
 //
 // 刻意**不**看 mtime / 文件模式 / 目录项顺序：同一份内容在任意机器上都是同一个摘要
@@ -389,7 +423,25 @@ func TestSeededSkillVersionMatchesManifestGate(t *testing.T) {
 // 只加一个空目录，下发的 archive sha256/size（客户端 `X-Skill-Checksum` 对拍的那两个
 // 值）都会变。此前只收 `d.Type().IsRegular()`，于是"下发字节变了、版本门禁仍绿"。
 // 返回 (摘要, 参与摘要的**普通文件**数)。
+//
+// 注入文件（additions）走 `skillContentDigestWithAdditions`；本函数是"盘上那棵树"的
+// 形态（additions 为空），只在不需要模拟镜像装配时使用。
 func skillContentDigest(t *testing.T, dir string) (string, int) {
+	t.Helper()
+	return skillContentDigestWithAdditions(t, dir, nil)
+}
+
+// skillContentDigestWithAdditions 是 skillContentDigest 的**镜像口径**版本：在磁盘技能树
+// 之上叠加由中性源注入的文件（路径 + 长度 + 逐字节内容，与磁盘文件**完全同口径**）——
+// 于是"中性源的字节"与"技能自己的字节"进的是同一个摘要，两个 COPY 落点同源 ⇒ 同摘要。
+//
+// 前置（fail-loud，不静默取其一）：注入路径不得与磁盘上的同名条目冲突 —— 冲突时镜像里
+// 谁覆盖谁由构建顺序决定，摘要就不再有确定含义。
+//
+// 变异验证（2026-10-13 在隔离 worktree 里实跑）：给中性源加一行注释（技能版本不动）⇒
+// TestBuiltinSkillVersionTracksContent 与四方对拍的第 ⑦ 项同时红 —— 注入文件的字节确实
+// 算在"下发给员工的技能内容"里，不是旁路。
+func skillContentDigestWithAdditions(t *testing.T, dir string, additions []skillContentAddition) (string, int) {
 	t.Helper()
 	var entries []string
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
@@ -415,6 +467,23 @@ func skillContentDigest(t *testing.T, dir string) (string, int) {
 	if err != nil {
 		t.Fatalf("遍历 %s: %v", dir, err)
 	}
+
+	added := make(map[string][]byte, len(additions))
+	for _, add := range additions {
+		rel := path.Clean(strings.TrimPrefix(filepath.ToSlash(add.Rel), "./"))
+		if rel == "" || rel == "." || strings.HasPrefix(rel, "../") || strings.HasPrefix(rel, "/") {
+			t.Fatalf("注入文件的技能内路径 %q 非法（必须是技能目录内的 POSIX 相对路径）", add.Rel)
+		}
+		if _, dup := added[rel]; dup {
+			t.Fatalf("注入文件 %q 登记了两次 —— 同一条路径在镜像里只能有一个来源", rel)
+		}
+		if _, statErr := os.Lstat(filepath.Join(dir, filepath.FromSlash(rel))); statErr == nil {
+			t.Fatalf("注入文件 %q 与磁盘技能树里的同名条目冲突 —— 镜像里谁覆盖谁不确定，摘要失去含义"+
+				"（技能源树里不该留副本；解耦后唯一实现在中性源）", rel)
+		}
+		added[rel] = add.Content
+		entries = append(entries, "F:"+rel)
+	}
 	sort.Strings(entries)
 
 	h := sha256.New()
@@ -426,9 +495,13 @@ func skillContentDigest(t *testing.T, dir string) (string, int) {
 			continue
 		}
 		_, rel, _ := strings.Cut(e, ":")
-		content, rerr := os.ReadFile(filepath.Join(dir, filepath.FromSlash(rel)))
-		if rerr != nil {
-			t.Fatalf("读 %s: %v", rel, rerr)
+		content, ok := added[rel]
+		if !ok {
+			var rerr error
+			content, rerr = os.ReadFile(filepath.Join(dir, filepath.FromSlash(rel)))
+			if rerr != nil {
+				t.Fatalf("读 %s: %v", rel, rerr)
+			}
 		}
 		// 路径与长度都进摘要：改名/改内容/换行差异都会变。
 		fmt.Fprintf(h, "F:%s:%d\n", rel, len(content))

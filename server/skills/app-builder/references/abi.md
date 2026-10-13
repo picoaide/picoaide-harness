@@ -227,9 +227,10 @@ _row_id INTEGER PRIMARY KEY AUTOINCREMENT
 （宿主没直出时自己读包内资源）。
 
 **怎么把静态资源放进包里**：用官方打包器 `scripts/pack-assets.mjs`（就在技能目录里，
-用法见同目录 `README.md`）—— 它把「磁盘文件 → 包内逻辑路径」追加进**已编译好**的 wasm
-自定义段，规则与平台同源（路径不超过 256 字节、单段不超过 255 字节、自定义段总量不超过
-4 MiB），`--out` 必须给一个新路径（**绝不就地覆盖输入**）：
+用法见同目录 `README.md`；平台仓库里它的唯一源是 `server/demoapps/scripts/pack-assets.mjs`，
+构建镜像时注入到技能目录的 `scripts/`）—— 它把「磁盘文件 → 包内逻辑路径」追加进
+**已编译好**的 wasm 自定义段，规则与平台同源（路径不超过 256 字节、单段不超过 255 字节、
+自定义段总量不超过 4 MiB），`--out` 必须给一个新路径（**绝不就地覆盖输入**）：
 
 ```bash
 node scripts/pack-assets.mjs --in app.wasm --out dist/app-packed.wasm \

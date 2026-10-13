@@ -4,7 +4,8 @@
 # "编译 → 打包前端资源 → 假宿主预览"整条链，不必每次都构建镜像。
 #
 # 为什么要有这个脚本：演示应用的前端资源要打进 wasm 的自定义段，而打包脚本是
-# Node 写的（`skills/app-builder/scripts/pack-assets.mjs`）—— Dockerfile 里为此
+# Node 写的（`demoapps/scripts/pack-assets.mjs`，中性位置：与技能目录里的那一份
+# 同源、构建镜像时注入）—— Dockerfile 里为此
 # 专门加了一个 node 阶段。本脚本是同一套步骤的本地版本，产物落 `/tmp/demo-<app>-packed.wasm`。
 #
 # 用法：
@@ -18,7 +19,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SERVER="$ROOT/server"
-PACK="$SERVER/skills/app-builder/scripts/pack-assets.mjs"
+PACK="$SERVER/demoapps/scripts/pack-assets.mjs"
 
 # 演示应用清单（与 Dockerfile 的 `for app in ...` 必须一致）。
 ALL_APPS=(showcase forum board)

@@ -143,6 +143,9 @@ node scripts/pack-assets.mjs --in shared-notes.wasm --out dist/shared-notes-pack
 - `picoaide.app.json` 与工具链元数据段名（`name` / `producers` / …）会被直接拒 ——
   保留资源由平台在发布期写入，名单放 `config` 的 `whitelist`。
 - 路径不超过 256 字节、单段不超过 255 字节；自定义段总量不超过 4 MiB。
+- 打包器与演示应用用的是**同一份实现**：唯一源在平台仓库的
+  `server/demoapps/scripts/pack-assets.mjs`，镜像构建期注入到技能目录的 `scripts/`
+  —— 在已安装的技能目录里路径就是上面的 `scripts/pack-assets.mjs`。
 - **`__picoaide/` 前缀不能占用**（宿主保留命名空间，发布期 `ASSET_DENIED` +
   `details.reason = "reserved_path_prefix"`）。
 

@@ -1,5 +1,9 @@
 # `pack-assets.mjs` —— 把静态资源编进 wasm（官方打包器）
 
+> 唯一源在平台仓库的 `server/demoapps/scripts/pack-assets.mjs`（演示应用的打包器与它
+> **是同一份实现**），构建镜像时注入到技能目录的 `scripts/`。在**已安装的技能目录**里
+> 它的路径就是本目录下的 `pack-assets.mjs` —— 技能目录里没有第二份副本可改。
+
 平台支持把 HTML / CSS / JS / 图片 / 字体等文件**编进 wasm 模块**，作为随包静态资源：
 发布后它们随版本一起进内存资源集（**不落盘**）：应用自己用 `assets.read("index.html")` 读，
 任何能打开应用的人也能直接 `GET /index.html` 拿到（非保留资源会被直出，这是静态响应能被
