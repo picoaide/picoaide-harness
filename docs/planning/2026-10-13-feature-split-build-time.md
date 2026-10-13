@@ -166,12 +166,37 @@
 | `connectors` | `packages/host/connectors`（host 面本就在包内 = 标准形态） | 123·37,085 |
 | 恒在（base） | `packages/host/browser`（113·41,815）等 | — |
 
-**按变体给期望（否则变体一建就红）**
-- Go：`server/cmd/server/routes_source_test.go` 的 `wasmGatedRoutes`（42 条，语义上只服务应用中心）、`router/parity_test.go` 的 `productionTestDeps`/`productionOnlyAdminRoutes`、`audit_r13ge_permset_test.go`、`internal/serverstore/audit_r13gh3_searchpath_serverface_test.go:189+` 的包登记表、`scripts/wasm/wasm-gate-inventory.json` 的 33 包子包清单；
+**按变体给期望（否则变体一建就红）**- Go：`server/cmd/server/routes_source_test.go` 的 `wasmGatedRoutes`（42 条，语义上只服务应用中心）、`router/parity_test.go` 的 `productionTestDeps`/`productionOnlyAdminRoutes`、`audit_r13ge_permset_test.go`、`internal/serverstore/audit_r13gh3_searchpath_serverface_test.go:189+` 的包登记表、`scripts/wasm/wasm-gate-inventory.json` 的 33 包子包清单；
 - 客户端：`packages/host/desktop/tests/i18n-keys.spec.ts:26-35`（字典包清单 + 死键）、`scripts/verify-packaged-runtime.ts:59-305`（逐文件条目）、`:1411-1437`（每包下限，只许上调）、`:1947-1976`（锚点表）、`tests/prebuild-workspace-deps.spec.ts:351` 与 `scripts/verify-inventories.mjs:161-292`（包表四向对拍，多一条也红）、`tests/package.spec.ts:274-319`（`asarUnpack` 逐字 + `files` 关键项）；
 - webadmin：`src/lib/routes.ts` 的 `NON_NAV_ROUTES` 双向判据、`nav.test.ts` 的四向对拍（读 Go 真源）；
 - 脚本/守卫：`scripts/verify-ci-scripts.mjs`（实跑体）、`scripts/check-guard-parser-integrity.mjs`（digest 锚定 HEAD 对象）、`scripts/check-workflows.mjs`（argv 白名单）；
 - 文档/数字：`AGENTS.md` 的 13 包与 `planned=32` 两条口径、`scripts/check-doc-claims.mjs` 的既有锚点。
+
+## 7bis. 三平台打包链的模块硬编码（2026-10-13 实测清单）
+
+**哪些验证器会因模块被裁而红**（其余为通用结构断言，不受影响）：
+
+| 会红 | 位置 | 触发 |
+|---|---|---|
+| afterPack 钩子（**三平台每次打包都跑**） | `scripts/verify-packaged-runtime.ts`（`export async function afterPack` 在 `:3459`） | 关任一模块 |
+| Linux 链的面板枚举 | `scripts/e2e-client.mjs:643-647`（面板 id/label）+ `:576-579`（五入口）+ `:694/698/715`（技能文案） | 关 connectors / capability / apps |
+| win 链内嵌 vitest | `package.json:134` 的 `check:win-package` → `tests/verify-packaged-runtime.spec.ts`、`tests/package.spec.ts` | 关模块（清单/棘轮/符号） |
+
+**不红的**（已逐条核过，都是通用结构断言）：`verify-win-installer.ts`、`verify-win-portable.ts`、`verify-mac-smoke.ts`、`verify-mac-release.ts`、`mac-bundle-consistency.ts`、`verify-channel-package.ts`、`ci-package-clients.sh`、`pack-app-root.mjs`（白名单只有 `lib`/`build`/`cordis.patch.yml`/`package.json`）、`package-linux.mjs`。
+
+**协议与模块无关（关键事实，省掉一整块工作）**：`build.protocols` 只注册深链 `picoaide`（`package.json:358-365`）；`app_origin_scheme`（默认 `picoaide-app`，`src/desktop-channel.ts:52`）**只在运行期**经 `registerAppScheme(APP_ORIGIN_SCHEME)` 注册（`src/main.ts:456`，必须早于 `app.whenReady()`），**不进 Info.plist / NSIS 注册表**；`macos-entitlements.plist` 的 4 个键里唯一功能绑定是 `audio-input`（语音输入）。⇒ 关掉 apps **不需要**改协议或 entitlements；也**没有任何判据**会把"协议列表 == 启用模块"钉住（`CFBundleURLTypes` 在 desktop 侧 0 命中）——所以 §5 表格里"渠道字段 `app_origin_scheme` 随变体放宽"只涉及 `ci-channels.sh` 与服务端启动校验，与打包链无关。
+
+**必须按变体给期望的硬编码枚举（10 处，P2 逐处改）**：
+1. `scripts/verify-packaged-runtime.ts:59-305`（apps 两条 `:263-267`、`:273-281`）
+2. 同文件 `:1869-1927`（connectors 六条 `:1921-1926`）
+3. 同文件 `:1947-1966`（`:1952-1953` wasm-apps、`:1956-1957` connectors、`:1960-1961` wasm-apps-host）
+4. 同文件 `:1411-1429` 每包计数棘轮（connectors `0/7/5`、wasm-apps `5/5/3`、wasm-apps-host `6/6/4`）+ `:1437` 总下限 129
+5. 同文件 `:1599-1613` **双向**断言：产物里出现的 `@picoaide/*` 必须已登记（否则 "unregistered" 红）；登记了但产物里没有 ⇒ "dead" 红（"包已删除/改名 ⇒ 同步这张表"）
+6. `scripts/prebuild-workspace-deps.ts:105/123/142` —— **注意**：三平台 `dist:*` 默认先跑 prebuild，会去构建被裁掉的包，所以这张表也必须变体化（不只是打包清单）
+7. `packages/host/desktop/package.json:310/316/317`（`dependencies`）——**这才是客户端"代码不进产物"的真开关**（见 §5bis）
+8. `packages/host/desktop/src/startup-rows.ts:81/84`（`pico-connectors`、`pico-wasm-apps-host` 必需行）
+9. `packages/host/desktop/tests/verify-packaged-runtime.spec.ts:754-775`（`:762-763` 逐条列 connectors 产物条目）
+10. `packages/host/desktop/tests/package.spec.ts:210/242`（`registerAppScheme(` 必须存在——关 apps 时要按变体给期望）
 
 ## 8. 决策台账
 
