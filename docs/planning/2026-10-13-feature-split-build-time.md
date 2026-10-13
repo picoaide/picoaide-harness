@@ -33,6 +33,8 @@
 - 官方渠道模板键表（`packages/host/desktop/scripts/channel-constants.ts` 的 `CHANNEL_TEMPLATE_KEYS`）必须含 `features`；
 - 校验落在 `scripts/ci-channels.sh`，报错**不回显取值**（沿用 `desktop.platforms` 的形态）。
 
+**落地顺序（避免 CI 红窗）**：`features` 一旦进模板键表，CI 的 `--require-template` 会让官方渠道缺该键即红 —— 而私有渠道仓目前只声明了 `desktop.platforms`。所以顺序必须是：**harness 侧契约合并 → 私有仓补 `features`（官方显式，其余渠道可缺省=全开）→ 之后才允许打 tag**。这与上一批 `desktop.platforms` 的节奏相同，但这次多一层：`features` 还会被构建期消费，私有仓补键前不得启用任何"按变体裁剪"的构建路径。
+
 ### 2.2 变体标识与哨兵串
 
 - 解析出一个稳定标识：`FEATURES=skills,apps,connectors`（全开）／`FEATURES=none`（只基础），供 Go `-tags`、客户端组装、webadmin build-arg 共用；
