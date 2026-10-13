@@ -59,6 +59,7 @@
     "@deepseek-ai/dsh-tools": "0.2.0-rc.2",
     "@deepseek-ai/dsh-user-approval": "0.2.0-rc.2",
     "@picoaide/dsh-connectors": "workspace:*",
+    "@picoaide/dsh-host-home": "workspace:*",
     "@picoaide/dsh-host-locale": "workspace:*"
   },
   "peerDependencies": {

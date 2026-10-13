@@ -7,6 +7,13 @@
  *  2. 接线（index.ts 的 createCredentialResolver）：`originOf` 必须真的从
  *     凭据库读出来 —— 这是生产上唯一把闸门基准喂给 tools.ts 的地方，旧版本
  *     完全没接，工具对外承诺的 SITE-BOUND 因此只是文案。
+ *
+ * 2026-10-13（去连接器耦合）：第 2 层只有两处 describe（5 条用例）要用真
+ * `ConnectorStore` 造夹具，它们改经 `tests/helpers/connectors-module.ts` 取用并带
+ * `skipIf(!connectorsPackagePresent)`；**第 1 层（派生规则，27 条）与连接器无关，
+ * 任何时候都照跑**（实测：包不在时 32 条里跑 27、跳 5）。连接器包在（今天全部环境，
+ * 含 CI）时那两处 describe 逐字照跑。判据锚点是"包在不在"，不是"lib 建没建" ——
+ * 包在而模块加载不出来必须红。
  */
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -15,7 +22,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { bareHostOrigin, credentialSiteOrigin, httpOriginOf, isFillableSiteURL, siteOriginFromFields } from '../src/credential-site.ts'
 import { createCredentialResolver } from '../src/index.ts'
-import { ConnectorStore } from '@picoaide/dsh-connectors/store'
+import { connectorStoreModule, connectorsPackagePresent } from './helpers/connectors-module.ts'
+
+// 2026-10-13：连接器包里取真 `ConnectorStore` 当夹具（包不在检出里时是 undefined，
+// 见 `helpers/connectors-module.ts` 的文件头）。本文件里用到它的两个 describe 都带
+// `skipIf(!connectorsPackagePresent)` —— 包在（今天全部环境，含 CI）时逐字照跑。
+const ConnectorStore = connectorStoreModule?.ConnectorStore
 
 let home: string
 let previousHome: string | undefined
@@ -324,9 +336,9 @@ describe('credentialSiteOrigin', () => {
   })
 })
 
-describe('createCredentialResolver: originOf 接线', () => {
+describe.skipIf(!connectorsPackagePresent)('createCredentialResolver: originOf 接线', () => {
   async function seed(id: string, fields: Record<string, string>): Promise<void> {
-    await new ConnectorStore({ username: 'user-a' }).writeCredential(id, { updatedAt: Date.now(), fields })
+    await new (ConnectorStore!)({ username: 'user-a' }).writeCredential(id, { updatedAt: Date.now(), fields })
   }
 
   it('derives the origin from the stored credential of the CURRENT user', async () => {
@@ -361,12 +373,12 @@ describe('createCredentialResolver: originOf 接线', () => {
  * （凭据还在，只是不在它找的地方）。下面两条是那条跨包接线的判据：种子写进服务端 A
  * 的作用域，解析器只有拿到 A 才读得到。
  */
-describe('createCredentialResolver: 凭据作用域含服务端（R6-B-2）', () => {
+describe.skipIf(!connectorsPackagePresent)('createCredentialResolver: 凭据作用域含服务端（R6-B-2）', () => {
   const SERVER_A = 'https://harness-a.example.com'
   const SERVER_B = 'https://harness-b.example.com'
 
   async function seedOn(serverURL: string): Promise<void> {
-    await new ConnectorStore({ username: 'user-a', serverURL }).writeCredential('corp', {
+    await new (ConnectorStore!)({ username: 'user-a', serverURL }).writeCredential('corp', {
       updatedAt: Date.now(),
       fields: { username: 'alice', password: 'secret', baseUrl: 'https://corp.example/login' },
     })

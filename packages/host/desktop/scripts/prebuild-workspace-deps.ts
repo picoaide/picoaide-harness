@@ -106,13 +106,16 @@ export const WORKSPACE_PACKAGES: readonly WorkspacePackage[] = [
     dir: 'packages/host/connectors',
     deps: ['packages/host/host-home', 'packages/host/host-locale', 'packages/client/panel-surface', 'packages/client/foot-menu'],
   },
-  // 2) browser：读叶子包 + **connectors 的 lib/types**（`src/index.ts` 的
-  //    `typeof import('@picoaide/dsh-connectors/…')` 与
-  //    `tests/credential-site.spec.ts` 的真实 `ConnectorStore`）⇒ 必须排在 connectors 之后。
+  // 2) browser：三个叶子包 + connectors 的 `lib/`。
+  //    2026-10-13（去连接器耦合）：`src/index.ts` **不再**读 connectors 的 lib/types
+  //    （契约改在 `src/connectors-contract.ts` 本地声明 ⇒ connectors/lib 不在时
+  //    tsc 也过），改静态 import 数据根叶子包 `@picoaide/dsh-host-home`；
+  //    `deps` 里仍留 connectors，因为 `tests/*.spec.ts` 值导入真实 `ConnectorStore`
+  //    造夹具、运行期惰性 require 也解析到它的 `lib/`。
   {
     workspace: '@picoaide/dsh-browser',
     dir: 'packages/host/browser',
-    deps: ['packages/host/host-locale', 'packages/host/connectors', 'packages/client/foot-menu'],
+    deps: ['packages/host/host-home', 'packages/host/host-locale', 'packages/host/connectors', 'packages/client/foot-menu'],
   },
   // 3) 客户端专属 WASM 应用 origin：`electron-adapter.ts` 值导入
   //    `@picoaide/dsh-browser/guard` ⇒ 必须排在 browser 之后、desktop 之前

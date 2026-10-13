@@ -35,6 +35,13 @@
  * 变异证据（拆掉收口即红）在 `temp/r21/fix-34/probe/` 与其日志里；三种故障的
  * errno/分类由 connectors 包真实构造，本文件不复制它的错误类（跨包不 import，
  * 与 src 的同一口径：`instanceof Error` + 结构化字段判定）。
+ *
+ * 2026-10-13（去连接器耦合）：夹具来源改经 `tests/helpers/connectors-module.ts`
+ * 取真 `ConnectorStore` / `connectorScopePath`，四条 describe 全部带
+ * `skipIf(!connectorsPackagePresent)`。连接器包在（今天全部环境，含 CI）时**逐字
+ * 照跑**，判据一条不少；只有包真的不在检出里（"关掉连接器模块"那条路径）才跳过，
+ * 且跳过的形态是 reporter 里可见的 skipped。判据锚点是"包在不在"，不是"lib 建没建"
+ * —— 包在而模块加载不出来必须红，不许静默跳过。
  */
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -45,10 +52,16 @@ import { createCredentialResolver } from '../src/index.ts'
 import { BrowserRuntime } from '../src/runtime.ts'
 import { BrowserStore } from '../src/store.ts'
 import { applyBrowserTools } from '../src/tools.ts'
-import { ConnectorStore } from '@picoaide/dsh-connectors/store'
-import { connectorScopePath } from '@picoaide/dsh-connectors/user-scope'
+import { connectorStoreModule, connectorUserScopeModule, connectorsPackagePresent } from './helpers/connectors-module.ts'
 import type { ElectronAdapter, NativeBounds, NativeSession, NativeView } from '../src/electron-adapter.ts'
 import type { CdpTransport } from '../src/cdp.ts'
+
+// 2026-10-13：夹具用真 store（包不在检出里时是 undefined，见
+// `helpers/connectors-module.ts` 的文件头）。本文件四条 describe 全部要用它造真
+// 凭据/真故障 ⇒ 全部带 `skipIf(!connectorsPackagePresent)`；包在（今天全部环境，
+// 含 CI）时逐字照跑。
+const ConnectorStore = connectorStoreModule?.ConnectorStore
+const connectorScopePath = connectorUserScopeModule?.connectorScopePath
 
 // ------------------------------------------------------------------ mocks
 
@@ -255,12 +268,12 @@ afterEach(() => {
 
 /** 真实作用域里的真实凭据文件路径（布局唯一真源 = connectors 的 user-scope）。 */
 function credentialFile(serverURL: string, id: string): string {
-  return join(connectorScopePath(USER, serverURL, process.env), `${id}.json`)
+  return join(connectorScopePath!(USER, serverURL, process.env), `${id}.json`)
 }
 
 /** 用真 store 写一份真凭据（没有替身）。 */
 async function seed(serverURL: string, id: string, fields: Record<string, string>): Promise<void> {
-  await new ConnectorStore({ username: USER, serverURL }).writeCredential(id, { updatedAt: Date.now(), fields })
+  await new (ConnectorStore!)({ username: USER, serverURL }).writeCredential(id, { updatedAt: Date.now(), fields })
 }
 
 /** malformed：凭据路径被一个**目录**占住。 */
@@ -280,14 +293,14 @@ function breakTooLarge(serverURL: string, id: string): void {
  * （真实 errno；root 下 `chmod 000` 造不出 EACCES，ELOOP 造得出）。
  */
 function breakUnreadable(serverURL: string): void {
-  const dir = connectorScopePath(USER, serverURL, process.env)
+  const dir = connectorScopePath!(USER, serverURL, process.env)
   rmSync(dir, { recursive: true, force: true })
   symlinkSync('connectors', dir)
 }
 
 /** 枚举阶段故障：凭据目录被一个普通文件占住 ⇒ `readdir` 得 ENOTDIR。 */
 function breakDirAsFile(serverURL: string): void {
-  const dir = connectorScopePath(USER, serverURL, process.env)
+  const dir = connectorScopePath!(USER, serverURL, process.env)
   rmSync(dir, { recursive: true, force: true })
   writeFileSync(dir, 'not a directory\n')
 }
@@ -329,7 +342,7 @@ function expectReadFailure(error: BrowserError, connectorId?: string): void {
 
 // ------------------------------------------- ① 读故障（真文件系统）
 
-describe('① 凭据读失败：工具面拿到带分类/可操作/不含路径的 browserError', () => {
+describe.skipIf(!connectorsPackagePresent)('① 凭据读失败：工具面拿到带分类/可操作/不含路径的 browserError', () => {
   it('fill：凭据文档不可读 ⇒ not-found 读错误，一个字节都没注入', async () => {
     await seed(SERVER_A, 'corp', { username: 'alice', password: SECRET, baseUrl: `${SITE}/login` })
     breakMalformed(SERVER_A, 'corp')
@@ -421,7 +434,7 @@ describe('① 凭据读失败：工具面拿到带分类/可操作/不含路径�
 
 // ------------------------------------------- ② 正向对照：逐字不变
 
-describe('② 正向对照：ENOENT 与正常读取与修前逐字相同', () => {
+describe.skipIf(!connectorsPackagePresent)('② 正向对照：ENOENT 与正常读取与修前逐字相同', () => {
   it('list：真无凭据 ⇒ 空列表 + 逐字 "No stored credentials."', async () => {
     const harness = track(makeHarness(resolverOn(SERVER_A)))
     const value = await harness.call('browser_credentials_list')
@@ -494,7 +507,7 @@ describe('② 正向对照：ENOENT 与正常读取与修前逐字相同', () =>
 
 // ------------------------------------------- ③ 两次读之间的作用域切换
 
-describe('③ 站点闸门读 A、注入读 B（真实竞态窗口）', () => {
+describe.skipIf(!connectorsPackagePresent)('③ 站点闸门读 A、注入读 B（真实竞态窗口）', () => {
   it('第二次读撞上读故障 ⇒ 同一类 browserError，而不是裸 Error', async () => {
     // 站点闸门（`originOf`）与注入（`resolveCredentials`）各解析一次作用域 —— 这是
     // 生产上真实存在的窗口（会话/服务端身份在两次读之间可变）。故障本身是真的：
@@ -518,7 +531,7 @@ describe('③ 站点闸门读 A、注入读 B（真实竞态窗口）', () => {
 
 // ------------------------------------------- ④ 模型可见契约
 
-describe('④ 两条凭据工具的描述与新行为一致', () => {
+describe.skipIf(!connectorsPackagePresent)('④ 两条凭据工具的描述与新行为一致', () => {
   it('描述里写清"读失败 ≠ 没有凭据"（列表）与"读失败会拒绝"（填充）', () => {
     const harness = track(makeHarness(resolverOn(SERVER_A)))
     const list = harness.tools.get('browser_credentials_list')!
