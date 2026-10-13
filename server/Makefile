@@ -240,7 +240,11 @@ check-fast:
 	@if [ -n "$$(gofmt -l $(GO_DIRS))" ]; then echo "gofmt未通过:"; gofmt -l $(GO_DIRS); exit 1; fi
 	go vet $(GO_TAG_FLAG) $(GO_PACKAGES)
 	$(MAKE) test-server-fast
-	cd webadmin && npm test
+	# webadmin 侧读的是**同一个变体的另一种编码**（见文件上方 FEATURES 的说明）。不传
+	# `FEATURES=$(FEATURES)` 时这一半恒跑全开变体 ⇒ `GO_TAGS` 指向少模块变体时，同一条
+	# `make check-fast` 的两半（Go 侧 `-tags=$(GO_TAGS)` / webadmin 侧缺省全开）变体不同，
+	# 「关掉的模块其单测期望也要跟着关」这一类回归在这一半判不出来。与 `check` 同形补齐。
+	cd webadmin && FEATURES=$(FEATURES) npm test
 
 # 变体矩阵判据（P1 第一片）：4 个 skills/apps 组合 + 基线组合各 build（缺省再加 vet）一次，
 # 并断言"开着的模块包树在、关掉的模块包树不在"（`go list -deps ./cmd/server`）。
