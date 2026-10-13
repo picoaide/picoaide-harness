@@ -121,6 +121,15 @@
 3. schema 快照跨变体逐字节对拍 + `migrations-pg/` 无 `//go:build`。**现状（别重复造）**：`server/internal/serverstore/migrate_checksum_test.go:76-106` 已对拍**内嵌迁移集合 ↔ 磁盘生成的 `migrations-checksums.json`**（双向：死条目/未登记都红，并逐条比 sha256 与字节数）⇒ "迁移集合固定、不随构建方式变"这条**已有强判据**；缺的只是 (a) 变体之间**最终 schema 相同**的运行期对拍、(b) "禁止在迁移序列之外做 DDL"的结构判据（防止将来有人用 `//go:build` 文件里的 `CREATE TABLE IF NOT EXISTS` 绕开迁移序列）；
 4. `features` 键的形状/取值/缺省判据（含变异自证）。
 
+**变体 → 必须缺席的包清单（产物断言的输入规格；体量为 2026-10-13 实测的 ts/tsx 文件数·行数，含测试）**
+
+| 关闭的模块 | asar / 产物里必须缺席的包与代码 | 体量 |
+|---|---|---|
+| `skills` | `packages/client/capability-center`（P0 新建）+ base 里的 host 面（`auth-gate.ts` 的四组本机路由，P0-b 搬走后随之缺席） | 新包待测；host 面含在 `auth-gate.ts` 3,142 行中 |
+| `apps` | `packages/client/wasm-apps`、`packages/host/wasm-apps-host`，以及 `packages/host/enterprise/src/wasm-apps.ts`（P0-b 后） | 106·24,828 与 108·20,721；host 面 2,031 行 |
+| `connectors` | `packages/host/connectors`（host 面本就在包内 = 标准形态） | 123·37,085 |
+| 恒在（base） | `packages/host/browser`（113·41,815）等 | — |
+
 **按变体给期望（否则变体一建就红）**
 - Go：`server/cmd/server/routes_source_test.go` 的 `wasmGatedRoutes`（42 条，语义上只服务应用中心）、`router/parity_test.go` 的 `productionTestDeps`/`productionOnlyAdminRoutes`、`audit_r13ge_permset_test.go`、`internal/serverstore/audit_r13gh3_searchpath_serverface_test.go:189+` 的包登记表、`scripts/wasm/wasm-gate-inventory.json` 的 33 包子包清单；
 - 客户端：`packages/host/desktop/tests/i18n-keys.spec.ts:26-35`（字典包清单 + 死键）、`scripts/verify-packaged-runtime.ts:59-305`（逐文件条目）、`:1411-1437`（每包下限，只许上调）、`:1947-1976`（锚点表）、`tests/prebuild-workspace-deps.spec.ts:351` 与 `scripts/verify-inventories.mjs:161-292`（包表四向对拍，多一条也红）、`tests/package.spec.ts:274-319`（`asarUnpack` 逐字 + `files` 关键项）；
