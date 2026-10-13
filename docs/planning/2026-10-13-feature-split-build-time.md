@@ -120,7 +120,7 @@
 
 **新增**
 1. **产物不含被关模块的代码（分层，承重的是第一层）**：
-   - **① 依赖图/文件清单（承重）**：服务端 `go list -deps ./cmd/server`（可按 `-tags` 变体跑）按模块树过滤 —— 关闭的模块其包**不得出现在依赖闭包里**（实测该命令离线可用：缺省构建下 `internal/**` 54 个包，其中 `internal/wasmapp` 树 28 个、技能/连接器 6 个）；客户端断言 **asar 条目**（`node_modules/@picoaide/<模块>` 的 `lib/**`、`cordis.patch.yml` 不得存在）；webadmin 断言 **dist chunk 清单**。
+   - **① 依赖图/文件清单（承重）**：服务端 `go list -deps ./cmd/server`（可按 `-tags` 变体跑）按模块树过滤 —— 关闭的模块其包**不得出现在依赖闭包里**（实测该命令离线可用：缺省构建下 `internal/**` 54 个包，其中 `internal/wasmapp` 树 28 个、技能/连接器 6 个）；客户端断言 **asar 条目**（`node_modules/@picoaide/<模块>` 的 `lib/**`、`cordis.patch.yml` 不得存在）——**必须复用既有工具**：`packages/host/desktop/scripts/verify-packaged-runtime.ts:18` 的 `listPackage` + `normalizeAsarEntry`/`toAsarEntryPath`（`scripts/asar-entry-path.ts`），**不要自己拼 `/` 路径**（`@electron/asar` v3 的 `getNode` 按 `path.sep` 切目录，Linux 恰好对、Windows 必错——已踩过的坑）；webadmin 断言 **dist chunk 清单**。
    - **② 端到端哨兵（副证，必须双侧）**：开启变体哨兵**必须存在**（量具自检）+ 关闭变体哨兵**必须缺席**；单侧断言一律不合格（见 §2.2 的校准实测）。
 2. 变体矩阵编译与测试（四组合 `go build` / `go vet` / `go test`，且**非缺省 tag 的用例必须真跑**）；
 3. schema 快照跨变体逐字节对拍 + `migrations-pg/` 无 `//go:build`。**现状（别重复造）**：`server/internal/serverstore/migrate_checksum_test.go:76-106` 已对拍**内嵌迁移集合 ↔ 磁盘生成的 `migrations-checksums.json`**（双向：死条目/未登记都红，并逐条比 sha256 与字节数）⇒ "迁移集合固定、不随构建方式变"这条**已有强判据**；缺的只是 (a) 变体之间**最终 schema 相同**的运行期对拍、(b) "禁止在迁移序列之外做 DDL"的结构判据（防止将来有人用 `//go:build` 文件里的 `CREATE TABLE IF NOT EXISTS` 绕开迁移序列）；
