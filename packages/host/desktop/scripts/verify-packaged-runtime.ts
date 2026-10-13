@@ -1960,8 +1960,14 @@ export const REQUIRED_ASAR_EXPORTS: readonly RequiredExport[] = [
   //      只 import 它、不就地再拼一份 `serverURL + username`。）
   //   `@picoaide/dsh-connectors`                 ← profile 行 `pico-connectors` 的入口
   //   `@picoaide/dsh-connectors/invariant`       ← 该包声明的 `./invariant` 伴生入口
-  //   `@picoaide/dsh-connectors/store`           ← browser `lib/index.js` 值导入
-  //   `@picoaide/dsh-connectors/user-scope`      ← browser `lib/index.js` 值导入
+  //   `@picoaide/dsh-connectors/store`           ← browser `lib/index.js` 的**惰性**
+  //     `createRequire` require（连接器是可选依赖：包不在 ⇒ 凭据功能 fail-closed，
+  //      浏览器照常工作；清单仍然必须覆盖它，因为产物里有）
+  //   `@picoaide/dsh-connectors/user-scope`      ← 该包 `exports` 里发布的子路径入口
+  //     （2026-10-13 起 browser **不再**值导入它：数据根改直连零依赖叶子包
+  //      `@picoaide/dsh-host-home`，而那份实现本来就是 user-scope re-export 出去的
+  //      同一个函数。产物里仍有 `lib/user-scope.js` ⇒ 扁平清单照旧必须覆盖它；
+  //      运行期还剩 browser `tests/helpers/connectors-module.ts` 一处取用。）
   // 判据是 `assertRequiredEntriesCoverWorkspaceSurface`（清单必须覆盖产物）。
   { specifier: '@picoaide/dsh-enterprise', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/index.js' },
   { specifier: '@picoaide/dsh-enterprise/loopback', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/loopback.js' },

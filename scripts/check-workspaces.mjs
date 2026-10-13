@@ -342,18 +342,40 @@ const PACKAGES = [
   // `desktop → wasm-apps-host → browser → connectors` 一起构成四边环。
   // desktop 保留 `./desktop-home` 子路径作为 re-export（对外 API 面不变）。
   { name: '@picoaide/dsh-host-home', dir: 'packages/host/host-home', needs: [] },
-  // browser 的两条真实构建边（都实测过，别再凭"看起来是运行期惰性解析"删边）：
+  // browser 的三条构建边（都实测过，别再凭"看起来是运行期惰性解析"删边）：
   //   1. `@picoaide/dsh-host-locale` —— 5 个文件 import 它（原先是
   //      `dsh-plugin-desktop/host-locale`，那条边正是
   //      `desktop → wasm-apps-host → browser → desktop` 这个真实环的最后一跳）；
-  //   2. `@picoaide/dsh-connectors` —— 2026-09-20 曾被当"虚假边"删掉（依据是
+  //   2. `@picoaide/dsh-host-home` —— 2026-10-13 起 `src/index.ts` **静态** import
+  //      它的 `dshHomePath()`（浏览器存储/下载目录的数据根）。此前这次解析藏在
+  //      `require('@picoaide/dsh-connectors/user-scope')` 里（对面只是 re-export
+  //      同一个函数）⇒ 边挂在连接器包上，而且连接器缺席时会落到**硬编码**
+  //      `~/.picoaide-harness`（渠道数据根不是它）。改直连叶子包后：解析结果逐字
+  //      不变、连接器在不在都解析到同一个根、产物里没有第二份实现（tsdown 把它留
+  //      external）。`tsc` 读该叶子包的 lib/types（其 `lib/` 入库，needs: []）。
+  //   3. `@picoaide/dsh-connectors` —— 2026-09-20 曾被当"虚假边"删掉（依据是
   //      `tsdown.config.ts` 把它列为 external + `src/index.ts` 用 `createRequire`
-  //      运行期惰性解析）。**那个判断只对"值"成立**：`tsc` 必须读到 connectors 的
-  //      lib/types（`src/index.ts:175/190/402` 的 `as typeof import('@picoaide/dsh-connectors/…')`），
-  //      `tests/credential-site.spec.ts` 还值导入真实 `ConnectorStore`。干净态实测：
-  //      删掉 connectors/lib 后 browser 的 tsc 报 3 条 TS2307 ⇒ 真实边，删掉它就会
-  //      "调度器排得下、实际跑不通"（本地有 lib 时全绿，CI 干净检出必红）。
-  { name: '@picoaide/dsh-browser', dir: 'packages/host/browser', needs: ['@picoaide/dsh-host-locale', '@picoaide/dsh-connectors', '@picoaide/dsh-foot-menu'] },
+  //      运行期惰性解析）；2026-10-13 起 `src/` **不再**读它的类型（契约改在
+  //      `src/connectors-contract.ts` 本地声明：窄接口 + 运行期形状校验），所以
+  //      "删掉 connectors/lib 后 tsc 报 TS2307"这条理由已经不成立 —— 实测：lib
+  //      不可用时 browser 的 typecheck 通过。**边仍然保留**，理由换成两条：
+  //        · `tests/credential-site.spec.ts` 与 `tests/audit-r27-credential-read-faults.spec.ts`
+  //          值导入真实 `ConnectorStore` 造夹具，需要 connectors 的 `lib/`；
+  //        · 运行期那一次惰性 `require('@picoaide/dsh-connectors/store')` 也解析到 `lib/`。
+  //      本表**没有**"可选边"这种表达（`needs` 只是一张构建顺序表）—— 关掉连接器
+  //      模块时的正确改法是同时删掉 connectors 那条**和** browser 这条 `needs` 里的
+  //      名字；那时 browser 依旧 typecheck 通过、两个夹具 spec 按"连接器包不在检出"
+  //      自行跳过（判据见各自的文件头），插件运行期走 fail-closed
+  //      （`createCredentialResolver` 返回 undefined）。
+  //      **清单侧仍是 hard `dependencies`（不是可选依赖），这是实测结论**：本仓
+  //      `.yarnrc.yml` 是 `nmHoistingLimits: workspaces`，可选 peer 不会被链接进
+  //      `packages/host/browser/node_modules`（实测把 connectors 挪到 optional peer
+  //      后 `require.resolve('@picoaide/dsh-connectors/store')` 直接 MODULE_NOT_FOUND
+  //      ⇒ dev/测试里凭据功能整体失效）；`optionalDependencies` 会链接，但它对
+  //      `workspace:*` 缺席**不容错**（合成工程实测：删掉那个 workspace 后
+  //      `yarn install` exit 1）。所以"可选"这一语义只落在它真实成立的地方 ——
+  //      运行期那一次惰性 `require` + fail-closed 解析器，而不是包清单里的一句声明。
+  { name: '@picoaide/dsh-browser', dir: 'packages/host/browser', needs: ['@picoaide/dsh-host-home', '@picoaide/dsh-host-locale', '@picoaide/dsh-connectors', '@picoaide/dsh-foot-menu'] },
   // 客户端专属 WASM 应用 origin（`picoaide-app://` 协议 handler + 本机打开路由）：
   // 2026-09-19 起它经 **browser 包导出的 surface seam**（`@picoaide/dsh-browser/surface`）
   // 取得视图/分区/CDP 能力（设计总纲 §16.1 的 surface 抽象：工具实现只写一份、按 surface
@@ -436,6 +458,8 @@ const DEPENDENTS = {
   '@picoaide/dsh-wasm-apps-host': ['dsh-plugin-desktop'],
   // 2026-09-24 C-11：browser 的 needs 里有 connectors（browser 的 tsc 读它的
   // lib/types，见 PACKAGES 里 browser 那条的两条真实边）—— 反向条目此前整条缺失。
+  // 2026-10-13：理由已换成"两个夹具 spec 值导入真实 ConnectorStore + 运行期惰性
+  // require 解析到 lib/"（`src/` 不再读它的类型），但**边没变** ⇒ 反向条目照旧。
   '@picoaide/dsh-connectors': ['@picoaide/dsh-browser'],
   // 2026-09-24 C-11：wasm-apps-host 的 needs 里有 browser（它经 browser 导出的
   // surface seam 取视图/CDP 能力）—— 反向条目此前整条缺失。
@@ -459,6 +483,9 @@ const DEPENDENTS = {
   ],
   '@picoaide/dsh-host-home': [
     '@picoaide/dsh-connectors',
+    // 2026-10-13：browser 静态 import 它的 `dshHomePath()`（数据根）——
+    // 改连接器包的数据根解析会波及浏览器存储/下载目录。
+    '@picoaide/dsh-browser',
     'dsh-plugin-desktop',
     '@picoaide/dsh-enterprise',
     '@picoaide/dsh-cron',

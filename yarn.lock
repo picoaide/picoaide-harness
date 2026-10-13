@@ -6404,6 +6404,7 @@ __metadata:
     "@deepseek-ai/dsh-util-values": "npm:0.2.0-rc.2"
     "@picoaide/dsh-connectors": "workspace:*"
     "@picoaide/dsh-foot-menu": "workspace:*"
+    "@picoaide/dsh-host-home": "workspace:*"
     "@picoaide/dsh-host-locale": "workspace:*"
     "@types/node": "npm:^22.20.0"
     "@types/react": "npm:^18"
