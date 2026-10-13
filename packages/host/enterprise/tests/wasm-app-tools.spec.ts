@@ -45,6 +45,7 @@ import {
   APP_CONFIG_FIRST_RELEASE_REQUIRED,
   WASM_APP_TOOL_NAMES,
   WASM_APP_TOOL_TIMEOUT_MS,
+  registerWasmAppTools,
   skillHintAppliesTo,
   wasmAppToolHeadroomMs,
 } from '../../wasm-apps-host/src/wasm-app-tools.ts'
@@ -324,9 +325,28 @@ describe('装配：inject、注册、预算序关系', () => {
 
   it('tools 服务缺席时明确报错，且不抛（最小组合仍能应用插件）', () => {
     const h = harness(() => json(200, {}), SESSION, { withTools: false })
+    // ① 最小组合必须能**装完**：工具数为 0，且不抛。
+    //
+    // 2026-10-13：这条断言此前依赖"假 ctx 没有 `inject` 也会走到 `registerWasmAppTools`"
+    // —— P0-b 把注册挪进 `ctx.inject(['tools'], …)`（app-routes.ts）之后不再成立：
+    // 真 Cordis 的 `ctx.inject(deps, cb)` 是**子插件 + inject 声明**（服务出现前
+    // PENDING，见 cordis `Context#inject` → `this.plugin({inject, apply})`），所以服务
+    // 缺席时回调**根本不跑**，也不会抛。夹具现在按这个语义实现 `inject`（此前它没有
+    // 这个方法，本文件连同另外二十多个 spec 一起红在 `TypeError: ctx.inject is not a
+    // function` 上 —— 判据失去输入，不是产品行为）。
     expect(h.tools).toHaveLength(0)
-    expect(h.loggedErrors.join('\n')).toContain('tools service is absent')
-    expect(h.loggedErrors.join('\n')).toContain('wasm_app_publish')
+    // ② "缺席要明确报错、不得静默"这条判据**一条没删**，只是改从真实调用点取：
+    // `registerWasmAppTools` 是导出的产品函数，最小组合/无头嵌入直接调它 —— 早退分支
+    // 就在 `tools` 判空那一行，`options` 还没被读过。
+    const logged: string[] = []
+    registerWasmAppTools(
+      { logger: { error: (message: string) => { logged.push(message) } } } as never,
+      {} as never,
+    )
+    expect(logged.join('\n')).toContain('tools service is absent')
+    expect(logged.join('\n')).toContain('wasm_app_publish')
+    // ③ `h.loggedErrors` 口径仍然对账：本环境没有别的错误被吞掉。
+    expect(h.loggedErrors).toEqual([])
   })
 })
 

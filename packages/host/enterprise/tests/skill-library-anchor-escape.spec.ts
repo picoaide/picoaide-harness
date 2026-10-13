@@ -47,15 +47,36 @@
  * 两条都自带"构造真的落地"的见证（前者另有一次 mtime **粒度自校准**）：构造没落地、
  * 判据失去咬合力时当场红，不得静默变成空转。
  *
+ * ### 证据边界（2026-10-13 独立审计 P2-4，必读）
+ *
+ * 上面这段说的是**机制**，不是"那次 CI 红就是它"。**"这次 CI 红 = 负年龄"没有被证实**：
+ *   · 前一条提交信息（`c30721c1e3`）写的"满载 600 次里 115 次返回 0（19.2%）/ 另一轮
+ *     7.0%（28/400）"**复现不出来** —— 独立复刻取 age 的时序，空载与 8 burners/4 vCPU
+ *     满载各 300 次，负年龄 0 次（min gap ≈ 2.9ms、p50 ≈ 4.9ms，够不着"<1ms 且跨整毫秒"
+ *     那个窗口）；把钳位还原成旧实现 + 满载跑反向对照 40 次，40/40 全绿；
+ *   · 也没有那次红的 CI 日志原件（作者自述 7 份日志里该判据的失败签名 0 命中）。
+ * 所以本轮的准确定位是：**修掉一处真实存在、但在两种环境下都未被观测到的潜在不确定性**
+ * （上限是"让该判据不再可能被时钟粒度翻转"），**不是**"修复了那次 CI 红"。
+ * 那次红的真实成因仍未定，见 `docs/decisions/2026-10-13-env-gated-mount-criteria.md` §4。
+ * 判据本身是确定性的、可复现的（去钳位后边界用例确定性红、`removed = 0`、日志 `[]`），
+ * 这一点不依赖上面那条归因是否成立。
+ *
  * ## 环境受限判据（G1/G2 的 bind mount）与它们的登记
  *
  * G1/G2 需要 `mount --bind`（Linux + `CAP_SYS_ADMIN`）。无特权环境里它们**自跳**，
  * 而自跳与通过同为绿 —— 这正是 2026-10-13 独立审计记下的形态：门禁里这两条一次都
  * 没咬到，"CI 全绿"被读成"挂载点判据通过"。现在自跳是**登记在案**的：
  * `tests/helpers/env-gated-criteria.ts` 写明前置条件 / 为什么不能换成夹具 / 有权限时的
- * 跑法，`tests/env-gated-criteria.spec.ts` 逐项对账（用例名还在、自跳调用点数、标记与
- * 真实原因）；缺能力时本文件打印的 `[env-gated:mount/SKIP]` 就是 CI 日志里的**覆盖声明**。
- * 有权限的环境带上 `PICOAI_MOUNT_TESTS=required` 跑同一套时，缺能力**不再是自跳而是硬红**。
+ * 跑法，`tests/env-gated-criteria.spec.ts` **全扫整棵 `tests/`** 逐项对账（用例名还在、
+ * 每个 spec 的闸门与消费点调用数、真实原因取自 stderr）；缺能力时本文件经
+ * `consumeMountGate` 打印的 `[env-gated:mount/SKIP]` 就是 CI 日志里的**覆盖声明**
+ * （含真实原因与"有权限时怎么真跑"）。有权限的环境带上 `PICOAI_MOUNT_TESTS=required`
+ * 跑同一套时，缺能力**不再是自跳而是硬红**。
+ *
+ * **诚实边界（审计 P2-3）**：本仓 CI（GitHub 托管 runner，非 root）上 G1/G2 与
+ * `audit-r20-skill-library.spec.ts` 的 K-08 **一次都不执行**，登记表能保证的只是"自跳
+ * 不会被误读成通过"。未覆盖是显式认账项，见
+ * `docs/decisions/2026-10-13-env-gated-mount-criteria.md`。
  */
 import { execFileSync } from 'node:child_process'
 import { existsSync, renameSync, symlinkSync } from 'node:fs'
@@ -72,7 +93,7 @@ import {
   type SkillCleanupRecord,
   type SkillInstallLog,
 } from '../../capability-center/src/host/skill-install.ts'
-import { judgeMountGate, MOUNT_SKIP_MARKER } from './helpers/env-gated-criteria.ts'
+import { consumeMountGate, judgeMountGate } from './helpers/env-gated-criteria.ts'
 
 /**
  * TOCTOU 插桩的控制器（`vi.mock` 的工厂在 import 期求值，所以状态必须 `vi.hoisted`）。
@@ -279,18 +300,13 @@ describe('R19A-S2-03：挂载点形态的"库内目录"⇒ 拒收（库外唯一
     await writeFile(join(vault, 'payload', 'backup', 'only-copy.txt'), 'ONLY-COPY\n')
     await mkdir(join(skills, '.skill-tmp', 'install-boom'), { recursive: true })
     const mountAttempt = bind(join(vault, 'payload'), join(skills, '.skill-tmp', 'install-boom'))
-    const gate = judgeMountGate(mountAttempt)
-    console.log('[S2-03] bind mount 可用 =', gate.mounted, gate.mounted ? '' : `| 原因 = ${mountAttempt.reason}`)
-    // 环境被登记为"必须提供该能力"（`PICOAI_MOUNT_TESTS=required`）时缺能力**不再自跳**：
-    // 否则"在测"与"一直跳过"在输出里不可区分。
-    if (gate.hardFailure !== undefined) expect(gate.mounted, gate.hardFailure).toBe(true)
-    if (!gate.mounted) {
-      // 本环境没有 CAP_SYS_ADMIN：如实报告"这条判据在本环境咬不到"，不假装通过。
-      // 这行是**登记在案**的覆盖声明（登记表见 tests/helpers/env-gated-criteria.ts）。
-      console.log(MOUNT_SKIP_MARKER, '本环境无法建立 bind mount —— ', mountAttempt.reason)
-      expect(gate.mounted).toBe(false)
-      return
-    }
+    // 判定**必须**经 `consumeMountGate` 消费 —— 登记在案的两条性质就落在它身上：
+    // 声明了"必须提供"（`PICOAI_MOUNT_TESTS=required`）⇒ 抛错硬红；缺省 ⇒ 打一行含
+    // 真实原因与跑法的 `[env-gated:mount/SKIP]` 覆盖声明。这两条由
+    // tests/env-gated-criteria.spec.ts 的行为夹具判决，不再只钉在这两行的**文本**上
+    // （审计 P2-2：删掉它们门禁照绿）。
+    const gate = consumeMountGate(judgeMountGate(mountAttempt), mountAttempt, 'S2-03/G1 换入自愈')
+    if (!gate.mounted) return
     const { log, lines } = recordingLog()
     const out = await recoverInterruptedSkillSwaps(skills, { log })
     console.log('[S2-03] out =', JSON.stringify(out.map(row => [row.name, row.action])))
@@ -308,14 +324,8 @@ describe('R19A-S2-03：挂载点形态的"库内目录"⇒ 拒收（库外唯一
     await mkdir(join(vault, 'payload'), { recursive: true })
     await writeFile(join(vault, 'payload', 'user-data.txt'), 'USER-DATA\n')
     const mountAttempt = bind(join(vault, 'payload'), join(skills, '.skill-tmp', 'install-boom'))
-    const gate = judgeMountGate(mountAttempt)
-    console.log('[S2-03/G2] bind mount 可用 =', gate.mounted, gate.mounted ? '' : `| 原因 = ${mountAttempt.reason}`)
-    if (gate.hardFailure !== undefined) expect(gate.mounted, gate.hardFailure).toBe(true)
-    if (!gate.mounted) {
-      console.log(MOUNT_SKIP_MARKER, '本环境无法建立 bind mount —— ', mountAttempt.reason)
-      expect(gate.mounted).toBe(false)
-      return
-    }
+    const gate = consumeMountGate(judgeMountGate(mountAttempt), mountAttempt, 'S2-03/G2 陈旧 staging 清扫')
+    if (!gate.mounted) return
     const { log, lines } = recordingLog()
     const removed = await sweepStaleSkillTemps(skills, 0, undefined, log)
     const records: SkillCleanupRecord[] = []

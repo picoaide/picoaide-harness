@@ -5,7 +5,10 @@
  * R19B-09（`temp/r19/B/REPORT.md`、`temp/r19/T/REPORT.md` §五）。审计方的探针在
  * `temp/r20/A/sk-probe/`（真并发攻击进程 / 真 `unshare -m` + tmpfs 盖 `/proc`）——
  * 本文件是它的**仓内可复跑**形态：不依赖 `temp/` 下的任何夹具，也不要求 CAP_SYS_ADMIN
- * （需要特权的 bind mount 用例按既有惯例**如实跳过**并打印原因）。
+ * ——唯一需要特权的那条（K-08 的跨设备 bind mount）**登记在案**并走同一条闸门
+ * （`tests/helpers/env-gated-criteria.ts`：缺能力时如实自跳 + 打覆盖声明，
+ * `PICOAI_MOUNT_TESTS=required` 时缺能力是硬红）。2026-10-13 独立审计 P1 前，这条判据
+ * 既不登记也不读那个环境变量，整块删掉门禁照样绿。
  *
  * 三条判据的共同点：**"派生自锚定路径的字符串"不等于"用之前还是那个目录"**。
  *
@@ -48,7 +51,27 @@ import {
   writeProvenance,
   type SkillInstallLog,
 } from '../../capability-center/src/host/skill-install.ts'
+import { consumeMountGate, judgeMountGate } from './helpers/env-gated-criteria.ts'
 import { isolateRuntimeSkillRoots } from './helpers/runtime-skill-roots.ts'
+
+/**
+ * `mount --bind`（需要 CAP_SYS_ADMIN）；失败时把**真实原因**（子进程 stderr）带出来，
+ * 不是猜的 —— 自跳的覆盖声明要带的就是它（登记表见 `tests/helpers/env-gated-criteria.ts`）。
+ * @param source - 挂载源。
+ * @param target - 挂载点（成功后记进 `mounts`，由 `afterEach` 卸掉）。
+ * @returns 探针结果（`ok` 为 false 时 `reason` 是真实原因）。
+ */
+function bindMount(source: string, target: string): { ok: boolean, reason: string } {
+  try {
+    execFileSync('mount', ['--bind', source, target], { stdio: 'pipe' })
+    mounts.push(target)
+    return { ok: true, reason: '' }
+  } catch (cause) {
+    const stderr = (cause as { stderr?: Buffer | string }).stderr
+    const text = (stderr === undefined ? '' : stderr.toString()).trim().split('\n')[0]
+    return { ok: false, reason: text === undefined || text === '' ? (cause as Error).message : text }
+  }
+}
 
 /**
  * 两个注入点（`vi.mock` 的工厂在 import 期求值，所以状态必须 `vi.hoisted`）。
@@ -424,21 +447,13 @@ describe('R20A-K-02：Linux 上读不到挂载表 ⇒ 破坏性方向 fail-close
     const shm = await mkdtemp(join('/dev/shm', 'r20-crossdev-'))
     roots.push(shm)
     await mkdir(join(skills, '.skill-tmp'), { recursive: true })
-    let mounted = false
-    try {
-      execFileSync('mount', ['--bind', shm, join(skills, '.skill-tmp')], { stdio: 'ignore' })
-      mounts.push(join(skills, '.skill-tmp'))
-      mounted = true
-    } catch { /* 无 CAP_SYS_ADMIN：如实记录 */ }
-    console.log('[K-08] bind mount 可用 =', mounted)
-    if (!mounted) {
-      // 不假装通过：这条判据在本环境咬不到，由上面两条（无特权）覆盖同一修复面。
-      const { log, lines } = recordingLog()
-      const out = await recoverInterruptedSkillSwaps(skills, { log })
-      console.log('[K-08] 跳过特权用例；无挂载点时 out =', JSON.stringify(out), '日志 =', JSON.stringify(lines))
-      expect(mounted).toBe(false)
-      return
-    }
+    const mountAttempt = bindMount(shm, join(skills, '.skill-tmp'))
+    // 与 G1/G2 同一条收尾（2026-10-13 审计 P1：这条此前**既没登记、也不读
+    // `PICOAI_MOUNT_TESTS`**，只 console.log 一句就 return —— 同包第三条真 mount 判据
+    // 因此完全在对账面的外面，整块删掉也照样绿）。现在：登记在案 + 声明"必须提供"时
+    // 缺能力**抛错硬红** + 缺省时打一行含真实原因与跑法的 `[env-gated:mount/SKIP]`。
+    const gate = consumeMountGate(judgeMountGate(mountAttempt), mountAttempt, 'R20A-K08 跨设备')
+    if (!gate.mounted) return
     const { log, lines } = recordingLog()
     await recoverInterruptedSkillSwaps(skills, { log })
     console.log('[K-08] 日志 =', JSON.stringify(lines))
