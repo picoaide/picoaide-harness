@@ -232,3 +232,53 @@ webadmin 这两条路要么由同一个解析器在镜像构建期解析私有�
 
 单元侧（`packages/host/desktop/tests/`）：`channel-constants.spec.ts` 钉零 import 不变量，
 `channel-build.spec.ts` 钉"输出点真的写进了随包 profile"与畸形声明的 fail-loud。
+
+## 9. 渠道 × 模块清单（2026-10-14 更新：单一真源 + 渠道缺省）
+
+### 9.1 三份东西各自是谁
+
+| 东西 | 在哪 | 谁维护 |
+| --- | --- | --- |
+| **模块清单 + 渠道缺省**（唯一真源） | 仓库根 `module-contract.json`（`id` / `goConst` / `title` / `defaultInChannel`，**顺序=契约**） | 改这里，然后跑生成器 |
+| 各端清单**生成物** | `FEATURE_MODULES`（客户端 / webadmin）、`allModules`（Go）、`GO_TAGS ?=`（Makefile）、`ARG GO_TAGS=`/`ARG FEATURES=`（Dockerfile）、`-tags=`（ci.yml）、`features.<m>` 模板键族、**`FEATURE_MODULE_DEFAULTS`**（渠道缺省表） | 只由 `node scripts/gen-module-contract.mjs` 写；手改会被 `--check` 判红 |
+| **某渠道的声明** | 私有仓 `channels/<id>/channel.json` 的 `features` | 渠道维护者（本仓看不到渠道身份） |
+
+`defaultInChannel` 的语义：**渠道不写 `features.<m>` 时这个模块算不算要**（唯一真源；
+`channel-constants.ts` 的 `normalizeChannelFeatures()` 缺键时**读表**）。纪律（硬约束）：
+
+- 现有模块保持 `true` ⇒ **既有渠道行为零变化**（不声明 `features` 与改前逐字节相同）；
+- **新增模块一律先设 `false`**：缺省不进任何渠道；要发给某渠道必须在它自己的
+  `channel.json` 里显式写 `true`；
+- 缺省 `true` 的模块数被棘轮 `MAX_MODULES_DEFAULT_ON`（`scripts/gen-module-contract.mjs`）
+  卡住：想多一个默认开就得**显式改那个常量**，让"悄悄默认全开"出现在 diff 里被评审看见。
+
+### 9.2 操作流程（三条路，都先跑 `--check`）
+
+```bash
+node scripts/channel-modules.mjs --list        # 系统有哪些模块、各自的渠道声明键与缺省
+node scripts/channel-modules.mjs --template    # 生成可粘贴的 "features" 片段（不含任何渠道身份）
+node scripts/channel-modules.mjs --explain <channel.json>   # 人读：声明/缺省/交付/裁掉/变体串
+node scripts/channel-modules.mjs --check   <channel.json>   # 机读门禁：非法声明/读不到 ⇒ 非零退出
+```
+
+1. **新增渠道**：`node scripts/channel-modules.mjs --template` → 把打印出的 `"features"`
+   片段贴进 `channels/<id>/channel.json` 顶层 → 按需把要关的模块改 `false` →
+   `--check <那份 channel.json>` 必须 exit 0（私有渠道仓的 CI 用同一条命令）。
+   官方渠道是模板：它的 `channel.json` 必须**逐键显式**（`CHANNEL_TEMPLATE_KEYS` 的
+   `features.<m>` 族，判据在 `scripts/ci-channels.sh --require-template`）。
+2. **给某渠道加/减模块**：只改那份 `channel.json` 的 `features` → `--check`。
+   **不要**去改生成物 —— 渠道差异是数据，不是代码。
+3. **系统新增模块**（四步，缺一步就有红灯）：
+   1. `module-contract.json` 加一条 `{ id, goConst, title, defaultInChannel: false }`
+      （**先 false**；要默认开必须同时上调 `MAX_MODULES_DEFAULT_ON`）；
+   2. `node scripts/gen-module-contract.mjs` 重新生成（六个端 + 渠道缺省表一次到位）；
+   3. **补结构面**（生成器**不**生成它们，`--check` 会逐条点名）：
+      `packages/host/desktop/src/channel-features.ts` 的 `module: '<id>'`（按契约顺序追加）、
+      `server/internal/router/optional_<id>_on.go`（首行 `//go:build <id>`）与
+      `optional_<id>_off.go`（首行 `//go:build !<id>`）；
+   4. `node scripts/gen-module-contract.mjs --check` ⇒ 0（真源的棘轮、生成物逐字节、
+      结构面三层全过），再跑 `node scripts/verify-ci-scripts.mjs` ⇒ 0。
+
+`--check` 的错误分三桶（`gen-module-contract.mjs --check`）：**真源问题**（改
+`module-contract.json`）/ **生成区不一致**（跑生成器）/ **结构面缺失**（跑生成器**不会**修好，
+按点名的文件:行人工补齐）。

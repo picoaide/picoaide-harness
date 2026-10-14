@@ -387,7 +387,12 @@ const REGISTERED_INSTALL_INTEGRITY_BODIES = [
     // 门禁；它改写六个端的生成区）+ `CI_REFERENCED_EXECUTION_REGISTRY` 补登同一条
     // （`ci.yml` 的生成区标记文本里点了它的名）⇒ 本件内容变了，摘要同步进 diff
     // （取值 = `sha256sum scripts/check-install-integrity.mjs`，即提交后的 HEAD 那份）。
-    sha256: 'd27cebf3eafdf6e12ca57b4042f39dba4b573124ba3056f583b8a2aa58b14e03',
+    //
+    // 2026-10-14（渠道缺省 + 渠道清单工具）：`EXECUTION_FACE_REGISTRY` 再补登
+    // `scripts/channel-modules.mjs`（`--list` / `--template` / `--explain` / `--check`；
+    // 它读契约 + 真跑 `normalizeChannelFeatures()`，被 `verify-ci-scripts.mjs` 第 20 节真跑）
+    // ⇒ 摘要再次同步（同一条 `sha256sum` 口径）。
+    sha256: 'bead6539e5cb3b832029eb6058339420503dbda17e25f0d3b2d3230bce2a3946',
     methods: [
       'judge-body-bytes-equal-head',
       'yarnrc-forbidden-keys',

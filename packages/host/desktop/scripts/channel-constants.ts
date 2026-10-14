@@ -134,7 +134,8 @@ export const CHANNEL_TEMPLATE_KEYS = [
  * 渠道可以**声明**的功能模块 —— 唯一真源（`channel.json` 的 `features` 键）。
  *
  * 语义（2026-10-13 定案，契约见 `docs/decisions/2026-10-13-channel-feature-modules.md`）：
- *   - **缺省全开**：不写 `features` = 三个模块都要 —— 基础功能恒开，既有渠道逐字节不变；
+ *   - **缺省按契约**：不写 `features` = 各模块取 {@link FEATURE_MODULE_DEFAULTS}
+ *     （生成物；今天三个都是 `true` ⇒ 既有渠道逐字节不变）；
  *   - 写了的键才可能关掉，**只能关掉自己声明的那个模块**（没有"全关"的语法糖：
  *     那会让"忘了写"与"故意关"长得一样）。
  *
@@ -155,6 +156,28 @@ export type FeatureModule = (typeof FEATURE_MODULES)[number]
 
 /** 规范化后的功能开关（三个键**全在**，取值一律是布尔）。 */
 export type ChannelFeatures = Readonly<Record<FeatureModule, boolean>>
+
+/**
+ * 模块的**渠道缺省开关** —— 「渠道**不写** `features.<m>` 时这个模块算不算要」的唯一真源。
+ *
+ * **生成物**：由 `scripts/gen-module-contract.mjs` 从仓库根 `module-contract.json` 的
+ * `defaultInChannel` 生成（顺序 = {@link FEATURE_MODULES}）；手改生成区会被 `--check` 判红。
+ *
+ * 纪律（2026-10-14 拍板）：
+ *   - 现有三个模块都是 `true` ⇒ **既有渠道行为零变化**（不声明 `features` 时与改前逐字节相同）；
+ *   - **新增模块一律先设 `false`**：缺省不进任何渠道；要发给某渠道必须在
+ *     `channels/<id>/channel.json` 里显式写 `true`。想让它默认开就得显式上调生成器里的
+ *     `MAX_MODULES_DEFAULT_ON`（棘轮 —— 让"悄悄默认全开"出现在 diff 里被评审看见）；
+ *   - 消费方**只**经 {@link normalizeChannelFeatures} 读这张表（别处再写一份缺省表就是
+ *     第二套语义）。
+ */
+// @generated:module-contract (scripts/gen-module-contract.mjs) — 手改会被 --check 判红
+export const FEATURE_MODULE_DEFAULTS: Readonly<Record<FeatureModule, boolean>> = {
+  skills: true,
+  apps: true,
+  connectors: true,
+}
+// @end:module-contract
 
 /**
  * `features` 不是合法形状时抛这个（未知模块名 / 非布尔取值 / 不是对象）。
@@ -188,25 +211,29 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
  * 把 `channel.json` 的 `features` 规范化成**三个键全在**的布尔表 —— 唯一真源。
  *
  * 规则（`undefined` 是唯一合法的"缺省"）：
- *   - `undefined`（没写这个键）⇒ 三个模块**全开**（基础功能恒开，向后兼容）；
+ *   - `undefined`（没写这个键）⇒ 三个模块按**契约缺省**
+ *     （{@link FEATURE_MODULE_DEFAULTS}，生成物；今天三个都是 `true` ⇒ 既有渠道逐字节不变）；
  *   - 不是对象（`null` / 数组 / 字符串 / 数字…）⇒ 抛 {@link ChannelFeaturesError}；
  *   - 未知键 ⇒ 抛（不静默吞掉；报**数量**与合法集合，不回报键名）；
  *   - 已知键的取值不是布尔 ⇒ 抛（`"false"` 不是 `false`）；
- *   - 写了 `true` 与不写等价（缺省即开），写 `false` 才关闭。
+ *   - **键缺** ⇒ 该模块按契约缺省取值（`defaultInChannel`）；写了才以声明为准。
  *
  * **本函数不做"部分通过"**：只要有一处非法就整体抛错。这样校验层（`ci-channels.sh`）
  * 与构建期拿到的是同一条判据，不会出现"CI 放行、构建按另一套读"的半通状态。
  * @param raw - `channel.json` 的 `features` 原文（**不可信输入**）。
- * @returns 三个模块的开关（缺省全 `true`）。
+ * @returns 三个模块的开关（缺键按 {@link FEATURE_MODULE_DEFAULTS}）。
  * @throws {ChannelFeaturesError} 形状/键集合/取值非法时。
  */
 export function normalizeChannelFeatures(raw: unknown): ChannelFeatures {
   if (raw === undefined) {
-    return Object.fromEntries(FEATURE_MODULES.map(module => [module, true])) as ChannelFeatures
+    return Object.fromEntries(
+      FEATURE_MODULES.map(module => [module, FEATURE_MODULE_DEFAULTS[module]]),
+    ) as ChannelFeatures
   }
   if (!isPlainRecord(raw)) {
     throw new ChannelFeaturesError([
-      'features(必须是对象，如 {"skills": false}；不写这个键 = 全部开启)',
+      'features(必须是对象，如 {"skills": false}；不写这个键 = 按契约缺省，'
+      + '见 FEATURE_MODULE_DEFAULTS)',
     ])
   }
   const problems: string[] = []
@@ -227,7 +254,13 @@ export function normalizeChannelFeatures(raw: unknown): ChannelFeatures {
   }
   if (problems.length > 0) throw new ChannelFeaturesError(problems)
   return Object.fromEntries(
-    FEATURE_MODULES.map(module => [module, raw[module] === undefined ? true : raw[module]]),
+    FEATURE_MODULES.map(module => [
+      module,
+      // **键缺 = 按契约缺省**（生成物 `FEATURE_MODULE_DEFAULTS`）：不要在派生函数里再抄一份
+      // "缺省 true" —— 那正是"新增模块悄悄默认全开"的入口（契约里 `defaultInChannel: false`
+      // 的模块必须靠渠道显式声明才能发出去）。
+      raw[module] === undefined ? FEATURE_MODULE_DEFAULTS[module] : raw[module],
+    ]),
   ) as ChannelFeatures
 }
 

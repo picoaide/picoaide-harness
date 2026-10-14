@@ -27,16 +27,24 @@
  *     **文件读不到 = 红**（仓库结构事故不是 skip，口径照
  *     `server/internal/serverauth/usage_contract_test.go` 的候选路径 + `t.Fatalf`）。
  *
- * ## 生成面（6 个文件 / 10 个生成区）
+ * ## 生成面（6 个文件 / 11 个生成区）
  *
  * | 文件 | 生成区 |
  * | --- | --- |
  * | `server/internal/features/features.go` | ① `ModuleX = "…"` 常量条目 ② `allModules` 那一行 |
  * | `server/webadmin/features.mjs` | `FEATURE_MODULES` 那一行 |
- * | `packages/host/desktop/scripts/channel-constants.ts` | ① `FEATURE_MODULES` ② `'features.<m>'` 模板键族 |
+ * | `packages/host/desktop/scripts/channel-constants.ts` | ① `FEATURE_MODULES` ② `FEATURE_MODULE_DEFAULTS`（**渠道缺省表**）③ `'features.<m>'` 模板键族 |
  * | `server/Makefile` | `GO_TAGS ?= ` 那一行 |
  * | `server/Dockerfile` | ① webadmin stage 的 `ARG GO_TAGS=` / `ARG FEATURES=` ② Go stage 的 `ARG GO_TAGS=` |
  * | `.github/workflows/ci.yml` | ① `go vet -tags=…` 那一行 ② `go test -tags=…` 那一行 |
+ *
+ * ## 契约字段与棘轮
+ *
+ * 每个模块有 `{ id, goConst, title, defaultInChannel }`：`defaultInChannel` 是"渠道**不写**
+ * `features.<m>` 时这个模块算不算要"的唯一真源（生成成 `FEATURE_MODULE_DEFAULTS`，
+ * 由 `channel-constants.ts` 的 `normalizeChannelFeatures()` **读表**而不是硬编码 true）。
+ * **新增模块一律先设 `false`**；缺省 `true` 的模块数被 {@link MAX_MODULES_DEFAULT_ON}
+ * 这把棘轮卡住（超限即红，要默认开必须显式改那个常量并进 diff）。
  *
  * **刻意不生成**（它们不是"名字清单"，是逻辑/结构）：`featureSentinel()` /
  * `featureGlobalName()` 这类派生函数、Dockerfile 的 `$FEATURES`↔`$GO_TAGS` 成对
@@ -68,6 +76,20 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 /** 单一真源的文件名（仓库根）。 */
 export const MODULE_CONTRACT_FILE = 'module-contract.json'
+
+/**
+ * **棘轮上限**：允许 `defaultInChannel: true`（= 不声明就给）的模块数上限。
+ *
+ * 现场：`defaultInChannel` 决定"渠道**不写** `features.<m>` 时这个模块算不算要"——
+ * 缺省 `true` 意味着一个刚做出来的模块会**自动**发给所有既有渠道（含已经交付的客户包），
+ * 而这件事在 diff 里只是一个布尔。上限常量把它变成一个**必须显式改的可见动作**：
+ * `--check` 在 `开启数 > MAX_MODULES_DEFAULT_ON` 时判红（新增模块想默认开就要改这个数字，
+ * 评审时一眼看得见），而"新增模块默认 `false`"永远不需要动它。
+ *
+ * 注意：它**只是上限**（不是等式）—— 把某个模块的缺省改成 `false` 不需要下调它
+ * （下调是可选的收紧，不强制，避免"临时关一个模块"被它拦住）。
+ */
+export const MAX_MODULES_DEFAULT_ON = 3
 
 /**
  * 真源的候选路径（照 `server/internal/serverauth/usage_contract_test.go` 的口径：
@@ -133,7 +155,7 @@ export const GENERATED_SITES = [
   },
   {
     path: 'packages/host/desktop/scripts/channel-constants.ts',
-    label: '客户端 FEATURE_MODULES + features.<m> 模板键族',
+    label: '客户端 FEATURE_MODULES + 渠道缺省表 + features.<m> 模板键族',
     regions: [
       {
         id: 'client.template-keys',
@@ -144,6 +166,15 @@ export const GENERATED_SITES = [
         id: 'client.modules',
         label: 'FEATURE_MODULES 那一行',
         body: ({ ids }) => [`export const FEATURE_MODULES = [${quotedIds(ids)}] as const`],
+      },
+      {
+        id: 'client.module-defaults',
+        label: 'FEATURE_MODULE_DEFAULTS 渠道缺省表',
+        body: ({ modules }) => [
+          'export const FEATURE_MODULE_DEFAULTS: Readonly<Record<FeatureModule, boolean>> = {',
+          ...modules.map(module => `  ${module.id}: ${module.defaultInChannel},`),
+          '}',
+        ],
       },
     ],
   },
@@ -288,7 +319,7 @@ function readRepoFile(relativePath, options = {}) {
 /**
  * 校验并解析真源 JSON。
  * @param {string} text - 真源正文。
- * @returns {{contract: {version: number, modules: Array<{id: string, goConst: string, title: string}>}|null, problems: string[]}} 契约或问题。
+ * @returns {{contract: {version: number, modules: Array<{id: string, goConst: string, title: string, defaultInChannel: boolean}>}|null, problems: string[]}} 契约或问题。
  */
 export function parseModuleContract(text) {
   const problems = []
@@ -315,13 +346,21 @@ export function parseModuleContract(text) {
   for (const [index, entry] of raw.modules.entries()) {
     const at = `modules[${index}]`
     if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
-      problems.push(`${at} 必须是对象 { id, goConst, title }`)
+      problems.push(`${at} 必须是对象 { id, goConst, title, defaultInChannel }`)
       continue
     }
     const id = entry.id
     const goConst = entry.goConst
     // `title` 可选（缺省用 id）：它只影响 Go 常量上方那行注释，缺省不该让生成器拒绝工作。
     const title = entry.title === undefined ? id : entry.title
+    // `defaultInChannel` **必填布尔**（缺省语义的唯一真源）：它决定"渠道不声明这个模块时
+    // 算不算要"。写成 `"true"` 字符串这类形态必须当场红 —— 静默回落等于换了一套缺省语义。
+    const defaultInChannel = entry.defaultInChannel
+    if (typeof defaultInChannel !== 'boolean') {
+      problems.push(`${at}.defaultInChannel 必须是布尔（**新增模块一律先设 false**：缺省不进任何`
+        + `渠道），实际 ${JSON.stringify(defaultInChannel ?? null)}`)
+      continue
+    }
     if (typeof id !== 'string' || !/^[a-z][a-z0-9_]*$/u.test(id)) {
       problems.push(`${at}.id 必须是小写字母开头的模块名（[a-z][a-z0-9_]*），实际 ${JSON.stringify(id ?? null)}`)
       continue
@@ -338,7 +377,7 @@ export function parseModuleContract(text) {
     else seenIds.set(id, index)
     if (seenConsts.has(goConst)) problems.push(`${at}.goConst 与 modules[${seenConsts.get(goConst)}] 重复：${goConst}`)
     else seenConsts.set(goConst, index)
-    modules.push({ id, goConst, title, line: index })
+    modules.push({ id, goConst, title, defaultInChannel, line: index })
   }
   if (problems.length > 0) return { contract: null, problems }
   return { contract: { version: 1, modules }, problems }
@@ -346,7 +385,7 @@ export function parseModuleContract(text) {
 
 /**
  * 契约 → 渲染上下文。
- * @param {{modules: Array<{id: string, goConst: string, title: string}>}} contract - 契约。
+ * @param {{modules: Array<{id: string, goConst: string, title: string, defaultInChannel: boolean}>}} contract - 契约。
  * @returns {{ids: string[], idsText: string, modules: object[]}} 渲染上下文。
  */
 const contractContext = (contract) => ({
@@ -354,6 +393,55 @@ const contractContext = (contract) => ({
   idsText: contract.modules.map(module => module.id).join(','),
   modules: contract.modules,
 })
+
+/**
+ * **读真源**（候选路径 + fail-loud）：所有模式共用这一条，避免三处各写一遍解析。
+ * @param {{root?: string, cwd?: string}} [options] - 覆盖项。
+ * @returns {{contract: object|null, problems: string[], path: string|null}} 契约 / 问题 / 命中路径。
+ */
+export function loadModuleContract(options = {}) {
+  for (const candidate of CONTRACT_CANDIDATES) {
+    const read = readRepoFile(candidate, options)
+    if (read.text === null) continue
+    const parsed = parseModuleContract(read.text)
+    return { contract: parsed.contract, problems: parsed.problems, path: read.path }
+  }
+  const tried = CONTRACT_CANDIDATES.flatMap(candidate => resolveRepoPath(candidate, options).tried)
+  return {
+    contract: null,
+    problems: [`${MODULE_CONTRACT_FILE} **不可达** —— 这是仓库结构事故（单一真源被改名/搬走），`
+      + `不是环境差异。候选路径全部尝试过：${tried.join(' | ')}`],
+    path: null,
+  }
+}
+
+/**
+ * 契约自洽断言（**与生成物无关**，只判真源本身）。
+ *
+ *   (a) 每个模块的 `defaultInChannel` 必须是布尔 —— 已在 {@link parseModuleContract} 里判
+ *       （缺/非布尔 ⇒ 解析阶段即红，不产契约）；
+ *   (b) **棘轮**：`defaultInChannel: true` 的模块数不得超过 {@link MAX_MODULES_DEFAULT_ON}。
+ *       新增模块想默认开就必须显式改那个常量（进 diff、可评审），否则"悄悄默认全开"。
+ * @param {{modules: Array<{id: string, defaultInChannel: boolean}>}} contract - 契约。
+ * @returns {string[]} 问题清单（空 = 自洽）。
+ */
+export function contractSelfProblems(contract) {
+  const problems = []
+  if (!Number.isSafeInteger(MAX_MODULES_DEFAULT_ON) || MAX_MODULES_DEFAULT_ON <= 0) {
+    problems.push(`MAX_MODULES_DEFAULT_ON 必须是正整数（实际 ${JSON.stringify(MAX_MODULES_DEFAULT_ON)}）`
+      + ' —— 它被掏空/改成 0 时棘轮就失效了')
+  }
+  const onByDefault = contract.modules.filter(module => module.defaultInChannel === true)
+  if (onByDefault.length > MAX_MODULES_DEFAULT_ON) {
+    problems.push(`契约里有 ${onByDefault.length} 个模块 \`defaultInChannel: true\`，超过棘轮上限 `
+      + `MAX_MODULES_DEFAULT_ON = ${MAX_MODULES_DEFAULT_ON}`
+      + `（${onByDefault.map(module => module.id).join(', ')}）—— 缺省 true 意味着这个模块会`
+      + '**自动发给所有既有渠道**（含已交付的客户包）。要么把它改成 `false` 让渠道显式打开，'
+      + '要么显式上调 `scripts/gen-module-contract.mjs` 里的 `MAX_MODULES_DEFAULT_ON`'
+      + '（让它出现在 diff 里被评审看见）')
+  }
+  return problems
+}
 
 /**
  * 定位一个文件里的全部生成区标记。
@@ -589,28 +677,36 @@ function verifyGoAllModules(ctx, options) {
 }
 
 /**
- * **`--check`**：在内存里重算各端生成物并与磁盘逐字节比，再跑 4 处结构核验。
+ * **`--check`**：在内存里重算各端生成物并与磁盘逐字节比，再跑契约自洽 + 4 处结构核验。
+ *
+ * 问题分**三桶**返回（CLI 按桶给不同的修法，见 {@link main}）：
+ *   · `contractProblems`  —— 真源本身不可达/非法/违反棘轮 ⇒ 修 `module-contract.json`
+ *     （或显式上调 `MAX_MODULES_DEFAULT_ON`）；
+ *   · `generatedProblems` —— 标记块内的**生成物**与真源不一致 ⇒ 跑生成器（一次修好）；
+ *   · `structuralProblems`—— **不是生成物**的结构面/接线面（客户端 `module:` 顺序、
+ *     router 分片、`featureGlobalName()`、`AllModules()`、ci.yml 里手写的非契约 `-tags=`）
+ *     ⇒ 跑生成器**不会**修好，必须按每条点名的位置人工补齐。
  * @param {{root?: string, cwd?: string}} [options] - 覆盖项（自检/测试用）。
- * @returns {Promise<{ok: boolean, problems: string[], counts: object, contract: object|null}>} 判定结果。
+ * @returns {Promise<{ok: boolean, problems: string[], contractProblems: string[], generatedProblems: string[], structuralProblems: string[], counts: object, contract: object|null}>} 判定结果。
  */
 export async function checkModuleContract(options = {}) {
-  const problems = []
-  let contract = null
-  for (const candidate of CONTRACT_CANDIDATES) {
-    const read = readRepoFile(candidate, options)
-    if (read.text === null) continue
-    const parsed = parseModuleContract(read.text)
-    problems.push(...parsed.problems)
-    contract = parsed.contract
-    break
-  }
-  if (contract === null && problems.length === 0) {
-    const tried = CONTRACT_CANDIDATES.flatMap(candidate => resolveRepoPath(candidate, options).tried)
-    problems.push(`${MODULE_CONTRACT_FILE} **不可达** —— 这是仓库结构事故（单一真源被改名/搬走），`
-      + `不是环境差异。候选路径全部尝试过：${tried.join(' | ')}`)
-  }
+  const contractProblems = []
+  const generatedProblems = []
+  const structuralProblems = []
+  const loaded = loadModuleContract(options)
+  contractProblems.push(...loaded.problems)
+  const contract = loaded.contract
+  if (contract !== null) contractProblems.push(...contractSelfProblems(contract))
   if (contract === null) {
-    return { ok: false, problems, counts: MODULE_CONTRACT_FACE_COUNTS, contract: null }
+    return {
+      ok: false,
+      problems: [...contractProblems],
+      contractProblems,
+      generatedProblems,
+      structuralProblems,
+      counts: MODULE_CONTRACT_FACE_COUNTS,
+      contract: null,
+    }
   }
   const ctx = contractContext(contract)
 
@@ -618,12 +714,12 @@ export async function checkModuleContract(options = {}) {
   for (const site of GENERATED_SITES) {
     const read = readRepoFile(site.path, options)
     if (read.text === null) {
-      problems.push(read.problem)
+      generatedProblems.push(read.problem)
       continue
     }
     const rendered = renderSite(read.text, site, ctx)
     if (rendered.problems.length > 0) {
-      problems.push(...rendered.problems.map(problem => `${problem} —— 跑 \`node scripts/gen-module-contract.mjs\` 前请先把标记补齐`))
+      generatedProblems.push(...rendered.problems)
       continue
     }
     if (rendered.text === read.text) continue
@@ -636,24 +732,33 @@ export async function checkModuleContract(options = {}) {
       changed.push(`第 ${index + 1} 行：实际 ${JSON.stringify(before[index] ?? null)}`
         + ` ≠ 期望 ${JSON.stringify(after[index] ?? null)}`)
     }
-    problems.push(`${site.path}（${site.label}）的生成物与真源 \`${MODULE_CONTRACT_FILE}\` 不一致：`
-      + `${changed.slice(0, 6).join('；')}${changed.length > 6 ? `；…共 ${changed.length} 行不同` : ''}`
-      + ' —— 生成区是**生成物**，手改会被判红；跑 `node scripts/gen-module-contract.mjs` 重新生成')
+    generatedProblems.push(`${site.path}（${site.label} / 生成区 ${site.regions
+      .map(region => region.id).join('+')}）的生成物与真源 \`${MODULE_CONTRACT_FILE}\` 不一致：`
+      + `${changed.slice(0, 6).join('；')}${changed.length > 6 ? `；…共 ${changed.length} 行不同` : ''}`)
   }
 
-  // ---- ci.yml 的"带值但不是契约串"普查 ---------------------------------------
+  // ---- 接线面：ci.yml 的"带值但不是契约串"普查（不是生成区）-------------------
   {
     const read = readRepoFile('.github/workflows/ci.yml', options)
-    if (read.text !== null) problems.push(...scanWorkflowTagLiterals(read.text, ctx.idsText))
+    if (read.text !== null) structuralProblems.push(...scanWorkflowTagLiterals(read.text, ctx.idsText))
   }
 
   // ---- 核验面（生成之外的结构面）--------------------------------------------
-  problems.push(...verifyClientSurfaceOrder(ctx, options))
-  problems.push(...verifyRouterShards(ctx, options))
-  problems.push(...await verifyWebadminGlobalName(ctx, options))
-  problems.push(...verifyGoAllModules(ctx, options))
+  structuralProblems.push(...verifyClientSurfaceOrder(ctx, options))
+  structuralProblems.push(...verifyRouterShards(ctx, options))
+  structuralProblems.push(...await verifyWebadminGlobalName(ctx, options))
+  structuralProblems.push(...verifyGoAllModules(ctx, options))
 
-  return { ok: problems.length === 0, problems, counts: MODULE_CONTRACT_FACE_COUNTS, contract }
+  const problems = [...contractProblems, ...generatedProblems, ...structuralProblems]
+  return {
+    ok: problems.length === 0,
+    problems,
+    contractProblems,
+    generatedProblems,
+    structuralProblems,
+    counts: MODULE_CONTRACT_FACE_COUNTS,
+    contract,
+  }
 }
 
 /**
@@ -665,19 +770,10 @@ export async function checkModuleContract(options = {}) {
  */
 export async function generateModuleContract(options = {}) {
   const problems = []
-  let contract = null
-  for (const candidate of CONTRACT_CANDIDATES) {
-    const read = readRepoFile(candidate, options)
-    if (read.text === null) continue
-    const parsed = parseModuleContract(read.text)
-    problems.push(...parsed.problems)
-    contract = parsed.contract
-    break
-  }
+  const loaded = loadModuleContract(options)
+  problems.push(...loaded.problems)
+  const contract = loaded.contract
   if (contract === null) {
-    if (problems.length === 0) {
-      problems.push(`${MODULE_CONTRACT_FILE} 不可达 —— 仓库结构事故（候选路径全部尝试过）`)
-    }
     return { ok: false, problems, changed: [], unchanged: [] }
   }
   const ctx = contractContext(contract)
@@ -721,9 +817,42 @@ async function main(argv) {
   if (argv.includes('--check')) {
     const result = await checkModuleContract()
     if (!result.ok) {
-      for (const problem of result.problems) process.stderr.write(`gen-module-contract --check: ${problem}\n`)
-      process.stderr.write(`gen-module-contract --check: ${result.problems.length} 项不一致`
-        + ' —— 跑 `node scripts/gen-module-contract.mjs` 重新生成（生成区是生成物，手改会被判红）\n')
+      /**
+       * 按桶给**不同的修法**：生成区不一致跑一次生成器就修好；结构面缺失跑生成器**不会**
+       * 修好（它们不是生成物）—— 把两者混在一句"跑生成器"里会让人白跑一趟。
+       */
+      const buckets = [
+        {
+          label: '真源问题',
+          problems: result.contractProblems,
+          fix: `修 \`${MODULE_CONTRACT_FILE}\`（新增模块一律先设 \`defaultInChannel: false\`；`
+            + '要让它默认开就必须显式上调 `scripts/gen-module-contract.mjs` 的 '
+            + '`MAX_MODULES_DEFAULT_ON`）',
+        },
+        {
+          label: '生成区不一致',
+          problems: result.generatedProblems,
+          fix: '跑 `node scripts/gen-module-contract.mjs` 重新生成（生成区是**生成物**，手改会被判红）',
+        },
+        {
+          label: '结构面/接线面缺失（**不是生成物**）',
+          problems: result.structuralProblems,
+          fix: '跑生成器**不会**修好这一桶 —— 按上面逐条点名的文件:行**人工补齐**'
+            + '（客户端 `module:` 顺序 / router 的 `optional_<m>_{on,off}.go` / '
+            + '`featureGlobalName()` / `AllModules()` / ci.yml 里手写的非契约 `-tags=`）',
+        },
+      ]
+      for (const bucket of buckets) {
+        if (bucket.problems.length === 0) continue
+        process.stderr.write(`gen-module-contract --check: 【${bucket.label}】${bucket.problems.length} 项\n`)
+        for (const problem of bucket.problems) {
+          process.stderr.write(`gen-module-contract --check:   · ${problem}\n`)
+        }
+        process.stderr.write(`gen-module-contract --check:   ⇒ 修法：${bucket.fix}\n`)
+      }
+      process.stderr.write(`gen-module-contract --check: 合计 ${result.problems.length} 项不一致`
+        + `（真源 ${result.contractProblems.length} · 生成区 ${result.generatedProblems.length}`
+        + ` · 结构面 ${result.structuralProblems.length}）\n`)
       return 1
     }
     process.stdout.write(`gen-module-contract --check: OK — 生成物与 ${MODULE_CONTRACT_FILE} 逐字节一致`

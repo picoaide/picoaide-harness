@@ -8439,8 +8439,9 @@ exit 0
 // JS 判据与 Go 判据**都会绿** ⇒ 跨语言漂移无人抓。
 //
 // 收口形态 = **单一真源 + 代码生成**（而不是"再写一条对拍"）：真源 = 仓库根
-// `module-contract.json`；各端的模块名清单是**生成物**，由 `scripts/gen-module-contract.mjs`
-// 重写标记块（`@generated:module-contract` / `@end:module-contract`）内的内容。
+// `module-contract.json`；各端的模块名清单与**渠道缺省表**（`FEATURE_MODULE_DEFAULTS`）
+// 都是**生成物**，由 `scripts/gen-module-contract.mjs` 重写标记块
+// （`@generated:module-contract` / `@end:module-contract`）内的内容。
 //
 // 本节**真跑**那个脚本的 `--check`（子进程，与维护者/CI 跑的是同一条命令）：
 //   · 手改生成区（例如把 Makefile 的 `GO_TAGS ?=` 改成别的串）⇒ 红；
@@ -8449,8 +8450,12 @@ exit 0
 // 判据本体（真源解析、逐字节比较、4 处结构核验：客户端 `module:` 顺序 / router 标签分片
 // 与孤儿标签 / `featureGlobalName()` 真跑 / Go `AllModules()` 顺序）都在那个脚本里 ——
 // 本节**不重复实现**它们，只真跑 + 兜住"脚本位读不到/退出码非 0"。
+//
+// 本节另外**真跑**面向人的渠道清单工具 `scripts/channel-modules.mjs`（`--list` /
+// `--template` / `--check`）：它不是"生成物"那一件事（工具本身不写文件），但同样是
+// "决定渠道交付面"的执行体 —— 判据存在却没人启动等于不存在。
 {
-  /** 生成端（6 个文件 / 10 个生成区）与真源都必须真的存在 —— "脚本位读不到"不是 skip。 */
+  /** 生成端（6 个文件 / 11 个生成区）与真源都必须真的存在 —— "脚本位读不到"不是 skip。 */
   check(existsSync(join(root, 'module-contract.json')),
     '仓库根必须有 `module-contract.json`（编译期功能模块的**单一真源**）—— 它是六个生成端的输入，'
       + '缺了它各端的模块名清单就又回到"六处各写一遍"的状态')
@@ -8472,6 +8477,121 @@ exit 0
     && MODULE_CONTRACT_FACE_COUNTS.verifiedFaces > 0,
     '`scripts/gen-module-contract.mjs` 必须导出非空的 `MODULE_CONTRACT_FACE_COUNTS`'
       + '（汇总串的"端数/核验处数"取自那里；在调用点重算就是第二份口径）')
+
+  // ---- 渠道缺省（`defaultInChannel` → `FEATURE_MODULE_DEFAULTS`）-------------------
+  //
+  // 现场：缺省 `true` 的意思是"渠道**不写** `features.<m>` = 这个模块要发给它"。这个值一旦
+  // 被硬编码回 `normalizeChannelFeatures()`，将来新增的模块就会**自动发给所有既有渠道**
+  // （含已经交付的客户包），而真源里明明写的是 `false` —— 两边各自自洽，没有任何红灯。
+  const constantsPath = join(root, 'packages', 'host', 'desktop', 'scripts', 'channel-constants.ts')
+  check(existsSync(constantsPath),
+    'packages/host/desktop/scripts/channel-constants.ts 必须存在（渠道缺省表与 features 解析的唯一真源）')
+  const constantsSource = existsSync(constantsPath) ? readFileSync(constantsPath, 'utf8') : ''
+  const constantsModule = existsSync(constantsPath)
+    ? await import(pathToFileURL(constantsPath).href)
+    : {}
+  const contractRaw = existsSync(join(root, 'module-contract.json'))
+    ? JSON.parse(readFileSync(join(root, 'module-contract.json'), 'utf8'))
+    : null
+  const contractModules = Array.isArray(contractRaw?.modules) ? contractRaw.modules : []
+  check(contractModules.length > 0,
+    'module-contract.json 的 modules 必须是非空数组（渠道缺省表的真源就是各自的 defaultInChannel）')
+  const generatedDefaults = constantsModule.FEATURE_MODULE_DEFAULTS ?? null
+  check(generatedDefaults !== null && contractModules.length > 0
+    && contractModules.every(module => generatedDefaults?.[module.id] === module.defaultInChannel),
+    '生成的 `FEATURE_MODULE_DEFAULTS` 必须逐模块等于 module-contract.json 的 `defaultInChannel`：'
+      + `契约 ${JSON.stringify(Object.fromEntries(contractModules.map(module =>
+        [module.id, module.defaultInChannel])))} vs 生成物 ${JSON.stringify(generatedDefaults)}`
+      + ' —— 两处不一致时"渠道不写 features 会拿到什么"就有了两套答案'
+      + '（跑 `node scripts/gen-module-contract.mjs` 重新生成）')
+
+  // **真跑**证明"缺键取值来自这张表"（而不是硬编码 true）：把表里**一个模块**的缺省翻过来，
+  // 复制成临时模块（channel-constants.ts 零 import ⇒ 副本自洽），断言 `{}` 的解析结果跟着变；
+  // 再用未改动的那份做对照组。样本**从契约派生**（挑第一个缺省 true 的模块，没有就挑第一个），
+  // 所以增删模块时这条判据自动跟着走。
+  {
+    const ids = contractModules.map(module => module.id)
+    const target = ids.find(id => generatedDefaults?.[id] === true) ?? ids[0]
+    const flipped = !(generatedDefaults?.[target] === true)
+    const mutated = target === undefined ? constantsSource : constantsSource.replace(
+      new RegExp(`^([ \\t]*)${target}:([ \\t]*)(?:true|false),$`, 'mu'),
+      `$1${target}:$2${flipped},`,
+    )
+    const constructed = target !== undefined && mutated !== constantsSource
+    check(constructed,
+      `构造"渠道缺省取自 FEATURE_MODULE_DEFAULTS"的反证样本失败（在 channel-constants.ts 里找不到 `
+        + `\`${String(target)}: <bool>,\` 那一行）—— 缺省表被换成别的写法时这条判据必须红，`
+        + '不能静默退化成"没有样本"')
+    if (constructed) {
+      const fixtureDir = tempDir('module-defaults-')
+      scratch.push(fixtureDir)
+      const fixturePath = join(fixtureDir, 'channel-constants.ts')
+      writeFileSync(fixturePath, mutated)
+      const fixture = await import(pathToFileURL(fixturePath).href)
+      const fromUndefined = fixture.normalizeChannelFeatures(undefined)
+      const fromEmpty = fixture.normalizeChannelFeatures({})
+      check(fromUndefined?.[target] === flipped && fromEmpty?.[target] === flipped,
+        `把 ${target} 的渠道缺省翻成 ${String(flipped)} 后，normalizeChannelFeatures(undefined)/({}) 的 `
+          + `${target} 必须跟着变（实际 ${JSON.stringify(fromUndefined?.[target])} / `
+          + `${JSON.stringify(fromEmpty?.[target])}）—— 缺省值必须**读表**：硬编码 true 会让将来`
+          + '新增的模块（契约里 defaultInChannel:false）悄悄发给所有既有渠道')
+      check(constantsModule.normalizeChannelFeatures(undefined)?.[target] === generatedDefaults?.[target],
+        `未改动的 channel-constants.ts 里 normalizeChannelFeatures(undefined) 的 ${target} 必须等于 `
+          + `FEATURE_MODULE_DEFAULTS.${target}（对照组：证明上一条真的是"翻转样本"在起作用）`)
+    }
+  }
+
+  // ---- 渠道清单工具 `scripts/channel-modules.mjs`（真跑 CLI）----------------------
+  {
+    const tool = fileURLToPath(new URL('./channel-modules.mjs', import.meta.url))
+    check(existsSync(tool), 'scripts/channel-modules.mjs 必须存在（渠道 × 模块清单工具）')
+    const listRun = spawnSync(process.execPath, [tool, '--list'], { cwd: root, encoding: 'utf8' })
+    check(listRun.status === 0, '`channel-modules.mjs --list` 必须通过（实际 exit '
+      + `${listRun.status}；stderr ${JSON.stringify((listRun.stderr ?? '').trim())}）`)
+    const templateRun = spawnSync(process.execPath, [tool, '--template'], { cwd: root, encoding: 'utf8' })
+    check(templateRun.status === 0, '`channel-modules.mjs --template` 必须通过（实际 exit '
+      + `${templateRun.status}；stderr ${JSON.stringify((templateRun.stderr ?? '').trim())}）`)
+    check(contractModules.every(module => (templateRun.stdout ?? '').includes(`"${module.id}"`)),
+      '`--template` 打印的片段必须列出**全部**模块（少一个 = 新渠道照抄时会漏声明一个模块）：'
+        + `实际输出 ${JSON.stringify((templateRun.stdout ?? '').trim())}`)
+
+    const fixtureDir = tempDir('channel-modules-')
+    scratch.push(fixtureDir)
+    const ids = contractModules.map(module => module.id)
+    const first = ids[0]
+    const defaultsOf = Object.fromEntries(
+      contractModules.map(module => [module.id, module.defaultInChannel === true]),
+    )
+    /** 期望的"实际交付"变体串 —— 从契约派生（不写死），增删模块时本判据跟着变。 */
+    const expectedVariant = (skip) => {
+      const on = ids.filter(id => id !== skip && defaultsOf[id] === true)
+      return on.length === 0 ? 'none' : on.join(',')
+    }
+    const cases = [
+      {
+        name: '显式关闭一个模块（其余按契约缺省）',
+        body: { features: { [first]: false } },
+        wantExit: 0,
+        wantText: `实际交付 ${expectedVariant(first)}`,
+      },
+      { name: '非布尔取值（字符串 "false" 不是 false）', body: { features: { [first]: 'false' } }, wantExit: 1 },
+      { name: '未知模块键', body: { features: { wibble: true } }, wantExit: 1 },
+    ]
+    for (const [index, item] of cases.entries()) {
+      const file = join(fixtureDir, `sample-${index}.json`)
+      writeFileSync(file, `${JSON.stringify({ channel_id: 'sample', ...item.body })}\n`)
+      const run = spawnSync(process.execPath, [tool, '--check', file], { cwd: root, encoding: 'utf8' })
+      const output = `${run.stdout ?? ''}${run.stderr ?? ''}`
+      check(run.status === item.wantExit,
+        `channel-modules.mjs --check「${item.name}」必须 exit ${item.wantExit}（实际 ${run.status}）：`
+          + JSON.stringify(output.trim()))
+      if (item.wantText !== undefined) {
+        check(output.includes(item.wantText),
+          `channel-modules.mjs --check「${item.name}」的输出必须含 ${JSON.stringify(item.wantText)}`
+            + `（实际 ${JSON.stringify(output.trim())}）—— 期望值从契约派生，不写死变体串`)
+      }
+    }
+  }
 }
 
 for (const dir of scratch) rmSync(dir, { recursive: true, force: true })
@@ -8528,4 +8648,8 @@ process.stdout.write('verify-ci-scripts: OK — ref 形态判定唯一真源(tag
   + '`gen-module-contract.mjs --check`;六端模块名清单不再是手抄,而是根 `module-contract.json` 的'
   + '生成物(标记块 `@generated:module-contract`),手改生成区或改了真源没重跑生成器都判红;'
   + '另有 4 处结构核验:客户端 `module:` 顺序 / router 标签分片成对且无孤儿标签 /'
-  + '`featureGlobalName()` 真跑 / Go `AllModules()` 源码顺序)\n')
+  + '`featureGlobalName()` 真跑 / Go `AllModules()` 源码顺序;'
+  + '渠道缺省 `FEATURE_MODULE_DEFAULTS` 也是生成物且 `normalizeChannelFeatures()` **真跑读表**'
+  + '(把某个模块的缺省翻过来做样本 + 未改动那份做对照,硬编码 true 当场红);'
+  + '面向人的 `channel-modules.mjs` 的 `--list` / `--template`(逐模块列出) / `--check` 三例'
+  + '(显式关闭按契约缺省交付、字符串 "false"、未知键)真跑并派生期望值)\n')

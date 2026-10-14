@@ -374,6 +374,10 @@ export const EXECUTION_FACE_REGISTRY = [
   'scripts/check-verdict-credential.mjs',
   'scripts/check-workflows.mjs',
   'scripts/check-workspaces.mjs',
+  // 渠道 × 模块清单工具（2026-10-14）：`--list` / `--template` / `--explain` / `--check`。
+  // 它**决定渠道交付面**（读契约 + 真跑 `normalizeChannelFeatures()`），并被
+  // `scripts/verify-ci-scripts.mjs` 第 20 节真跑（三个样本）⇒ 被改写就等于改写判定。
+  'scripts/channel-modules.mjs',
   'scripts/ci-brand-mask.sh',
   'scripts/ci-build-channel-images.sh',
   'scripts/ci-channel-transfer.sh',
