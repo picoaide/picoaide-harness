@@ -384,9 +384,10 @@ const REGISTERED_INSTALL_INTEGRITY_BODIES = [
     //
     // 2026-10-14（模块编译契约，方案 B）：`EXECUTION_FACE_REGISTRY` 补登
     // `scripts/gen-module-contract.mjs`（单一真源 `module-contract.json` 的生成器 + `--check`
-    // 门禁；它改写六个端的生成区）⇒ 本件内容变了，摘要同步进 diff
+    // 门禁；它改写六个端的生成区）+ `CI_REFERENCED_EXECUTION_REGISTRY` 补登同一条
+    // （`ci.yml` 的生成区标记文本里点了它的名）⇒ 本件内容变了，摘要同步进 diff
     // （取值 = `sha256sum scripts/check-install-integrity.mjs`，即提交后的 HEAD 那份）。
-    sha256: '8fc56eca2c42ab28b14728fa25ae1759d42b4f11a31f072e9c5cf08437a7c35a',
+    sha256: 'd27cebf3eafdf6e12ca57b4042f39dba4b573124ba3056f583b8a2aa58b14e03',
     methods: [
       'judge-body-bytes-equal-head',
       'yarnrc-forbidden-keys',

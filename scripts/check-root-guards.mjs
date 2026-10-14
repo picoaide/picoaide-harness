@@ -224,8 +224,9 @@ const REGISTERED_GUARD_ENTRIES = new Map([
   // 2026-10-14（p2 变体裁剪并入后）：`check-guard-parser-integrity.mjs` 又变了一次
   // （它登记的 install-integrity 摘要随 `channel-variant.ts` 补登而更新）⇒ 本摘要同步。
   // 2026-10-14（模块编译契约，方案 B）：同一件又一次 —— install-integrity 补登
-  // `scripts/gen-module-contract.mjs` ⇒ 本摘要同步（同一份 `sha256sum` 口径）。
-  ['check:guard-parser-integrity', { script: 'node scripts/check-guard-parser-integrity.mjs', argvTail: [], digest: '2c32255c8598648b9a5baae46e07b65c19aab84c6f56b3ec90588d2b34513448' }],
+  // `scripts/gen-module-contract.mjs`（形状族 + CI 引用两条表）⇒ 本摘要同步
+  // （同一份 `sha256sum` 口径）。
+  ['check:guard-parser-integrity', { script: 'node scripts/check-guard-parser-integrity.mjs', argvTail: [], digest: 'c1359ce20a8d6cb27b23a01d70b8a2a5a6c6ae5017afd30c202b4894bf981704' }],
 ])
 
 /**

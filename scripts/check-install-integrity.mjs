@@ -442,6 +442,11 @@ export const CI_REFERENCED_EXECUTION_REGISTRY = [
   'scripts/ci-publish-update-server.sh',
   'scripts/ci-release-policy.sh',
   'scripts/ci-release-topology.sh',
+  // 模块编译契约的生成器（2026-10-14 方案 B）：它被 **`ci.yml` 的生成区标记文本**提到
+  // （标记行里写着 `(scripts/gen-module-contract.mjs)`）⇒ `ciReferencedExecutionBodies()`
+  // 从 workflow 文本扫到这个 token。这条不是"新执行体悄悄进了 CI"，而是"CI 文件里点名了它"
+  // —— 同一件事实必须双向登记（扫到却没登记 ⇒ 红）。
+  'scripts/gen-module-contract.mjs',
   'scripts/verify-ci-scripts.mjs',
   'scripts/verify-wasm-client-only.sh',
   'scripts/version.mjs',
