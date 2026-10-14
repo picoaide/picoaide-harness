@@ -40,6 +40,7 @@ const (
 // 顺序刻意写死：让"同一个组合"在任何机器上都得到逐字节相同的 Enabled() 结果。
 // @generated:module-contract (scripts/gen-module-contract.mjs) — 手改会被 --check 判红
 var allModules = []string{ModuleSkills, ModuleApps, ModuleConnectors}
+
 // @end:module-contract
 
 // AllModules 返回全部模块名（规范顺序）的副本。

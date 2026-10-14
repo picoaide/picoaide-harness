@@ -138,7 +138,13 @@ export const GENERATED_SITES = [
       {
         id: 'features.all-modules',
         label: 'allModules 那一行（顺序 = 契约）',
-        body: ({ modules }) => [`var allModules = []string{${modules.map(module => module.goConst).join(', ')}}`],
+        body: ({ modules }) => [
+          `var allModules = []string{${modules.map(module => module.goConst).join(', ')}}`,
+          // 末尾这个空串不是装饰：`gofmt` 要求 `var …` 声明与紧跟其后的独立注释行
+          // （即生成区的 `// @end`）之间留一个空行 —— 少了它 `gofmt -l` 会点名本文件，
+          // CI 的 `gofmt check` 步当场红（2026-10-14 实测：首版就是这么红的）。
+          '',
+        ],
       },
     ],
   },
