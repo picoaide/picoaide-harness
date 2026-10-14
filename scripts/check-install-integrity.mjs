@@ -288,6 +288,9 @@ export const EXECUTION_FACE_REGISTRY = [
   // "它属于执行面"的声明（内容被 install 期改写要让判据看得见）。
   'packages/host/desktop/scripts/channel-constants.ts',
   'packages/host/desktop/scripts/channel-prepare.ts',
+  // 2026-10-14（p2 变体裁剪）：新增的变体清单读写脚本（打包入口与
+  // `verify-packaged-runtime` 都经它取"这一轮声明关了哪些模块"）。
+  'packages/host/desktop/scripts/channel-variant.ts',
   'packages/host/desktop/scripts/clean.mjs',
   'packages/host/desktop/scripts/direct-invocation.mjs',
   'packages/host/desktop/scripts/e2e-client.mjs',

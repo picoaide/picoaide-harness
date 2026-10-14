@@ -375,7 +375,13 @@ const REGISTERED_INSTALL_INTEGRITY_BODIES = [
     // 的 `defaults.run.working-directory` 解析成规范名）与 account-card 新增的
     // `tsconfig.tests.json`（对抗审计 P2-甲：测试期源码边此前没有任何 typecheck 观察力）
     // ⇒ 本件内容变了，摘要同步进 diff（同一条 `sha256sum` 口径）。
-    sha256: '719638b7935d40be9f77da4f806b927abf32b05772dae9d983de595d0fe226ec',
+    //
+    // 2026-10-14（p2 变体裁剪并入后）：`EXECUTION_FACE_REGISTRY` 再补登一条
+    // `packages/host/desktop/scripts/channel-variant.ts`（新脚本，打包入口与
+    // `verify-packaged-runtime` 都经它取本轮变体声明）⇒ 摘要再次同步进 diff。
+    // ⚠️ 这条漏登记过一次：它**不在 17 条根守卫里**（是 `ci.yml` 里 yarn 之前的
+    // "Judge execution bodies are pristine" 那一步），合并后必须单独跑一次本脚本。
+    sha256: 'ceb2b38a18f9aa0ea273d925b09dccc645d68e4b7f34e88c5c65ac2ddd15baa4',
     methods: [
       'judge-body-bytes-equal-head',
       'yarnrc-forbidden-keys',
