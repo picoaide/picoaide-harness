@@ -45,6 +45,9 @@ import vm from 'node:vm'
 
 // 复用门禁自己的 run 块解析器:下面 1c 要**真跑** ci.yml 里的 shell 步骤(不是文本对拍)。
 import { extractRunBlocks } from './check-workflows.mjs'
+// 模块编译契约的**面数**（单一真源在这里：`scripts/gen-module-contract.mjs`）。
+// 第 20 节只用它拼汇总串，**不在调用点重算**（重算就是第二份口径）。
+import { MODULE_CONTRACT_FACE_COUNTS } from './gen-module-contract.mjs'
 // step 级字段(`env:`)必须走 YAML 解析 —— 1d 的 W-8 判据问的是"这一步的 env 里有没有
 // 那个变量",子串匹配会把别处(别的 job/别的 step)的同一行算进来。
 import { parse as parseYaml } from 'yaml'
@@ -8426,6 +8429,51 @@ exit 0
       + '判据存在但 CI 从不启动它')
 }
 
+// ---- 20. 模块编译契约：生成物 ↔ 单一真源（2026-10-14 独立审计 P0）----
+//
+// 现场（本仓实测，跨语言漂移）：编译期功能模块（skills / apps / connectors）的名字此前在
+// **六个端**各写一遍 —— Go 权威（`ModuleX` + `allModules`）、webadmin `FEATURE_MODULES`、
+// 客户端 `FEATURE_MODULES` + `features.<m>` 模板键族、`server/Makefile` 的 `GO_TAGS ?=`、
+// `server/Dockerfile` 的两个 `ARG` 缺省值、ci.yml 的两处 `-tags=` 字面量。每一端都有自己的
+// 判据，却**没有一条跨端机械对拍**：把 `'connectors'` 在 TS 侧两处**一起**改成 `'connector'`，
+// JS 判据与 Go 判据**都会绿** ⇒ 跨语言漂移无人抓。
+//
+// 收口形态 = **单一真源 + 代码生成**（而不是"再写一条对拍"）：真源 = 仓库根
+// `module-contract.json`；各端的模块名清单是**生成物**，由 `scripts/gen-module-contract.mjs`
+// 重写标记块（`@generated:module-contract` / `@end:module-contract`）内的内容。
+//
+// 本节**真跑**那个脚本的 `--check`（子进程，与维护者/CI 跑的是同一条命令）：
+//   · 手改生成区（例如把 Makefile 的 `GO_TAGS ?=` 改成别的串）⇒ 红；
+//   · 改了真源却没跑生成器 ⇒ 红（点名每一个没跟上的端）；
+//   · 真源/生成端文件读不到 ⇒ 红（仓库结构事故不是 skip）。
+// 判据本体（真源解析、逐字节比较、4 处结构核验：客户端 `module:` 顺序 / router 标签分片
+// 与孤儿标签 / `featureGlobalName()` 真跑 / Go `AllModules()` 顺序）都在那个脚本里 ——
+// 本节**不重复实现**它们，只真跑 + 兜住"脚本位读不到/退出码非 0"。
+{
+  /** 生成端（6 个文件 / 10 个生成区）与真源都必须真的存在 —— "脚本位读不到"不是 skip。 */
+  check(existsSync(join(root, 'module-contract.json')),
+    '仓库根必须有 `module-contract.json`（编译期功能模块的**单一真源**）—— 它是六个生成端的输入，'
+      + '缺了它各端的模块名清单就又回到"六处各写一遍"的状态')
+  const wiringRun = spawnSync(
+    process.execPath,
+    [fileURLToPath(new URL('./gen-module-contract.mjs', import.meta.url)), '--check'],
+    { cwd: root, encoding: 'utf8' },
+  )
+  check(wiringRun.status === 0,
+    '`node scripts/gen-module-contract.mjs --check` 必须通过（各端生成物与单一真源逐字节一致）：'
+      + `实际 exit ${wiringRun.status}（signal ${wiringRun.signal ?? 'null'}）；`
+      + `stdout ${JSON.stringify((wiringRun.stdout ?? '').trim())}；`
+      + `stderr ${JSON.stringify((wiringRun.stderr ?? '').trim())}`
+      + ' —— 修法：跑 `node scripts/gen-module-contract.mjs` 重新生成（生成区是**生成物**，'
+      + '手改会被判红；改了 `module-contract.json` 也必须重跑生成器）')
+  check(typeof MODULE_CONTRACT_FACE_COUNTS.generatedFiles === 'number'
+    && MODULE_CONTRACT_FACE_COUNTS.generatedFiles > 0
+    && typeof MODULE_CONTRACT_FACE_COUNTS.verifiedFaces === 'number'
+    && MODULE_CONTRACT_FACE_COUNTS.verifiedFaces > 0,
+    '`scripts/gen-module-contract.mjs` 必须导出非空的 `MODULE_CONTRACT_FACE_COUNTS`'
+      + '（汇总串的"端数/核验处数"取自那里；在调用点重算就是第二份口径）')
+}
+
 for (const dir of scratch) rmSync(dir, { recursive: true, force: true })
 if (failures.length > 0) {
   process.stderr.write(`\nverify-ci-scripts: ${failures.length} 项断言失败\n`)
@@ -8474,4 +8522,10 @@ process.stdout.write('verify-ci-scripts: OK — ref 形态判定唯一真源(tag
   + '位置在 `ARG FEATURES=` 之后与 `RUN npm run build` 之前),该谓词自带量具自检(1 正 3 负);'
   + 'webadmin 侧哨兵落点登记——每个模块页各自声明并渲染'
   + '真源派生的串、两份判据脚本各持全部串、其余文件出现哨兵字面量即红;'
-  + '变体测试矩阵的调度点三处缺一即红:Makefile 目标 + `make check` 调它 + CI server job 起它)\n')
+  + '变体测试矩阵的调度点三处缺一即红:Makefile 目标 + `make check` 调它 + CI server job 起它)/'
+  + `模块编译契约(${MODULE_CONTRACT_FACE_COUNTS.faces} 端 / `
+  + `${MODULE_CONTRACT_FACE_COUNTS.regions} 处核验：生成物与真源一致 —— 真跑 `
+  + '`gen-module-contract.mjs --check`;六端模块名清单不再是手抄,而是根 `module-contract.json` 的'
+  + '生成物(标记块 `@generated:module-contract`),手改生成区或改了真源没重跑生成器都判红;'
+  + '另有 4 处结构核验:客户端 `module:` 顺序 / router 标签分片成对且无孤儿标签 /'
+  + '`featureGlobalName()` 真跑 / Go `AllModules()` 源码顺序)\n')

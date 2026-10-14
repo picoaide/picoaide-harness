@@ -381,7 +381,12 @@ const REGISTERED_INSTALL_INTEGRITY_BODIES = [
     // `verify-packaged-runtime` 都经它取本轮变体声明）⇒ 摘要再次同步进 diff。
     // ⚠️ 这条漏登记过一次：它**不在 17 条根守卫里**（是 `ci.yml` 里 yarn 之前的
     // "Judge execution bodies are pristine" 那一步），合并后必须单独跑一次本脚本。
-    sha256: 'ceb2b38a18f9aa0ea273d925b09dccc645d68e4b7f34e88c5c65ac2ddd15baa4',
+    //
+    // 2026-10-14（模块编译契约，方案 B）：`EXECUTION_FACE_REGISTRY` 补登
+    // `scripts/gen-module-contract.mjs`（单一真源 `module-contract.json` 的生成器 + `--check`
+    // 门禁；它改写六个端的生成区）⇒ 本件内容变了，摘要同步进 diff
+    // （取值 = `sha256sum scripts/check-install-integrity.mjs`，即提交后的 HEAD 那份）。
+    sha256: '8fc56eca2c42ab28b14728fa25ae1759d42b4f11a31f072e9c5cf08437a7c35a',
     methods: [
       'judge-body-bytes-equal-head',
       'yarnrc-forbidden-keys',

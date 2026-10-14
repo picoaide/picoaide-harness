@@ -122,9 +122,11 @@ export const CHANNEL_TEMPLATE_KEYS = [
   // 私有渠道仓随后补官方渠道的键"这段窗口里 master 会一路红，而 tag 期的 gate 拦不住它。
   // 正确顺序：**私有仓先补键 → 再合并引入新键的 harness 改动**（补键对合并前的 harness
   // 无害）。决策记录 §4 有完整说明。
+  // @generated:module-contract (scripts/gen-module-contract.mjs) — 手改会被 --check 判红
   'features.skills',
   'features.apps',
   'features.connectors',
+  // @end:module-contract
 ] as const
 
 
@@ -144,7 +146,9 @@ export const CHANNEL_TEMPLATE_KEYS = [
  *   - `scripts/channel-build.ts`：构建期取值 → 变体标识 → 随包 `build/channel.json`；
  *   - `scripts/verify-ci-scripts.mjs`：正/负例与变异证明。
  */
+// @generated:module-contract (scripts/gen-module-contract.mjs) — 手改会被 --check 判红
 export const FEATURE_MODULES = ['skills', 'apps', 'connectors'] as const
+// @end:module-contract
 
 /** 一个功能模块名（{@link FEATURE_MODULES} 的成员）。 */
 export type FeatureModule = (typeof FEATURE_MODULES)[number]

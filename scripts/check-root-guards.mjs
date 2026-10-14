@@ -193,7 +193,7 @@ const REGISTERED_GUARD_ENTRIES = new Map([
   // 此前 exit 0）现在当场判红，合成负例 `b14-timeout-budget-below-registered` 是这条
   // 判据的钉子。⇒ 该守卫脚本内容变了，摘要按本表上方的纪律在同一批里复算更新。
   ['check:workflows', { script: 'node scripts/check-workflows.mjs', argvTail: [], digest: '1035651b524c6a32b909d6601069a184756aa86bdc5009834ec55885ea2b91e2' }],
-  ['check:ci-scripts', { script: 'node scripts/verify-ci-scripts.mjs', argvTail: [], digest: '8b27a1ff2e367413f1c2aeba7a7f7fec185bccd42689f4cff66852dc7c7b9f03' }],
+  ['check:ci-scripts', { script: 'node scripts/verify-ci-scripts.mjs', argvTail: [], digest: 'd4df45a734988c2fb130ad7f47fc2ebef0e8e94c036c5c30862b3c9fb86afe90' }],
   ['check:patch-resolutions', { script: 'node scripts/verify-patch-resolutions.mjs', argvTail: [], digest: '6dcde2281311235a57722608d91e6a1fa59734411ad65cda76ea2bdc43145c83' }],
   ['check:patch-pin', { script: 'node scripts/check-patch-pin.mjs', argvTail: [], digest: 'a8fe5b45df5dfadd7a87332b31f9e14c4a6722a41f21cf0f0d9afa6450a3ba84' }],
   ['check:patches', { script: 'node scripts/verify-patches.mjs', argvTail: [], digest: '22131d86472ff930f22687192b07216c5cf74ab594d0091a6766e661a2c24683' }],
@@ -223,7 +223,9 @@ const REGISTERED_GUARD_ENTRIES = new Map([
   // （取值 = 提交后工作树那份：`sha256sum scripts/check-guard-parser-integrity.mjs`）。
   // 2026-10-14（p2 变体裁剪并入后）：`check-guard-parser-integrity.mjs` 又变了一次
   // （它登记的 install-integrity 摘要随 `channel-variant.ts` 补登而更新）⇒ 本摘要同步。
-  ['check:guard-parser-integrity', { script: 'node scripts/check-guard-parser-integrity.mjs', argvTail: [], digest: '159b0ec46380bb224bb5e0fa7e1fb4dfd70d3d3ec7832f6c882747a75dfbb82a' }],
+  // 2026-10-14（模块编译契约，方案 B）：同一件又一次 —— install-integrity 补登
+  // `scripts/gen-module-contract.mjs` ⇒ 本摘要同步（同一份 `sha256sum` 口径）。
+  ['check:guard-parser-integrity', { script: 'node scripts/check-guard-parser-integrity.mjs', argvTail: [], digest: '2c32255c8598648b9a5baae46e07b65c19aab84c6f56b3ec90588d2b34513448' }],
 ])
 
 /**

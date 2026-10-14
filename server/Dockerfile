@@ -58,8 +58,10 @@ RUN npm ci
 #
 # ⚠️ 变体标识的**唯一输入是 `GO_TAGS`**（与 Stage 2 是同一个串，见那边的 `ARG GO_TAGS=`）：
 # 两个 build-arg 必须描述**同一个变体**，下面那条 RUN 就是这条不变量本身。
+# @generated:module-contract (scripts/gen-module-contract.mjs) — 手改会被 --check 判红
 ARG GO_TAGS=skills,apps,connectors
 ARG FEATURES=skills,apps,connectors
+# @end:module-contract
 ENV FEATURES=$FEATURES
 # **fail-loud：两个变体 build-arg 必须一致**（2026-10-14 独立审计 P2-5 的收口）。
 #
@@ -105,7 +107,9 @@ ARG VERSION=dev
 # 的入口）。最省事的姿势是 `make -C server docker-image GO_TAGS=<变体>`。
 # `make docker-image` 会把自己的 `GO_TAGS`（同一份缺省值）透传过来；**必须写在包面
 # 之前**（`go` 的 flag 解析在第一个非 flag 词处停止）。
+# @generated:module-contract (scripts/gen-module-contract.mjs) — 手改会被 --check 判红
 ARG GO_TAGS=skills,apps,connectors
+# @end:module-contract
 COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd/ ./cmd/

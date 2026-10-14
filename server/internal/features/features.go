@@ -21,18 +21,26 @@
 package features
 
 // 模块名常量 —— 对外契约的一部分，不得改写法（渠道配置与客户端组装清单按字面量比对）。
+//
+// 下面的常量块与 `allModules` 那一行都是 `scripts/gen-module-contract.mjs` 从仓库根
+// `module-contract.json` 生成的**生成物**：改模块名要改真源再跑那个脚本重算；
+// 手改生成区会被该脚本的 `--check` 判红。
 const (
+	// @generated:module-contract (scripts/gen-module-contract.mjs) — 手改会被 --check 判红
 	// ModuleSkills 技能面：技能商城、共享技能、智能体共享、能力中心。
 	ModuleSkills = "skills"
 	// ModuleApps 应用面：WASM 应用平台（编译/运行/审计/演示应用）。
 	ModuleApps = "apps"
 	// ModuleConnectors 连接器面：MCP/连接器目录与令牌刷新。
 	ModuleConnectors = "connectors"
+	// @end:module-contract
 )
 
 // allModules 是规范顺序（Enabled 的返回顺序 = 它过滤后的子序列）。
 // 顺序刻意写死：让"同一个组合"在任何机器上都得到逐字节相同的 Enabled() 结果。
+// @generated:module-contract (scripts/gen-module-contract.mjs) — 手改会被 --check 判红
 var allModules = []string{ModuleSkills, ModuleApps, ModuleConnectors}
+// @end:module-contract
 
 // AllModules 返回全部模块名（规范顺序）的副本。
 func AllModules() []string {

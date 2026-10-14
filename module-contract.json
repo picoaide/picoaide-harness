@@ -1,0 +1,9 @@
+{
+  "$comment": "编译期功能模块的单一真源。改这里 ⇒ 跑 `node scripts/gen-module-contract.mjs` 重新生成各端；CI 用 `--check` 断言生成物与提交树逐字节一致。顺序=契约。",
+  "version": 1,
+  "modules": [
+    { "id": "skills",     "goConst": "ModuleSkills",     "title": "技能面：技能商城、共享技能、智能体共享、能力中心" },
+    { "id": "apps",       "goConst": "ModuleApps",       "title": "应用面：WASM 应用平台（编译/运行/审计/演示应用）" },
+    { "id": "connectors", "goConst": "ModuleConnectors", "title": "连接器面：MCP/连接器目录与令牌刷新" }
+  ]
+}

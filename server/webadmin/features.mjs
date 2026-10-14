@@ -30,7 +30,9 @@
  */
 
 /** 模块清单 —— **顺序是契约的一部分**（与 Go `internal/features`、渠道 `FEATURE_MODULES` 逐字一致）。 */
+// @generated:module-contract (scripts/gen-module-contract.mjs) — 手改会被 --check 判红
 export const FEATURE_MODULES = ['skills', 'apps', 'connectors']
+// @end:module-contract
 
 /** 缺省变体标识 = 三个模块全开（不设 `FEATURES` 时的行为，与改造前逐字节同源）。 */
 export const DEFAULT_FEATURES_VARIANT = FEATURE_MODULES.join(',')

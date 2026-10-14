@@ -382,6 +382,10 @@ export const EXECUTION_FACE_REGISTRY = [
   'scripts/ci-publish-update-server.sh',
   'scripts/ci-release-policy.sh',
   'scripts/ci-release-topology.sh',
+  // 模块编译契约的**生成器 + 门禁**（2026-10-14 方案 B：单一真源 `module-contract.json`
+  // + 代码生成）。它改写六个端的生成区，本身就是"决定红绿"的执行体：被改写 ⇒
+  // 各端生成物与真源的关系失去判据。形状族（`scripts/*.mjs`）枚举到它，这里显式登记。
+  'scripts/gen-module-contract.mjs',
   'scripts/glitchtip-ops-check.mjs',
   'scripts/patch-copy-scan.mjs',
   'scripts/patch-targets.mjs',

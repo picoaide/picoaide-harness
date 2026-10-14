@@ -65,7 +65,9 @@ GO_PACKAGES := $(addprefix ./,$(addsuffix /...,$(GO_DIRS)))
 #        对应的 `ci-go-vet` 载荷口径于 2026-10-14 从"argv[1] 逐字 ./..."改成"第一个不以
 #        `-` 开头的词逐字 ./..." —— 缩面照样红，见决策记录 §3。）
 # ---------------------------------------------------------------------------
+# @generated:module-contract (scripts/gen-module-contract.mjs) — 手改会被 --check 判红
 GO_TAGS ?= skills,apps,connectors
+# @end:module-contract
 GO_TAG_FLAG := -tags=$(GO_TAGS)
 
 # ---------------------------------------------------------------------------
