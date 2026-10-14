@@ -18,7 +18,7 @@
 |---|---|---|---|---|
 | `p1b-conditionalize` | `2740e7d596` | `temp/p1b-conditionalize/wt` | 1 轮 | D-01（P0 已修，待复验） |
 | `fix-mount-flake` | `c734acf6d2` | `temp/fix-mount-flake/wt` | 3 轮 | D-06（两条 P1 已修，待复验） |
-| `p2-client-variant-pack` | `4bb53be22a` | `temp/p2-client-variant-pack/wt` | **未完成** | D-07（重放审计 + P0） |
+| `p2-client-variant-pack` | `4bb53be22a` → 审计后 `3fb81b4b5f` | `temp/p2-client-variant-pack/wt` | 2 轮 | D-07（**已修完并入，见 §4**） |
 | `p3-webadmin-variant` | `b339675a7b` | `temp/p3-webadmin-variant/wt` | 3 轮 | D-04（P1）、D-05（P2×3） |
 
 > **注（旧表已过期）**：旧交接表记的是 `p1b=2927feba899 / flake=c30721c1e3 / p3=18fca5f580`。这三路此后各又落了修复批（`2740e7d596` / `f31661f22c`+`c734acf6d2` / `db0b985e0e`+`b339675a7b`），因此旧表列的 P0/P1 里有相当一部分**已经修掉了**——本单只列实测仍未清的项。
@@ -115,7 +115,7 @@
   - 把 `capability-center/src/host/skill-install.ts` 的 `Math.max(0, now - st.mtimeMs)` 改回 `now - st.mtimeMs` ⇒ 新的边界判据必须红；
   - 把 `env-gated-criteria.spec.ts` 的登记对账面缩回单个 spec ⇒ 必须红（防"缩面静默通过"）。
 
-### D-07【P0·必修】p2：审计重放 + connectors 关不掉
+### D-07【P0·已修并入】p2：审计重放 + connectors 关不掉
 
 - **位置**（`temp/p2-client-variant-pack/wt`，HEAD `4bb53be22a`）：第一轮审计未跑完，证据在 `temp/p2-client-variant-pack/audit-tmp/EVIDENCE.md` 与 `probe-*.mjs`。
 - **待重放的怀疑清单**（逐条给"成立/不成立 + 证据"）：
@@ -226,3 +226,33 @@ git -C deepseek-harness remote set-url origin https://github.com/deepseek-ai/dee
 - p1b 的关闭态反向断言已升级为**登记级**（`cmd/server/routes_source_test.go` 键集合由 `features.AllModules()` 派生）+ **位置级**（`internal/router/optional_*_off_registration_test.go`）。
 - p1b 的 `check-tags` 已真接进 CI：`.github/workflows/ci.yml:1007` `node scripts/check-go-build-tags.mjs --expect-cut`，且载荷被 `check-workflows.mjs` 的 `ci-check-go-build-tags` 策略钉住（`if: false` / 换命令 / 去掉 `--expect-cut` 三种形态都红）。`server/Makefile` 那句"CI 已单列一步"的说法已随该步落地而成真。
 - p3 的 CI 步骤登记已完成（`b339675a7b`）：`server` job 已接 `make webadmin-variant-tests` + `make webadmin-check-features`（见 `server/AGENTS.md` 的 job 结构段）。
+
+## 4. 收口记录（2026-10-14 08:0x，**四路已全部并入 + 转正**）
+
+**终态**：`feat/p0-integration` = `a59d5fff7e`（四路 `git log <branch> --not HEAD` 均为 **0**），PR **#181 已转正**（`isDraft=false`，base `master`，MERGEABLE）。
+
+### 4.1 本地全量门禁（集成态，逐条退出码 0）
+
+| 面 | 命令 | 结果 |
+|---|---|---|
+| gate job | `yarn check` | **34/34 任务**（planned=34 executed=34） |
+| 根守卫 | `check-root-guards.mjs` | **17/17** |
+| 摘要自证 | `check-guard-parser-integrity.mjs`（CI 用 `--require-clean`） | 0（17 条守卫摘要一致） |
+| 域守卫 | `check-no-real-domains.mjs` | 0 |
+| server job | `gofmt` / `make -C server check-tags` / `go test ./internal/router/... ./cmd/server/...` | 0 / **8 组合全过** / 0 |
+| server job | webadmin `npm test`（默认）/ `make webadmin-variant-tests` / `make webadmin-check-features` | **795 过** / **4 变体 791 过** / **5/5 变体** |
+
+### 4.2 CI（GitHub Actions）
+
+push 事件 run `38488267748` 与 PR 事件 run `38488275691` **全绿**：`Gate (root guards)` / `Gate (tests + workspace build)` / `Go server` / `Desktop (Linux|Windows installer|macOS)` / CodeQL 全部 pass。
+
+### 4.3 三条"合起来才炸"的教训（都是本轮真踩到的）
+
+1. **跨端对拍会因搬家静默缩面**：p1b 把 87 条 `AdminRoute` 声明搬进 `optional_*_on.go` 后，webadmin 的 `capability-endpoints.spec.ts`（只读 `router.go`）5 条锚点红，**默认 features 也红 ⇒ CI 的 `npm test` 必红**。四路各自绿、合起来红 —— 所以"每一路自己跑过全量门禁"不能替代**集成态**跑一次。修法：声明集 = 所有含 `AdminRoute(` 声明的文件（加剥注释 + 声明面棘轮）。
+2. **`check-install-integrity` 不在 17 条根守卫里**：它是 `ci.yml` 里 **yarn 之前**那一步（"Judge execution bodies are pristine"）。本轮两次被它抓到（F2 新增 `tsconfig.tests.json`、p2 新增 `channel-variant.ts` 都未登记）—— **本地 `yarn check` 全绿不等于这一步绿**。改动面涉及任何"执行体"（包内 `scripts/*.ts`、`tsconfig*`、`vitest.config`、Makefile、npm 项目 manifest）后，必须单独跑一次 `node scripts/check-install-integrity.mjs`。
+3. **摘要链是链式的**：`check-install-integrity.mjs` 的内容摘要登记在 `check-guard-parser-integrity.mjs`，后者又登记在 `check-root-guards.mjs`。改前者必须**同批**顺着链条改到 `check-root-guards.mjs`（取值用 `sha256sum <file>` 的工作树那份；`--print-digests` 在脏树时打印的是 HEAD 那份，会误导）。
+
+### 4.4 本地跑 Go 的正确姿势（踩过坑）
+
+`/root` 只读 ⇒ Go 写不了 `$HOME/go/pkg/sumdb`；`go.mod` 要 1.26.6 而系统 go 是 1.26.5 ⇒ 工具链切换会失败，**并且会伪装成源码编译错误**（曾误报 `undefined: ConnectorsAPI`、`[apps,connectors] go build 失败`）。正解：直接用模块缓存里已解包的 toolchain（`PATH=<GOMODCACHE>/golang.org/toolchain@v0.0.1-go1.26.6.linux-amd64/bin:$PATH` + `GOTOOLCHAIN=local`），见 `temp/fix-round-20261014/goenv.sh`。CI 用 `go-version-file: server/go.mod` 精确装 1.26.6，不受影响。
+
