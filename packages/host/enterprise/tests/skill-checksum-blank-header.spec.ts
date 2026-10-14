@@ -31,7 +31,7 @@ import {
   ArchiveInstallRefusal,
   describeArchiveFailure,
   installSkillArchive,
-} from '../src/skill-install.ts'
+} from '../../capability-center/src/host/skill-install.ts'
 import type { Session } from '../src/server-connector/config.ts'
 import { fakeReq, fakeRes, harness, stubGateway } from './helpers/auth-gate-harness.ts'
 import { isolateRuntimeSkillRoots } from './helpers/runtime-skill-roots.ts'

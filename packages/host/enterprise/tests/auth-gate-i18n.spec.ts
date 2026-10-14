@@ -16,13 +16,8 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { describe, expect, it } from 'vitest'
-import {
-  apply,
-  renderChangePasswordPage,
-  renderLoginPage,
-  renderRestoringPage,
-  type Config,
-} from '../src/auth-gate.ts'
+import { renderChangePasswordPage, renderLoginPage, renderRestoringPage, type Config } from '../src/auth-gate.ts'
+import { applyFullComposition as apply } from './helpers/apply-full-composition.ts'
 
 const CJK = /[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/u
 
@@ -221,7 +216,8 @@ function bootHarness(config: Config = {}): Harness {
   const runtime: { locale?: unknown } = { locale: 'zh' }
   const ctx = {
     effect: (fn: () => unknown) => { fn() },
-    get: (name: string) => (name === 'desktopRuntime' ? runtime : undefined),
+    provide: (name: string, value: unknown) => { (ctx as unknown as Record<string, unknown>)[`__svc_${name}`] = value },
+    get: (name: string) => ((ctx as unknown as Record<string, unknown>)[`__svc_${name}`] ?? ((name === 'desktopRuntime' ? runtime : undefined))),
     picoSession: { isRestored: () => true, isLoggedIn: () => false, getSession: () => null },
     webServer: {
       tapIndex: (cb: (html: string) => string) => { index = cb; return () => {} },
@@ -308,6 +304,7 @@ describe('语言按请求 / 按渲染解析（不许冻结）', () => {
     const runtime: { locale?: unknown } = { locale: 'en' }
     const ctx = {
       effect: (fn: () => unknown) => { fn() },
+      provide: (name: string, value: unknown) => { (ctx as unknown as Record<string, unknown>)[`__svc_${name}`] = value },
       get: (name: string) => (name === 'desktopRuntime' ? runtime : undefined),
       picoSession: { isRestored: () => false, isLoggedIn: () => false, getSession: () => null },
       webServer: {

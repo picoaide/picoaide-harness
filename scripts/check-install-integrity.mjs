@@ -288,6 +288,9 @@ export const EXECUTION_FACE_REGISTRY = [
   // "它属于执行面"的声明（内容被 install 期改写要让判据看得见）。
   'packages/host/desktop/scripts/channel-constants.ts',
   'packages/host/desktop/scripts/channel-prepare.ts',
+  // 2026-10-14（p2 变体裁剪）：新增的变体清单读写脚本（打包入口与
+  // `verify-packaged-runtime` 都经它取"这一轮声明关了哪些模块"）。
+  'packages/host/desktop/scripts/channel-variant.ts',
   'packages/host/desktop/scripts/clean.mjs',
   'packages/host/desktop/scripts/direct-invocation.mjs',
   'packages/host/desktop/scripts/e2e-client.mjs',
@@ -371,6 +374,10 @@ export const EXECUTION_FACE_REGISTRY = [
   'scripts/check-verdict-credential.mjs',
   'scripts/check-workflows.mjs',
   'scripts/check-workspaces.mjs',
+  // 渠道 × 模块清单工具（2026-10-14）：`--list` / `--template` / `--explain` / `--check`。
+  // 它**决定渠道交付面**（读契约 + 真跑 `normalizeChannelFeatures()`），并被
+  // `scripts/verify-ci-scripts.mjs` 第 20 节真跑（三个样本）⇒ 被改写就等于改写判定。
+  'scripts/channel-modules.mjs',
   'scripts/ci-brand-mask.sh',
   'scripts/ci-build-channel-images.sh',
   'scripts/ci-channel-transfer.sh',
@@ -379,6 +386,10 @@ export const EXECUTION_FACE_REGISTRY = [
   'scripts/ci-publish-update-server.sh',
   'scripts/ci-release-policy.sh',
   'scripts/ci-release-topology.sh',
+  // 模块编译契约的**生成器 + 门禁**（2026-10-14 方案 B：单一真源 `module-contract.json`
+  // + 代码生成）。它改写六个端的生成区，本身就是"决定红绿"的执行体：被改写 ⇒
+  // 各端生成物与真源的关系失去判据。形状族（`scripts/*.mjs`）枚举到它，这里显式登记。
+  'scripts/gen-module-contract.mjs',
   'scripts/glitchtip-ops-check.mjs',
   'scripts/patch-copy-scan.mjs',
   'scripts/patch-targets.mjs',
@@ -416,6 +427,11 @@ export const EXECUTION_FACE_REGISTRY = [
  */
 export const CI_REFERENCED_EXECUTION_REGISTRY = [
   'scripts/check-frozen-launchers.mjs',
+  // `p1b-conditionalize` 新加的服务端构建变体矩阵步骤（`ci.yml` 的 server job，
+  // 该 job 的 `defaults.run.working-directory: server`）。**推导面用的是"命令位里
+  // 出现的仓内路径"这个规范名**，而真文件的家是 `server/scripts/check-go-build-tags.mjs`
+  // —— 不要因为根下没有同名文件就以为这条是死条目（改名/搬家时这条要一起改）。
+  'scripts/check-go-build-tags.mjs',
   'scripts/check-guard-parser-integrity.mjs',
   'scripts/check-install-integrity.mjs',
   'scripts/check-release-notes-migrations.mjs',
@@ -430,6 +446,11 @@ export const CI_REFERENCED_EXECUTION_REGISTRY = [
   'scripts/ci-publish-update-server.sh',
   'scripts/ci-release-policy.sh',
   'scripts/ci-release-topology.sh',
+  // 模块编译契约的生成器（2026-10-14 方案 B）：它被 **`ci.yml` 的生成区标记文本**提到
+  // （标记行里写着 `(scripts/gen-module-contract.mjs)`）⇒ `ciReferencedExecutionBodies()`
+  // 从 workflow 文本扫到这个 token。这条不是"新执行体悄悄进了 CI"，而是"CI 文件里点名了它"
+  // —— 同一件事实必须双向登记（扫到却没登记 ⇒ 红）。
+  'scripts/gen-module-contract.mjs',
   'scripts/verify-ci-scripts.mjs',
   'scripts/verify-wasm-client-only.sh',
   'scripts/version.mjs',
@@ -579,11 +600,28 @@ export const EXECUTION_POINT_REGISTRY = [
   //    按基名形态派生（`tsconfig.<面>.json` 自动进面），未登记即红。
   'packages/client/account-card/tsconfig.client.json',
   'packages/client/account-card/tsconfig.json',
+  // 2026-10-14（对抗审计 P2-甲）：account-card 的 `tests/**` 此前不在任何 tsconfig 里
+  // ⇒「typecheck EXIT=0」对测试期源码边没有观察力；新加这份并接进包的 `check`。
+  'packages/client/account-card/tsconfig.tests.json',
   'packages/client/account-card/tsdown.config.ts',
   'packages/client/account-card/vitest.config.ts',
   'packages/client/branding/tsconfig.client.json',
   'packages/client/branding/tsconfig.json',
   'packages/client/branding/tsdown.config.ts',
+  // 2026-10-13：能力中心（技能商店）的 host + client 双面从 `packages/host/enterprise`
+  // 整块搬进新包 —— 客户端面搬进 `packages/client/capability-center`、P0-b 又把 host 面
+  // 搬进去并把包移到 `packages/host/capability-center` ⇒ 派生面（{@link deriveExecutionPoints}
+  // 来源 (d)：包根的 `tsconfig*.json` / `tsdown.config.ts` / `vitest.config.ts`）四条。
+  // 双向登记：派生却未登记即红，所以这四条必须在这里出现，否则"新包的判定面"整片隐形。
+  'packages/host/capability-center/tsconfig.client.json',
+  'packages/host/capability-center/tsconfig.json',
+  'packages/host/capability-center/tsdown.config.ts',
+  'packages/host/capability-center/vitest.config.ts',
+  // 2026-10-13（P0-b）：宿主侧网关客户端叶子包（`server-connector/{auth,config,electron}`
+  // 逐字迁入）—— 同样四条派生执行点。
+  'packages/host/gateway-client/tsconfig.json',
+  'packages/host/gateway-client/tsdown.config.ts',
+  'packages/host/gateway-client/vitest.config.ts',
   'packages/client/foot-menu/tsconfig.client.json',
   'packages/client/foot-menu/tsconfig.json',
   'packages/client/foot-menu/tsdown.config.ts',

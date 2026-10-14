@@ -32,10 +32,11 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { apply, inject as authGateInject, type Config as AuthGateConfig } from '../src/auth-gate.ts'
-import * as authConnector from '../src/server-connector/auth.ts'
-import * as wasmApps from '../src/wasm-apps.ts'
-import { CLIENT_UPLOAD_TIMEOUT_MS, WASM_APPS_PREFIX } from '../src/wasm-apps.ts'
+import { inject as authGateInject, type Config as AuthGateConfig } from '../src/auth-gate.ts'
+import { applyFullComposition as apply } from './helpers/apply-full-composition.ts'
+import * as authConnector from '@picoaide/dsh-gateway-client/auth'
+import * as wasmApps from '../../wasm-apps-host/src/wasm-apps.ts'
+import { CLIENT_UPLOAD_TIMEOUT_MS, WASM_APPS_PREFIX } from '../../wasm-apps-host/src/wasm-apps.ts'
 import {
   APP_CONFIG_ACCESS_MODES,
   APP_CONFIG_DEFAULT_ACCESS,
@@ -44,29 +45,33 @@ import {
   APP_CONFIG_FIRST_RELEASE_REQUIRED,
   WASM_APP_TOOL_NAMES,
   WASM_APP_TOOL_TIMEOUT_MS,
+  registerWasmAppTools,
   skillHintAppliesTo,
   wasmAppToolHeadroomMs,
-} from '../src/wasm-app-tools.ts'
-import { APP_BUILDER_SKILL } from '../src/builtin-skills.ts'
+} from '../../wasm-apps-host/src/wasm-app-tools.ts'
+import { APP_BUILDER_SKILL } from '../../wasm-apps-host/src/builtin-skills.ts'
 import {
   AI_ROWS_CONSENT_FILE_NAME,
   aiRowsConsentKey,
   serializeAiRowsConsent,
-} from '../src/wasm-apps-ai-rows-consent.ts'
+} from '../../wasm-apps-host/src/wasm-apps-ai-rows-consent.ts'
 import type { Session } from '../src/server-connector/config.ts'
 
 // `publishApp` 换成计数 spy（实现不变）：这样"路由"与"工具"两条路径是否命中**同一个
 // 函数"就成了可断言的事实，而不是靠人读代码。mock 是文件级的 —— auth-gate（路由）
 // 与 wasm-app-tools（工具）拿到的都是这个 spy。
-vi.mock('../src/wasm-apps.ts', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../src/wasm-apps.ts')>()
+vi.mock('../../wasm-apps-host/src/wasm-apps.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../wasm-apps-host/src/wasm-apps.ts')>()
   return { ...actual, publishApp: vi.fn(actual.publishApp) }
 })
 
 // 出站原语也换成计数 spy：它是**跨模块**导入（wasm-apps.ts ← server-connector/auth.ts），
 // 因此路由与工具两条路径都会命中它 —— 这是"两条路径共用同一条出站链路"的直接计数器。
-vi.mock('../src/server-connector/auth.ts', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../src/server-connector/auth.ts')>()
+// 2026-10-13（P0-b）：`gatewayFetch` 的实现搬到叶子包 `@picoaide/dsh-gateway-client`
+// （enterprise 保留同名 re-export）。mock 必须打在**实现模块**的 id 上 —— 打在
+// re-export 上拦不到被测方（它们 import 的是叶子包），计数会恒 0。
+vi.mock('@picoaide/dsh-gateway-client/auth', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@picoaide/dsh-gateway-client/auth')>()
   return { ...actual, gatewayFetch: vi.fn(actual.gatewayFetch) }
 })
 
@@ -120,6 +125,20 @@ interface Harness {
   outbound: Outbound[]
   cleared: number
   loggedErrors: string[]
+  /**
+   * `ctx.logger.warn` 收到的行（组装期观测走这条通道 —— 应用宿主在 `tools` 缺席时
+   * 打的那句提示）。
+   */
+  loggedWarnings: string[]
+  /**
+   * 装组合时**注册那一刻缺**的服务名（`applyFullComposition` 的返回面）。
+   *
+   * 这是"服务不齐 ⇒ 回调不跑"的**直接**读面：此前只有
+   * `expect(h.loggedErrors).toEqual([])` 这种间接代理。
+   */
+  skippedInjections: string[]
+  /** 真正跑过的注入回调的依赖名（每次回调一项）—— 直接回答"回调到底跑没跑"。 */
+  ranInjections: string[][]
   /** 走本机路由（HTTP 形态，与 wasm-apps.spec.ts 同款假 req/res）。 */
   call: (url: string, method?: string, body?: string) => Promise<Captured>
   /** 走宿主工具（模型形态，经 `defineTool` 的真实参数校验）。 */
@@ -148,10 +167,14 @@ function harness(
   const routes: Route[] = []
   const outbound: Outbound[] = []
   const loggedErrors: string[] = []
+  const loggedWarnings: string[] = []
   const state = { cleared: 0 }
   const ctx = {
     effect: (fn: () => unknown) => { fn() },
+    provide: (name: string, value: unknown) => { (ctx as unknown as Record<string, unknown>)[`__svc_${name}`] = value },
     get: (name: string) => {
+      const provided = (ctx as unknown as Record<string, unknown>)[`__svc_${name}`]
+      if (provided !== undefined) return provided
       if (name === 'connection') return { requestRejection: () => undefined }
       if (name === 'workspaceRegistry') {
         const path = (options.workspacePath ?? ((): string | null => workspace))()
@@ -161,7 +184,7 @@ function harness(
     },
     logger: {
       info: vi.fn(),
-      warn: vi.fn(),
+      warn: (message: string) => { loggedWarnings.push(message) },
       error: (message: string) => { loggedErrors.push(message) },
     },
     picoSession: {
@@ -192,13 +215,16 @@ function harness(
     outbound.push({ method: init?.method ?? 'GET', url: String(url), body, contentType })
     return await respond(init?.method ?? 'GET', String(url), { body, contentType })
   }))
-  apply(ctx as never, {} as AuthGateConfig)
+  const composition = apply(ctx as never, {} as AuthGateConfig)
   const route = routes.find(entry => entry.kind === 'prefix' && entry.path === WASM_APPS_PREFIX)
   if (route === undefined) throw new Error('wasm apps route not registered')
   return {
     tools,
     outbound,
     loggedErrors,
+    loggedWarnings,
+    skippedInjections: composition.skippedInjections,
+    ranInjections: composition.ranInjections,
     get cleared() { return state.cleared },
     call: async (url, method = 'GET', body) => {
       const host = '127.0.0.1:3080'
@@ -317,9 +343,49 @@ describe('装配：inject、注册、预算序关系', () => {
 
   it('tools 服务缺席时明确报错，且不抛（最小组合仍能应用插件）', () => {
     const h = harness(() => json(200, {}), SESSION, { withTools: false })
+    // ① 最小组合必须能**装完**：工具数为 0，且不抛。
+    //
+    // 2026-10-13：这条断言此前依赖"假 ctx 没有 `inject` 也会走到 `registerWasmAppTools`"
+    // —— P0-b 把注册挪进 `ctx.inject(['tools'], …)`（app-routes.ts）之后不再成立：
+    // 真 Cordis 的 `ctx.inject(deps, cb)` 是**子插件 + inject 声明**（服务出现前
+    // PENDING，见 cordis `Context#inject` → `this.plugin({inject, apply})`），所以服务
+    // 缺席时回调**根本不跑**，也不会抛。夹具现在按这个语义实现 `inject`（此前它没有
+    // 这个方法，本文件连同另外二十多个 spec 一起红在 `TypeError: ctx.inject is not a
+    // function` 上 —— 判据失去输入，不是产品行为）。
     expect(h.tools).toHaveLength(0)
-    expect(h.loggedErrors.join('\n')).toContain('tools service is absent')
-    expect(h.loggedErrors.join('\n')).toContain('wasm_app_publish')
+    // ①′ **直接**判据（2026-10-14 对抗审计 · 乙-2）：此前"回调没跑"只能靠
+    // "日志里没有多出一条错误"这种**间接代理**，而同一用例里的 `h.tools` 长度断言在
+    // 闸门被拆掉时**照样绿**（`registerWasmAppTools` 自己也会在 `tools` 缺席时早退）。
+    // 现在夹具把闸门结果显式交出来 —— 拆掉闸门这两条会当场红。
+    expect(h.skippedInjections).toEqual(['tools'])
+    expect(h.ranInjections).toEqual([])
+    // ② "缺席要明确报错、不得静默"这条判据**一条没删**，只是改从真实调用点取：
+    // `registerWasmAppTools` 是导出的产品函数，最小组合/无头嵌入直接调它 —— 早退分支
+    // 就在 `tools` 判空那一行，`options` 还没被读过。
+    const logged: string[] = []
+    registerWasmAppTools(
+      { logger: { error: (message: string) => { logged.push(message) } } } as never,
+      {} as never,
+    )
+    expect(logged.join('\n')).toContain('tools service is absent')
+    expect(logged.join('\n')).toContain('wasm_app_publish')
+    // ③ **组装期观测**（2026-10-14 对抗审计 · 乙-P2）：`inject` 化之后，上面那句
+    // `registerWasmAppTools` 的报错在**真缺 `tools`** 的宿主里**永远到不了**（回调不跑）
+    // ⇒ 该宿主静默少掉 6 个工具。应用宿主因此在组装期自己打一行提示（app-routes.ts），
+    // 这里把它判成**必须出现**（删掉那句观测 ⇒ 本断言红）。
+    expect(h.loggedWarnings.join('\n')).toContain('tools service is absent at composition time')
+    expect(h.loggedWarnings.join('\n')).toContain('wasm_app_publish')
+    // ③′ `h.loggedErrors` 口径仍然对账：本环境没有别的错误被吞掉。
+    expect(h.loggedErrors).toEqual([])
+  })
+
+  it('tools 在场时回调真的跑（`inject` 闸门的正向对照）', () => {
+    // 负向对照的反面：没有这一条的话，`skippedInjections`/`ranInjections` 两个读面
+    // 都可能在"闸门恒不跑"的实现下绿（那正是审计说的"观察力薄"）。
+    const h = harness(() => json(200, {}))
+    expect(h.skippedInjections).toEqual([])
+    expect(h.ranInjections).toEqual([['tools']])
+    expect(h.loggedWarnings).toEqual([])
   })
 })
 
@@ -414,7 +480,7 @@ describe('参数契约：模型必须能读懂每个字段', () => {
 // ---------------------------------------------------------------------------
 
 const REPO_ROOT = fileURLToPath(new URL('../../../../', import.meta.url))
-const LIMITS_JSON = join(REPO_ROOT, 'server/internal/wasmapp/limits/limits.json')
+const LIMITS_JSON = join(REPO_ROOT, 'server/internal/limits/limits.json')
 const APPCFG_JSON = join(REPO_ROOT, 'server/internal/wasmapp/appcfg/appcfg.json')
 
 /** 读 `limits.json` 的 Key→Value 表（不存在 ⇒ 抛，调用方自行 skip）。 */
@@ -1004,7 +1070,7 @@ describe('wasm_app_publish：错误信封与本地闸门', () => {
 // ---------------------------------------------------------------------------
 
 describe('路由与工具命中同一个实现（防"复制一份编排"）', () => {
-  const TOOL_SOURCE = readFileSync(fileURLToPath(new URL('../src/wasm-app-tools.ts', import.meta.url)), 'utf8')
+  const TOOL_SOURCE = readFileSync(fileURLToPath(new URL('../../wasm-apps-host/src/wasm-app-tools.ts', import.meta.url)), 'utf8')
 
   it('工具只调共享编排：文件里没有任何上游路径 / 出站原语 / 分片实现', () => {
     // 结构性判据：编排（路径拼装、90 s 预算、分片续传、错误信封）只允许住在

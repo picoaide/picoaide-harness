@@ -28,15 +28,15 @@
  */
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { CapabilityCenterPanel } from '../../../host/enterprise/src/client/CapabilityCenterPanel.tsx'
-import { setActiveLocale, t } from '../../../host/enterprise/src/client/locales.ts'
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
+import { CapabilityCenterPanel } from '../../../host/capability-center/src/client/CapabilityCenterPanel.tsx'
+import { setActiveLocale, t } from '../../../host/capability-center/src/client/locales.ts'
 
 ;(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 let container: HTMLDivElement
 let root: Root
-let warn: ReturnType<typeof vi.spyOn>
+let warn: MockInstance<typeof console.warn>
 
 beforeEach(() => {
   setActiveLocale('zh')

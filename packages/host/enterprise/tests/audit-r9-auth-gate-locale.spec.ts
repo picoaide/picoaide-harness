@@ -9,7 +9,7 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { describe, expect, it } from 'vitest'
-import { apply } from '../src/auth-gate.ts'
+import { applyFullComposition as apply } from './helpers/apply-full-composition.ts'
 
 interface BootOptions {
   /** Probed `desktopRuntime` (absent in a browser deployment). */
@@ -27,7 +27,8 @@ function bootWebFace(options: BootOptions = {}): { index: (html: string) => stri
   }
   const ctx = {
     effect: (fn: () => unknown) => { fn() },
-    get: (name: string) => services[name],
+    provide: (name: string, value: unknown) => { (ctx as unknown as Record<string, unknown>)[`__svc_${name}`] = value },
+    get: (name: string) => ((ctx as unknown as Record<string, unknown>)[`__svc_${name}`] ?? (services[name])),
     picoSession: { isRestored: () => true, isLoggedIn: () => false, getSession: () => null },
     webServer: {
       tapIndex: (callback: (html: string) => string) => { index = callback; return () => {} },

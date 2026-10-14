@@ -1,3 +1,13 @@
+//go:build apps
+
+// 本文件判的是 WASM 操作面里 `app_id` 与路由静态段的同名冲突（X4-1/S7-2），
+// 它用 `router.Register` 装配生产路由表并读 `router.WasmClientRouteBase` ——
+// 两者都属于 `apps` 模块（P1 第二片，2026-10-14）。关闭 apps 时它们不存在，
+// 判据按模块分文件；断言一条都没有删。
+//
+// 只装配基础面 + WASM：预留字集合是从 `/api/client/v2/apps/wasm` 子树的**兄弟静态段**
+// 派生的，其它可选模块的路由在别的子树上，与这条断言无关。
+
 package api_test
 
 // audit_r25_serving_appid_route_test.go —— 第二十五轮审计 Y3-1（P1）的
@@ -73,27 +83,21 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/picoaide/picoaide/internal/agentshare"
 	"github.com/picoaide/picoaide/internal/appstore"
 	"github.com/picoaide/picoaide/internal/bootstrap"
-	"github.com/picoaide/picoaide/internal/capabilities"
 	"github.com/picoaide/picoaide/internal/channel"
 	"github.com/picoaide/picoaide/internal/clientrelease"
-	"github.com/picoaide/picoaide/internal/connectors"
 	"github.com/picoaide/picoaide/internal/llmgateway"
-	"github.com/picoaide/picoaide/internal/marketplace"
 	"github.com/picoaide/picoaide/internal/portal"
 	"github.com/picoaide/picoaide/internal/reports"
 	"github.com/picoaide/picoaide/internal/router"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
-	"github.com/picoaide/picoaide/internal/sharedskills"
 	"github.com/picoaide/picoaide/internal/telemetry"
 	wasmapi "github.com/picoaide/picoaide/internal/wasmapp/api"
 	"github.com/picoaide/picoaide/internal/wasmapp/appproof"
 	"github.com/picoaide/picoaide/internal/wasmapp/compile"
 	wasmregistry "github.com/picoaide/picoaide/internal/wasmapp/registry"
-	"github.com/picoaide/picoaide/internal/wasmapp/skillseed"
 )
 
 // ---------------------------------------------------------------------------
@@ -196,16 +200,10 @@ func newR25RouteEnv(t *testing.T) *r25RouteEnv {
 		Channel:       channel.NewHandlers(),
 		PortalAdmin:   portal.NewAdminHandlers(db),
 		ClientRelease: clientrelease.NewHandlers(func() string { return "0.0.0-r25" }, "official"),
-		Market:        marketplace.NewHandlers(db, t.TempDir()),
-		Agentshare:    agentshare.NewHandlers(db, t.TempDir()),
-		Shared:        sharedskills.NewHandlers(db, t.TempDir()),
-		Capability:    capabilities.NewHandlers(db, t.TempDir()),
-		Connector:     connectors.NewHandlers(db),
 		Telemetry:     telemetry.NewHandlers(db),
 		Gateway:       llmgateway.NewHandlers(db),
 		Reports:       reports.NewHandlers(db),
 		Wasm:          wasm,
-		SkillSeed:     skillseed.NewHandlers(skillseed.New(t.TempDir())),
 	})
 	// Register 把派生出来的路由静态段注入 registry（写侧封口的唯一入口）。
 	// 本用例会临时改这个**进程级**集合，收尾复位 —— 本包其余用例依赖"未注入=空集"

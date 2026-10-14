@@ -26,7 +26,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { recoverInterruptedSkillSwaps, type SkillInstallLog } from '../src/skill-install.ts'
+import { recoverInterruptedSkillSwaps, type SkillInstallLog } from '../../capability-center/src/host/skill-install.ts'
 
 /**
  * 注入控制器（`vi.mock` 的工厂在 import 期求值 ⇒ 状态必须 `vi.hoisted`）。

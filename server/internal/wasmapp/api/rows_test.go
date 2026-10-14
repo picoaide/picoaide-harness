@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/abi"
 	"github.com/picoaide/picoaide/internal/wasmapp/appdb"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // 本文件覆盖**作者数据面**（`GET …/wasm/:app_id/rows`，2026-09-21 新增）。

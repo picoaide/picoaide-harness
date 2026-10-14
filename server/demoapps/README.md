@@ -19,7 +19,7 @@
 demoapps/<app>/{main.go, web/}                 源码（前端资源在 web/）
         │  go build -o <app>.wasm          （GOOS=wasip1 GOARCH=wasm）
         ▼
-   <app>.wasm  ── pack-assets.mjs ──►  <app>.wasm（前端资源进了自定义段）
+   <app>.wasm  ── scripts/pack-assets.mjs ──►  <app>.wasm（前端资源进了自定义段）
         │                                     ↑ 宿主按路径直出 /static/*，入口 / 由 wasm 读 index.html 返回
         ▼
 /opt/picoaide/demo-apps/  ← Dockerfile 的 demoassets 阶段产出（wasm + demos.json）
@@ -38,6 +38,15 @@ demoapps/<app>/{main.go, web/}                 源码（前端资源在 web/）
   同名文件，**只服务本地预览**（预览工具要读它才能演示 `access` / `whitelist`）。
 
 ## 本地构建与预览
+
+打包器 `scripts/pack-assets.mjs` 放在**这里**（`server/demoapps/scripts/`）是有意的：演示应用
+与随技能分发的打包器**必须是同一份实现**，所以源树只有这一份、不属于任何一侧；镜像构建时
+Dockerfile 用两条 COPY 从这同一个源分别落到演示应用打包阶段与技能目录
+（`/opt/picoaide/skills/app-builder/scripts/pack-assets.mjs`，技能源码目录里**没有**副本）。
+注入关系登记在 `internal/skillseed` 的 `skillFileInjections`，由
+`TestBuiltinSkillInventoryMatchesDiskDockerfileAndDigests` 核对"同源 + 两个落点 + 摘要一致"
+（落点必须在**最后一个构建阶段**、最终阶段的 RUN 不许碰技能目录），并由同文件的
+`TestBuiltinSkillReferencedFilesExistInImageTree` 核对"技能内容里引用的路径真的在镜像那一棵树里"。
 
 ```bash
 # 编译 + 打包前端资源（产物 /tmp/demo-<app>-packed.wasm），与 Dockerfile 同一套步骤

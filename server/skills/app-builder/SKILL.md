@@ -1,6 +1,6 @@
 ---
 name: app-builder
-version: 2.11.1
+version: 2.13.1
 title: 应用构建（WASM 应用）
 description: 把业务同事的一句话想法做成应用平台上的 WASM 应用并发布（员工自建小工具）。分轮次访谈需求、多角色评审设计、写成静态前端 + wasm JSON API、一条命令链打包发布。当用户说"做个内部小工具/应用/登记表/页面"、"把这个流程做成应用"、"发布到应用中心"、"能不能在平台上加个功能"时用本技能。
 author: 平台内置
@@ -265,6 +265,11 @@ node scripts/pack-assets.mjs --in shared-notes.wasm --out dist/shared-notes-pack
 `--out` **不得与 `--in` 同路径**；`picoaide.app.json` 与工具链元数据段名会被直接拒；
 路径不超过 256 字节、单段不超过 255 字节；自定义段总量不超过 4 MiB。
 
+> 打包器与演示应用用的是**同一份实现**：唯一源在平台仓库的中性位置
+> （`server/demoapps/scripts/pack-assets.mjs`），构建镜像时注入技能目录的 `scripts/`。
+> **在已安装的技能目录里它的路径就是 `scripts/pack-assets.mjs`**；只有在平台仓库里读源码
+> 才会看到那份中性源 —— 技能目录下没有第二份副本。
+
 ```bash
 # ② 预检（不占版本号、不进审计，可以反复调）
 wasm_app_validate({appId:"shared-notes", version:"1.0.0", title:"共享便签",
@@ -446,7 +451,7 @@ wasm_app_publish({appId:"shared-notes", version:"1.0.0", title:"共享便签",
 > **这几个数字的出处（改钳位常量前先读这一段）**：
 > - **默认值**来自 `references/limits.md` 的 `app_concurrency` / `user_per_app_running` /
 >   `user_per_app_queued` / `user_global_running` / `app_queue_depth` / `global_instances` 行 ——
->   那张表是 `go generate` 的生成物、与 `internal/wasmapp/limits` **逐字节对拍**；
+>   那张表是 `go generate` 的生成物、与 `internal/limits` **逐字节对拍**；
 > - **两个上界**（4096 = `MaxAppQueue`、256 = `MaxInstances`）**不在** limits 表里，来自控制台
 >   保存路径的钳位常量 `internal/wasmapp/applimits/applimits.go`；
 > - ⚠️ 构建期数值门禁只做「同量纲同值是否存在」的判定（并逐字节守生成物），**不覆盖本段这张
@@ -480,7 +485,8 @@ wasm_app_publish({appId:"shared-notes", version:"1.0.0", title:"共享便签",
 - `examples/go/` —— 一个能直接编译发布的前后端分离示例（`main.go` + `web/` + `preview.mjs`
   + `picoaide.app.json`）
 - `scripts/pack-assets.mjs` —— 把 `web/` 打进 wasm 自定义段的官方打包器（用法见
-  `scripts/README.md`）
+  `scripts/README.md`；唯一源在平台仓库的 `server/demoapps/scripts/pack-assets.mjs`，
+  镜像构建期注入到这里）
 
 ## 三条最容易踩的坑
 

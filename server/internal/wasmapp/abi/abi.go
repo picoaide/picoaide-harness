@@ -23,7 +23,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
+	"github.com/picoaide/picoaide/internal/limits"
 )
 
 // FrameMagic 是帧起始字节：ASCII RS（Record Separator）= 0x1e（设计文档写作 "RS"）。

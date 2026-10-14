@@ -9,22 +9,16 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/picoaide/picoaide/internal/agentshare"
 	"github.com/picoaide/picoaide/internal/appstore"
 	"github.com/picoaide/picoaide/internal/bootstrap"
-	"github.com/picoaide/picoaide/internal/capabilities"
 	"github.com/picoaide/picoaide/internal/channel"
 	"github.com/picoaide/picoaide/internal/clientrelease"
-	"github.com/picoaide/picoaide/internal/connectors"
+	"github.com/picoaide/picoaide/internal/features"
 	"github.com/picoaide/picoaide/internal/llmgateway"
-	"github.com/picoaide/picoaide/internal/marketplace"
 	"github.com/picoaide/picoaide/internal/portal"
 	"github.com/picoaide/picoaide/internal/reports"
 	"github.com/picoaide/picoaide/internal/serverauth"
-	"github.com/picoaide/picoaide/internal/sharedskills"
 	"github.com/picoaide/picoaide/internal/telemetry"
-	wasmapi "github.com/picoaide/picoaide/internal/wasmapp/api"
-	"github.com/picoaide/picoaide/internal/wasmapp/skillseed"
 )
 
 // buildTestRouter 用 nil DB 组装 Deps(与 main 一致); handler 只有在请求
@@ -44,7 +38,7 @@ func buildTestRouter(t *testing.T) *gin.Engine {
 // 而不是各写一份再漂移。
 func testRouterDeps(t *testing.T) Deps {
 	t.Helper()
-	return Deps{
+	d := Deps{
 		DB:            nil,
 		Auth:          serverauth.New(nil).Handlers(),
 		Admin:         (&serverauth.AdminAPI{}).Handlers(),
@@ -53,20 +47,16 @@ func testRouterDeps(t *testing.T) Deps {
 		Channel:       channel.NewHandlers(),
 		PortalAdmin:   portal.NewAdminHandlers(nil),
 		ClientRelease: clientrelease.NewHandlers(func() string { return "2.7.0" }, "official"),
-		Market:        marketplace.NewHandlers(nil, "/tmp/nonexistent"),
-		Agentshare:    agentshare.NewHandlers(nil, "/tmp/nonexistent"),
-		Shared:        sharedskills.NewHandlers(nil, "/tmp/nonexistent"),
-		Capability:    capabilities.NewHandlers(nil, "/tmp/nonexistent"),
-		Connector:     connectors.NewHandlers(nil),
 		Telemetry:     telemetry.NewHandlers(nil),
 		Gateway:       llmgateway.NewHandlers(nil),
 		Reports:       reports.NewHandlers(nil),
-		// WASM 应用平台（§8）：测试树必须与生产树同形 —— 否则
-		// largeBodyRoutes 的"豁免必须对应真实路由"门禁测不出路径写错。
-		Wasm: wasmapi.NewHandlers(wasmapi.Options{}),
-		// 内置技能下发面（随镜像发布）。资产目录用一次性空目录。
-		SkillSeed: skillseed.NewHandlers(skillseed.New(t.TempDir())),
 	}
+	// 可选模块（skills / apps / connectors）的 handler 由**按模块拆的** build-tag
+	// 测试文件填 —— 判据因此在八种组合下都能编译，并且能表达"当前变体该有什么"。
+	fillSkillsTestDeps(t, &d)
+	fillAppsTestDeps(t, &d)
+	fillConnectorsTestDeps(t, &d)
+	return d
 }
 
 // TestNamespaces 验证: 全部路由只存在于 /api/client/v2 或 /api/server 下;
@@ -99,7 +89,7 @@ func TestNamespaces(t *testing.T) {
 	}
 	t.Logf("routes under new namespaces: %d", checked)
 
-	// 关键路径冒烟: 各命名空间核心端点必须存在。
+	// 关键路径冒烟: 各命名空间**基础面**核心端点必须存在（六种变体都必须齐）。
 	for _, want := range []string{
 		"POST " + nsClient + "/auth/login",
 		"GET " + nsClient + "/config/bootstrap",
@@ -112,31 +102,12 @@ func TestNamespaces(t *testing.T) {
 		"HEAD " + nsClient + "/channel/logo-dark",
 		"GET " + nsClient + "/channel/favicon",
 		"HEAD " + nsClient + "/channel/favicon",
-		"GET " + nsClient + "/marketplace/skills",
-		"GET " + nsClient + "/shared-skills",
-		"GET " + nsClient + "/agent-presets",
-		"GET " + nsClient + "/capabilities",
-		// R1-pm-3：审核结论的作者侧出口（发布者本人的版本历史 + 被拒理由）。
-		// 缺了这条，开启审核 = 作者永远收不到结论（客户端拿不到任何数据）。
-		"GET " + nsClient + "/apps/wasm/:app_id/releases",
-		// 标识唯一性预查（2026-09-20）：发布表单填 app_id 时异步问它、提交前再问一次。
-		// 缺了这条，表单只能退回去读 catalog —— 而 catalog 不列冻结/占名行，
-		// 会给出"这个标识没人用"的反向结论。
-		"GET " + nsClient + "/apps/wasm/:app_id/availability",
 		"POST " + nsServer + "/admin/login",
 		"GET " + nsServer + "/admin/auth/methods",
 		"GET " + nsServer + "/admin/users",
 		"GET " + nsServer + "/admin/audit",
 		"PUT " + nsServer + "/admin/audit/settings",
-		"GET " + nsServer + "/admin/agents",
-		"POST " + nsServer + "/admin/agents",
 		"GET " + nsServer + "/admin/portal",
-		"GET " + nsServer + "/admin/connectors",
-		// SG-4(审计 2026-09-17):组织共享技能/智能体的上下架开关必须成对存在 ——
-		// 读侧两侧都由 apps.enabled 闸门控制,写侧只剩技能一侧时,下线一个组织
-		// 智能体只能走软删(名字与版本号永久占位)。
-		"PUT " + nsServer + "/admin/shared-skills/:name/enabled",
-		"PUT " + nsServer + "/admin/agent-presets/:name/enabled",
 		// 2026-08-31: 按模型并发状态(当前/峰值/目标,扩容申请)
 		"GET " + nsServer + "/admin/concurrency",
 		"PUT " + nsServer + "/admin/apps/:kind/:app_id/owner",
@@ -165,6 +136,64 @@ func TestNamespaces(t *testing.T) {
 	} {
 		if !routes[want] {
 			t.Fatalf("missing route: %s", want)
+		}
+	}
+
+	// 可选模块的冒烟：**双向**断言 —— 模块编进来时这一片路由必须在；模块关闭时
+	// 它们必须**不在**（关闭态语义 = 整片从产物里消失，而不是仍在树上返回 404/500）。
+	// 唯一真源 = internal/features（它由 build tag 文件派生，见该包文件头）。
+	for _, group := range []struct {
+		module  string
+		enabled bool
+		keys    []string
+	}{
+		{
+			module: features.ModuleSkills, enabled: features.HasSkills(),
+			keys: []string{
+				"GET " + nsClient + "/marketplace/skills",
+				"GET " + nsClient + "/shared-skills",
+				"GET " + nsClient + "/agent-presets",
+				"GET " + nsClient + "/capabilities",
+				"GET " + nsClient + "/skills/builtin",
+				"GET " + nsServer + "/admin/agents",
+				"POST " + nsServer + "/admin/agents",
+				"GET " + nsServer + "/admin/skills/builtin",
+				// SG-4(审计 2026-09-17):组织共享技能/智能体的上下架开关必须成对存在 ——
+				// 读侧两侧都由 apps.enabled 闸门控制,写侧只剩技能一侧时,下线一个组织
+				// 智能体只能走软删(名字与版本号永久占位)。
+				"PUT " + nsServer + "/admin/shared-skills/:name/enabled",
+				"PUT " + nsServer + "/admin/agent-presets/:name/enabled",
+			},
+		},
+		{
+			module: features.ModuleApps, enabled: features.HasApps(),
+			keys: []string{
+				// R1-pm-3：审核结论的作者侧出口（发布者本人的版本历史 + 被拒理由）。
+				// 缺了这条，开启审核 = 作者永远收不到结论（客户端拿不到任何数据）。
+				"GET " + nsClient + "/apps/wasm/:app_id/releases",
+				// 标识唯一性预查（2026-09-20）：发布表单填 app_id 时异步问它、提交前再问一次。
+				// 缺了这条，表单只能退回去读 catalog —— 而 catalog 不列冻结/占名行，
+				// 会给出"这个标识没人用"的反向结论。
+				"GET " + nsClient + "/apps/wasm/:app_id/availability",
+				"GET " + nsServer + "/admin/wasm-apps",
+			},
+		},
+		{
+			module: features.ModuleConnectors, enabled: features.HasConnectors(),
+			keys: []string{"GET " + nsServer + "/admin/connectors"},
+		},
+	} {
+		for _, want := range group.keys {
+			present := routes[want]
+			if group.enabled && !present {
+				t.Fatalf("模块 %s 编进了本变体，但关键路由缺失：%s", group.module, want)
+			}
+			if !group.enabled && present {
+				t.Fatalf("模块 %s 未编入本变体，但路由仍在树上：%s\n"+
+					"  关闭态语义 = 整片路由从产物里消失（编译期 no-op），"+
+					"不是「仍在树上但返回 404/500」；见 docs/decisions/2026-10-14-server-build-tags.md。",
+					group.module, want)
+			}
 		}
 	}
 }
@@ -327,20 +356,6 @@ func TestLargeBodyRoutesExemptions(t *testing.T) {
 		m, p := splitKey(key)
 		if bodyLimitExempt(m, p) {
 			t.Fatalf("%s must NOT be exempt from the 1MB body limit", key)
-		}
-	}
-}
-
-// 豁免表必须对应真实注册的路由(防路径写错导致豁免失效 → 上传被 1MB 拦)。
-func TestLargeBodyRoutesExist(t *testing.T) {
-	r := buildTestRouter(t)
-	routes := map[string]bool{}
-	for _, rt := range r.Routes() {
-		routes[rt.Method+" "+rt.Path] = true
-	}
-	for key := range largeBodyRoutes {
-		if !routes[key] {
-			t.Fatalf("exempt route not registered in production tree: %s", key)
 		}
 	}
 }

@@ -54,8 +54,9 @@ import {
   computeSkillContentHash,
   isInstalledSkillDirty,
   readProvenance,
-} from '../src/skill-install.ts'
-import { apply, type Config } from '../src/auth-gate.ts'
+} from '../../capability-center/src/host/skill-install.ts'
+import { type Config } from '../src/auth-gate.ts'
+import { applyFullComposition as apply } from './helpers/apply-full-composition.ts'
 import type { Session } from '../src/server-connector/config.ts'
 
 const NAME = BUILTIN_SKILLS[0] as string
@@ -140,6 +141,7 @@ function harness(): { call: (url: string) => Promise<{ code: number, body: any }
   const routes: Route[] = []
   const ctx = {
     effect: (fn: () => unknown) => { fn() },
+    provide: (name: string, value: unknown) => { (ctx as unknown as Record<string, unknown>)[`__svc_${name}`] = value },
     get: (name: string) => (name === 'connection'
       ? { requestRejection: (r: { headers: Record<string, unknown> }) => (r.headers['cookie'] === undefined ? (401 as const) : undefined) }
       : undefined),

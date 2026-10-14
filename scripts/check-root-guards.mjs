@@ -157,9 +157,43 @@ const MINIMUM_REQUIRED_GUARDS = [
  * 重新生成：`node scripts/check-guard-parser-integrity.mjs --print-digests`。
  */
 const REGISTERED_GUARD_ENTRIES = new Map([
-  ['check:layout', { script: 'node scripts/verify-layout.mjs', argvTail: [], digest: '7f5f2073b0eec7fd0ea9ff47d86ba0b1e85bdbc3673544ed5680a20da6dd5cdc' }],
-  ['check:workflows', { script: 'node scripts/check-workflows.mjs', argvTail: [], digest: '4752f083dafb3efa6658b7a7707c606ef814d6c014dac3804057b33a4246cd57' }],
-  ['check:ci-scripts', { script: 'node scripts/verify-ci-scripts.mjs', argvTail: [], digest: 'c75c9026838cb08534d1de0f13e1a2ae8da7ebb95257e90daa8852d626bc6991' }],
+  // 2026-10-13：`scripts/verify-layout.mjs` 的包名表新增
+  // `packages/host/capability-center` ↔ `@picoaide/dsh-capability-center` 与
+  // `packages/host/gateway-client` ↔ `@picoaide/dsh-gateway-client`
+  // （能力中心 host + client 双面从 enterprise 拆出；网关客户端叶子包新建，2026-10-13 P0-b）
+  // ⇒ 该守卫脚本内容变了，按本表上方的
+  // 纪律在同一个改动里更新摘要（取值来自 `--print-digests` 的复算结果，
+  // 由 `check-guard-parser-integrity.mjs` 与 `verify-check-workspaces.mjs` 各自独立复算对拍）。
+  // 2026-10-14：`scripts/check-workflows.mjs` 的 `ci-go-vet` 载荷从"`argv[1]` 逐字 `./...`"
+  // 改成"**第一个不以 `-` 开头的词**逐字 `./...`"（意图不变：包面不许缩到子集；放行包面
+  // **之前**的 flag —— `-tags=…` 只能写在那里，写成 `go vet ./... -tags=…` 会被 Go 当成
+  // 包模式直接失败）。⇒ 该守卫脚本内容变了，按本表上方的纪律在同一个改动里同步摘要
+  // （取值来自 `--print-digests` 的复算结果，且必须取**工作树**=提交后 HEAD 那份，
+  // 由 `check-guard-parser-integrity.mjs` 与 `verify-check-workspaces.mjs` 各自独立复算对拍）。
+  ['check:layout', { script: 'node scripts/verify-layout.mjs', argvTail: [], digest: 'c7851ab69aab2e137758d69dfe56c777627ae404dd5a36b619f0d89cfd4bdc1d' }],
+  // 2026-10-14 P1 第三片：`check-workflows.mjs` 增加了服务端构建变体矩阵一步的登记
+  // （判据词表 `CI_JUDGEMENT_ARGV_PREFIXES` + `REQUIRED_CI_STEPS` + `PINNED_STEP_POLICIES`
+  // 的 `ci-check-go-build-tags`，理由：该判据此前**不在任何自动化里**，只在人手敲
+  // `make -C server check-tags` 时生效 —— 见 docs/decisions/2026-10-14-server-build-tags.md §11-1）。
+  // 摘要按本表上方的纪律在同一个改动里同步（取值来自 `--print-digests` 的复算结果）。
+  // 2026-10-14：`check:workflows` 补两条变体判据步骤的可执行性登记（`REQUIRED_CI_STEPS` /
+  // 判据词表 / `PINNED_STEP_POLICIES` + 载荷），并把 `[SK-7b]` 的固定开销常量提为
+  // `CI_JOB_FIXED_OVERHEAD_MINUTES`（45→60 min 预算的同批模型更正）；`check:ci-scripts`
+  // 第 19 节新增"两个变体 build-arg 必须成对"（Dockerfile fail-loud 断言）与量具自检。
+  // 两条摘要均按 `--print-digests` 复算后同批更新（改判据必须显式出现在 diff 里）。
+  //
+  // 2026-10-14 合并（四路收口）：以上两批改动分别来自 `p1b-conditionalize` 与
+  // `p3-webadmin-variant`，而合并后的这两个脚本是**两边内容的并集**（策略表 15 条、
+  // 词表/登记表各自多出对方没有的条目）⇒ 摘要不能取任何一侧的旧值，只能在合并后的
+  // 工作树上重新复算（下面两个值就是这么来的；由 `check-guard-parser-integrity` 与
+  // `verify-check-workspaces` 各自独立复算对拍）。
+  // 2026-10-14 合并后审计 P1/P2：`check-workflows.mjs` 把 `[SK-7b]` 的固定开销常量
+  // 12 改成 14（补算本片新增的 `check-go-build-tags` 步骤 ≈1.9 min），并新增**逐 job 的
+  // 预算登记表** `CI_JOB_BUDGET_MINUTES = { server: 60 }` —— 预算被静默削低（60→45，
+  // 此前 exit 0）现在当场判红，合成负例 `b14-timeout-budget-below-registered` 是这条
+  // 判据的钉子。⇒ 该守卫脚本内容变了，摘要按本表上方的纪律在同一批里复算更新。
+  ['check:workflows', { script: 'node scripts/check-workflows.mjs', argvTail: [], digest: '1035651b524c6a32b909d6601069a184756aa86bdc5009834ec55885ea2b91e2' }],
+  ['check:ci-scripts', { script: 'node scripts/verify-ci-scripts.mjs', argvTail: [], digest: '552ed864e41d5181ce2a9cd11d3ae3c4e266ac7373cb0911766032b5c54d5f94' }],
   ['check:patch-resolutions', { script: 'node scripts/verify-patch-resolutions.mjs', argvTail: [], digest: '6dcde2281311235a57722608d91e6a1fa59734411ad65cda76ea2bdc43145c83' }],
   ['check:patch-pin', { script: 'node scripts/check-patch-pin.mjs', argvTail: [], digest: 'a8fe5b45df5dfadd7a87332b31f9e14c4a6722a41f21cf0f0d9afa6450a3ba84' }],
   ['check:patches', { script: 'node scripts/verify-patches.mjs', argvTail: [], digest: '22131d86472ff930f22687192b07216c5cf74ab594d0091a6766e661a2c24683' }],
@@ -179,7 +213,22 @@ const REGISTERED_GUARD_ENTRIES = new Map([
   // 守卫脚本**内容**的判据（第十轮审计 C-06/C-17）。它的判据面里同时包含:
   //   · 本表每条 `digest` ↔ 该守卫脚本的 sha256(内容替换/符号链接替换都红);
   //   · 门禁自己依赖的解析器(`node_modules/yaml`)的**文件集** sha256 ↔ 登记值。
-  ['check:guard-parser-integrity', { script: 'node scripts/check-guard-parser-integrity.mjs', argvTail: [], digest: '22c4a6c33a7d696944b063c214a6bdd3a47c8950af1557011849b2a9c248f64a' }],
+  // 2026-10-13：`scripts/check-install-integrity.mjs` 的 `EXECUTION_POINT_REGISTRY`
+  // 新增 `packages/host/capability-center` 的四条与 `packages/host/gateway-client` 的
+  // 三条派生执行点（2026-10-13 P0-b）⇒ 该前置校验件内容变了，它在对方文件里的登记值也同步更新
+  // ⇒ 本判据脚本自身的摘要随之变化，按同一套纪律在这里同步（`--print-digests` 复算，
+  // 且必须取**工作树**=提交后 HEAD 那份）。
+  // 2026-10-14：`check-guard-parser-integrity.mjs` 的内容变了（它登记的
+  // `scripts/check-install-integrity.mjs` 摘要随两处新执行点更新）⇒ 本摘要同步进 diff
+  // （取值 = 提交后工作树那份：`sha256sum scripts/check-guard-parser-integrity.mjs`）。
+  // 2026-10-14（p2 变体裁剪并入后）：`check-guard-parser-integrity.mjs` 又变了一次
+  // （它登记的 install-integrity 摘要随 `channel-variant.ts` 补登而更新）⇒ 本摘要同步。
+  // 2026-10-14（模块编译契约，方案 B）：同一件又一次 —— install-integrity 补登
+  // `scripts/gen-module-contract.mjs`（形状族 + CI 引用两条表）⇒ 本摘要同步
+  // （同一份 `sha256sum` 口径）。
+  // 2026-10-14（渠道缺省 + 渠道清单工具）：install-integrity 再补登
+  // `scripts/channel-modules.mjs` ⇒ 本摘要同步。
+  ['check:guard-parser-integrity', { script: 'node scripts/check-guard-parser-integrity.mjs', argvTail: [], digest: 'fcb67b5daad5e3d8d667ade68673b2212cb34292541b3fb538f5c7d847be718f' }],
 ])
 
 /**

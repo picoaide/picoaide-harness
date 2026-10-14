@@ -1,7 +1,11 @@
 # Enterprise Host rows: the bare entry carries the package's client bundle
-# declaration (skill center + account surfaces), the session service provides
-# `picoSession`, then the gateway-model and bootstrap listeners react to its
-# changes, and the auth-gate owns the login gate and skill-store proxy.
+# declaration (account surfaces), the session service provides `picoSession`,
+# then the gateway-model and bootstrap listeners react to its changes, and the
+# auth-gate owns the login gate. The skill store's local API and its telemetry
+# row moved to `@picoaide/dsh-capability-center` (2026-10-13, P0-b) so that
+# turning that module off really removes its code from the bundle; auth-gate
+# hands the shared local-route fence to those rows through the
+# `picoLocalRoutes` service.
 - insert:
     - id: picoaide-enterprise
       name: '@picoaide/dsh-enterprise'
@@ -13,8 +17,6 @@
       name: '@picoaide/dsh-enterprise/bootstrap'
     - id: picoaide-error-reporting
       name: '@picoaide/dsh-enterprise/error-reporting'
-    - id: picoaide-skill-telemetry
-      name: '@picoaide/dsh-enterprise/skill-telemetry'
     - id: picoaide-auth-gate
       name: '@picoaide/dsh-enterprise/auth-gate'
     - id: picoaide-channel-sync

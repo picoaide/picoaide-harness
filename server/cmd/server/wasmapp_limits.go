@@ -1,3 +1,9 @@
+//go:build apps
+
+// 本文件属于 `apps` 模块（P1 第二片，2026-10-14）：关闭 apps 时它整份不编译，
+// `internal/wasmapp/**` 包树因此从 `go list -deps ./cmd/server` 里消失。
+// 关闭态的替身在 `optional_apps_off.go`（同名同签名的最小实现）。
+
 package main
 
 import (
@@ -7,10 +13,10 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
 	"github.com/picoaide/picoaide/internal/wasmapp/applimits"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/memprofile"
 	"github.com/picoaide/picoaide/internal/wasmapp/readyz"
 )

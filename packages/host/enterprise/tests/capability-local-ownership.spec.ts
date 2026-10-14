@@ -34,15 +34,16 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { apply, type Config } from '../src/auth-gate.ts'
+import { type Config } from '../src/auth-gate.ts'
+import { applyFullComposition as apply } from './helpers/apply-full-composition.ts'
 import type { Session } from '../src/server-connector/config.ts'
-import { computeSkillContentHash, writeProvenance } from '../src/skill-install.ts'
+import { computeSkillContentHash, writeProvenance } from '../../capability-center/src/host/skill-install.ts'
 import {
   isDelistedItem,
   mergeItems,
   planCardAction,
   type CapabilityItem,
-} from '../src/client/CapabilityCenterPanel.tsx'
+} from '../../capability-center/src/client/CapabilityCenterPanel.tsx'
 
 const SKILL = 'finance-report'
 
@@ -101,6 +102,7 @@ function harness(session: Session | null): { call: (url: string) => Promise<{ co
   const routes: Route[] = []
   const ctx = {
     effect: (fn: () => unknown) => { fn() },
+    provide: (name: string, value: unknown) => { (ctx as unknown as Record<string, unknown>)[`__svc_${name}`] = value },
     get: (name: string) => (name === 'connection'
       ? { requestRejection: () => undefined }
       : undefined),

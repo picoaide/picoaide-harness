@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
+	"github.com/picoaide/picoaide/internal/limits"
 )
 
 // 本文件是**编译子进程环境变量的白名单**（§4.3「参数 / 环境变量」+ R31 的 env 纪律）。

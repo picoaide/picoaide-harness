@@ -42,9 +42,9 @@
   ],
   "scripts": {
     "build": "tsdown && tsc -p tsconfig.json --emitDeclarationOnly && tsc -p tsconfig.client.json --emitDeclarationOnly",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.tests.json --noEmit",
     "test": "vitest run",
-    "check": "yarn run build && yarn run test"
+    "check": "yarn run build && tsc -p tsconfig.tests.json --noEmit && yarn run test"
   },
   "dependencies": {
     "@picoaide/dsh-enterprise": "workspace:*"
@@ -67,6 +67,7 @@
     "@deepseek-ai/dsh-client-ui-slots": "0.2.0-rc.2",
     "@deepseek-ai/dsh-host-webserver": "0.2.0-rc.2",
     "@deepseek-ai/dsh-invariants": "0.2.0-rc.2",
+    "@picoaide/dsh-capability-center": "workspace:*",
     "@picoaide/dsh-panel-surface": "workspace:*",
     "@types/node": "^22.20.0",
     "@types/react": "^18",

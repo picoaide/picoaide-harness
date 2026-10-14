@@ -25,7 +25,6 @@ export default defineConfig([
       // 类身份跨副本不成立，打包进来会让适配器的错误分类静默失效。
       'gateway-llm': 'src/gateway-llm.ts',
       'error-reporting': 'src/error-reporting.ts',
-      'skill-telemetry': 'src/skill-telemetry.ts',
       bootstrap: 'src/bootstrap.ts',
       'session-service': 'src/session-service.ts',
       // Shared subpath exports consumed by sibling plugins (dsh-account-card):

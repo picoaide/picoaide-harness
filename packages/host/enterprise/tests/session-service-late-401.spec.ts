@@ -50,13 +50,16 @@ import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
-import { apply, type Config } from '../src/auth-gate.ts'
+import { type Config } from '../src/auth-gate.ts'
+import { applyFullComposition as apply } from './helpers/apply-full-composition.ts'
 import SessionService, { SESSION_CHANGED_EVENT } from '../src/session-service.ts'
 import type { Session } from '../src/server-connector/config.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SRC = join(HERE, '..', 'src')
 const AUTH_GATE_SRC = join(SRC, 'auth-gate.ts')
+/** 四条技能本机路由（2026-10-13 P0-b 起 13 处 auth_expired 清会话都在这里）。 */
+const SKILL_ROUTES_SRC = join(SRC, '..', '..', 'capability-center', 'src', 'host', 'skill-routes.ts')
 const REPO_ROOT = join(HERE, '..', '..', '..', '..')
 
 /** 递归列出 `dir` 下指定后缀的源码（判据失去输入必须红：一个都没有 ⇒ 抛）。 */
@@ -140,6 +143,7 @@ async function harness(prefix: string): Promise<{
   const ctx = {
     emit,
     effect: (fn: () => unknown) => { fn() },
+    provide: (name: string, value: unknown) => { (ctx as unknown as Record<string, unknown>)[`__svc_${name}`] = value },
     get: (name: string) => (name === 'connection'
       ? { requestRejection: (request: { headers: Record<string, unknown> }) => (request.headers['cookie'] === undefined ? (401 as const) : undefined) }
       : undefined),
@@ -232,24 +236,36 @@ describe('R22-V1-N3 迟到 401：旧令牌的响应晚于"新登录"', () => {
 
 describe('R22-V1-N3 分流是结构性的：auth_expired 走 clearIfCurrent，登出/改密才无条件清', () => {
   it('13 处 auth_expired 清空全部带令牌；剩下 2 处无条件 clear 是登出与改密', () => {
-    const lines = readFileSync(AUTH_GATE_SRC, 'utf8').split('\n')
-    const clearAll = lines.map((line, index) => ({ line, index })).filter(({ line }) => line.includes('ctx.picoSession.clear()'))
-    const clearIfCurrent = lines.map((line, index) => ({ line, index })).filter(({ line }) => line.includes('ctx.picoSession.clearIfCurrent('))
-
-    expect(clearIfCurrent.length, '13 处 auth_expired 清空必须全部走 clearIfCurrent').toBe(13)
-    expect(clearAll.length, '无条件 clear 只允许"语义上就是登出"的那两处').toBe(2)
+    // 2026-10-13（P0-b）：这 13 处随四条技能本机路由从 `auth-gate.ts` 搬到
+    // `capability-center/src/host/skill-routes.ts`。判据的**强度一个字没减**：
+    // 仍然是"逐点数 13、每处必须带本次请求的令牌、且必须紧跟在 auth_expired 分支里"。
+    // 两处无条件 clear（登出 / 改密）留在 auth-gate —— 那两处是 auth-gate 自己的路由。
+    const routesSrc = SKILL_ROUTES_SRC
+    const lines = readFileSync(routesSrc, 'utf8').split('\n')
+    const clearIfCurrent = lines.map((line, index) => ({ line, index }))
+      .filter(({ line }) => line.includes('clearSessionIfCurrent(') && !line.includes('clearSessionIfCurrent(token: string)'))
+    expect(clearIfCurrent.length, '13 处 auth_expired 清空必须全部走带令牌的判据').toBe(13)
     for (const site of clearIfCurrent) {
-      expect(site.line, 'clearIfCurrent 必须带上本次请求用的令牌').toContain('clearIfCurrent(s.token)')
+      expect(site.line, '带令牌判据必须带上本次请求用的令牌').toContain('clearSessionIfCurrent(s.token)')
       const window = lines.slice(Math.max(0, site.index - 8), site.index + 1).join('\n')
-      expect(window, `第 ${site.index + 1} 行：clearIfCurrent 必须紧跟在 auth_expired 分支里`).toContain('auth_expired')
+      expect(window, `第 ${site.index + 1} 行：必须紧跟在 auth_expired 分支里`).toContain('auth_expired')
     }
+
+    const gateLines = readFileSync(AUTH_GATE_SRC, 'utf8').split('\n')
+    const clearAll = gateLines.map((line, index) => ({ line, index }))
+      .filter(({ line }) => line.includes('ctx.picoSession.clear()'))
+    expect(clearAll.length, '无条件 clear 只允许"语义上就是登出"的那两处').toBe(2)
     for (const site of clearAll) {
-      const window = lines.slice(Math.max(0, site.index - 40), site.index + 1).join('\n')
+      const window = gateLines.slice(Math.max(0, site.index - 40), site.index + 1).join('\n')
       const isLogout = window.includes("'/api/client/v2/auth/logout'")
       const isPasswordChange = window.includes('changePassword(')
       expect(isLogout || isPasswordChange,
-        `第 ${site.index + 1} 行的无条件 clear 不是登出也不是改密 —— 新加的"因 401 而清"必须走 clearIfCurrent`).toBe(true)
+        `第 ${site.index + 1} 行的无条件 clear 不是登出也不是改密 —— 新加的"因 401 而清"必须走带令牌的判据`).toBe(true)
     }
+    // 围栏本身仍由 auth-gate 提供、且**转发**给模块行（唯一实现，不是副本）。
+    const gate = readFileSync(AUTH_GATE_SRC, 'utf8')
+    expect(gate, 'auth-gate 必须把带令牌的会话清理经 picoLocalRoutes 交出去')
+      .toContain('clearSessionIfCurrent: (token: string): void => { ctx.picoSession.clearIfCurrent(token) }')
   })
 
   it('全仓再没有"因 401 而清"的无条件 clear（同族收口：auth-gate 之外的调用面也钉住）', () => {
@@ -281,8 +297,8 @@ describe('R22-V1-N3 分流是结构性的：auth_expired 走 clearIfCurrent，�
     expect(offenders, '因 401/会话失效而清会话必须走 clearIfCurrent（带本次请求的令牌）').toEqual([])
 
     // 正面：三处同族调用面都真的换成了带令牌的判据。
-    const wasmApps = readFileSync(join(SRC, 'wasm-apps.ts'), 'utf8')
-    expect(wasmApps, 'wasm 出站路径必须带令牌判定').toContain('ctx.picoSession.clearIfCurrent(session.token)')
+    const wasmApps = readFileSync(join(SRC, '..', '..', 'wasm-apps-host', 'src', 'wasm-apps.ts'), 'utf8')
+    expect(wasmApps, 'wasm 出站路径必须带令牌判定').toContain('picoSessionOf(ctx)?.clearIfCurrent?.(session.token)')
     const bootstrap = readFileSync(join(SRC, 'bootstrap.ts'), 'utf8')
     expect(bootstrap, 'bootstrap 的会话同步必须带令牌判定').toContain('ctx.picoSession.clearIfCurrent(session.token)')
     // R23-W2-03：客户端插件里的同族调用面（account-card 的余额路由）同样必须带令牌。

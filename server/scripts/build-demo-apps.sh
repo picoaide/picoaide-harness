@@ -4,7 +4,8 @@
 # "编译 → 打包前端资源 → 假宿主预览"整条链，不必每次都构建镜像。
 #
 # 为什么要有这个脚本：演示应用的前端资源要打进 wasm 的自定义段，而打包脚本是
-# Node 写的（`skills/app-builder/scripts/pack-assets.mjs`）—— Dockerfile 里为此
+# Node 写的（`demoapps/scripts/pack-assets.mjs`，中性位置：与技能目录里的那一份
+# 同源、构建镜像时注入）—— Dockerfile 里为此
 # 专门加了一个 node 阶段。本脚本是同一套步骤的本地版本，产物落 `/tmp/demo-<app>-packed.wasm`。
 #
 # 用法：
@@ -18,7 +19,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SERVER="$ROOT/server"
-PACK="$SERVER/skills/app-builder/scripts/pack-assets.mjs"
+PACK="$SERVER/demoapps/scripts/pack-assets.mjs"
 
 # 演示应用清单（与 Dockerfile 的 `for app in ...` 必须一致）。
 ALL_APPS=(showcase forum board)
@@ -30,6 +31,14 @@ export GOCACHE="${GOCACHE:-$ROOT/temp/demo-gocache}"
 export GOMODCACHE="${GOMODCACHE:-/root/go/pkg/mod}"
 export GOPROXY="${GOPROXY:-off}"
 mkdir -p "$GOCACHE"
+
+# 可选模块的编译期开关：与 `server/Makefile` 的 `GO_TAGS` **同一份缺省值（全开）**，
+# 唯一真源仍是 `server/internal/features` 的 build tag 文件。演示应用本身不 import
+# 任何可选模块，这里接线是为了"构建入口不留一处不传 tags 的口子"——
+# 否则将来某个演示应用一旦依赖可选包，它的 wasm 产物就会与宿主二进制不同组合。
+# 注意：`-tags=` 必须写在包面**之前**（`go` 的 flag 解析在第一个非 flag 词处停止）。
+GO_TAGS="${GO_TAGS:-skills,apps,connectors}"
+GO_TAG_FLAG="-tags=$GO_TAGS"
 
 fail() { echo "✗ $*" >&2; exit 1; }
 
@@ -47,8 +56,8 @@ for app in "${APPS[@]}"; do
   raw="$out_dir/$app.wasm"
   packed="$out_dir/$app-packed.wasm"
 
-  echo "→ 编译 $app（wasm32-wasip1）"
-  ( cd "$SERVER" && GOOS=wasip1 GOARCH=wasm go build -trimpath -ldflags "-s -w" -o "$raw" "./demoapps/$app" )
+  echo "→ 编译 $app（wasm32-wasip1，-tags=$GO_TAGS）"
+  ( cd "$SERVER" && GOOS=wasip1 GOARCH=wasm go build $GO_TAG_FLAG -trimpath -ldflags "-s -w" -o "$raw" "./demoapps/$app" )
 
   echo "→ 打包前端资源 $app"
   node "$PACK" --in "$raw" --out "$packed.$$" \

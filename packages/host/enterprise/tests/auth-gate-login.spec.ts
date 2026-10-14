@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { apply, renderChangePasswordPage, renderLoginPage, type Config } from '../src/auth-gate.ts'
+import { renderChangePasswordPage, renderLoginPage, type Config } from '../src/auth-gate.ts'
+import { applyFullComposition as apply } from './helpers/apply-full-composition.ts'
 
 // 回归测试(2026-09):登录页是 TS 模板字符串,内联 <script> 里的正则
 // `\/` 会被模板转义(cooked)成 `/`(输出 `//$` = 空正则+行注释)导致浏览器
@@ -165,6 +166,7 @@ function servedLoginPage(config: Config): string {
   let index: ((html: string) => string) | undefined
   const ctx = {
     effect: (fn: () => unknown) => { fn() },
+    provide: (name: string, value: unknown) => { (ctx as unknown as Record<string, unknown>)[`__svc_${name}`] = value },
     picoSession: { isRestored: () => true, isLoggedIn: () => false, getSession: () => null },
     webServer: {
       tapIndex: (cb: (html: string) => string) => { index = cb; return () => {} },

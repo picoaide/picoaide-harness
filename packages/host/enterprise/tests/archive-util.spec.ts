@@ -2,7 +2,7 @@
 import AdmZip from 'adm-zip'
 import { gzipSync, gzipSync as gzip } from 'node:zlib'
 import { describe, expect, it } from 'vitest'
-import { assertArchiveSafe } from '../src/archive-util.ts'
+import { assertArchiveSafe } from '../../capability-center/src/host/archive-util.ts'
 
 /**
  * Minimal POSIX ustar header + payload (the tar validator only reads paths).

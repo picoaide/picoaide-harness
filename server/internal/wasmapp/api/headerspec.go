@@ -5,9 +5,9 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/abi"
 	"github.com/picoaide/picoaide/internal/wasmapp/edge"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // ============================================================================

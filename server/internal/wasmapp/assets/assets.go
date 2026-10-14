@@ -40,8 +40,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 const (
@@ -73,7 +73,7 @@ const (
 // 其中 `name` 是符号名表（73 KiB！），`producers` 是产线元数据 —— 把它们收进
 // 资源集只会浪费内存与段额度，并让作者困惑（`assets.read("name")` 读到一坨符号表）。
 //
-// 判据与分流见 SplitSections；打包脚本 `scripts/pack-assets.mjs` 的拒绝清单与
+// 判据与分流见 SplitSections；打包脚本 `demoapps/scripts/pack-assets.mjs` 的拒绝清单与
 // 本表同源（改这里必须同步改它，`assets` 包测试会读脚本源码**双向**对拍）。
 var ToolchainSections = map[string]struct{}{
 	"name":                {},
@@ -99,7 +99,7 @@ var ToolchainSections = map[string]struct{}{
 // 判据取 `.debug_` 前缀而不是"点开头"：`.well-known/...` 这类合法资源路径不该被误伤。
 //
 // ⚠️ 这份前缀清单同时是**段总量预算**的排除依据（CountsTowardSectionBudget）——
-// 改它等于改"作者能用多少资源额度"，必须同步 `skills/app-builder/scripts/pack-assets.mjs`
+// 改它等于改"作者能用多少资源额度"，必须同步 `demoapps/scripts/pack-assets.mjs`
 // （`assets` 包测试有 Go↔Node 的逐字节对拍）。
 var ToolchainSectionPrefixes = []string{".debug_"}
 
@@ -127,7 +127,7 @@ func IsToolchainSection(name string) bool {
 
 // CountsTowardSectionBudget 报告一个自定义段是否计入 §4.2 的 4 MiB 段总量预算
 // （limits.SectionTotalMaxBytes）。**这是该口径的唯一实现**：wasmmod.Validate 用它算
-// ModuleInfo.CustomBytes，作者侧 `skills/app-builder/scripts/pack-assets.mjs` 镜像同一判据
+// ModuleInfo.CustomBytes，作者侧 `demoapps/scripts/pack-assets.mjs` 镜像同一判据
 // （`assets` 包测试有 Go↔Node 的逐字节对拍）。
 //
 // # 口径（2026-09-21 定案，独立审计 D-A1）

@@ -1,5 +1,11 @@
 import { defineConfig } from 'vitest/config'
 import { fileURLToPath, URL } from 'node:url'
+// 变体开关与构建链**同一份解析**（features.mjs）：测试里读到的开关必须逐位等于
+// 构建时注入的那一份，否则"按变体给期望"的判据测的是一个不存在的产物。
+// `FEATURES=none npm test` = 用全关变体的期望跑同一套用例（缺省全开）。
+import { featureDefines, resolveFeaturesFromEnv } from './features.mjs'
+
+const features = resolveFeaturesFromEnv(process.env)
 
 // 这里**刻意不挂** @vitejs/plugin-react（vite.config.ts 的构建链仍然挂它）：
 // vitest 4 自带 vite 8（rolldown/oxc），而 plugin-react@4 走 babel，会给 vite 塞
@@ -9,6 +15,7 @@ import { fileURLToPath, URL } from 'node:url'
 // 去掉它等于让「实际生效的转换链」与「配置里声明的」一致，同时消掉那两行警告。
 // 注意：构建链（vite 5 + plugin-react）一个字没动 —— 两者是各自的 vite 实例。
 export default defineConfig({
+  define: featureDefines(features),
   resolve: {
     alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
   },

@@ -885,10 +885,10 @@ jobs:
             packages/host/enterprise/lib packages/host/connectors/lib \
             packages/host/browser/lib packages/host/cron/lib \
             packages/host/wasm-apps-host/lib packages/host/host-locale/lib \
-            packages/host/host-home/lib \
+            packages/host/host-home/lib packages/host/gateway-client/lib \
             packages/client/account-card/lib packages/client/branding/lib \
             packages/client/wasm-apps/lib packages/client/panel-surface/lib \
-            packages/client/foot-menu/lib \
+            packages/client/foot-menu/lib packages/host/capability-center/lib \
       - name: Upload workspace build products (one build, three platforms)
         if: needs.changes.outputs.code != 'false'
         uses: actions/upload-artifact@v7
@@ -902,12 +902,30 @@ jobs:
     needs: changes
     if: needs.changes.result != 'success' || needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
-    # 45 min 的依据(2026-09-19,R2-SK-7):happy path ≈ 26 min 测试 + PG 启动/
-    # npm ci/gofmt/go vet/npm test/make build-server ≈ 5 min ⇒ 留 ~1.4× 余量;
-    # 且覆盖"单包挂满 15m + 其余 ~21m ≈ 36 min"的最坏路径,使 -timeout 的
-    # goroutine dump 一定能打出来(取 30 min 时这两条都不成立:余量仅 ~13%,
-    # runner 稍慢即同提交红,真挂则无 dump)。
-    timeout-minutes: 45
+    # 60 min 的依据(2026-09-19 立,R2-SK-7;2026-10-14 重算,含本片新增的
+    # `check-go-build-tags` 步骤)。45 min 是按旧账算的 —— 挂上这些步骤后 happy path
+    # 已到 ≈39.3 min(余量仅 ~1.14×,低于注释自己的 1.4× 口径),最坏路径 ≈44.3 min,
+    # 只剩不到 1 min,runner 稍慢或某个包多花几分钟就会先撞 job 上限被整体取消,
+    # 退化成"gate 红、查不出原因"。
+    #
+    #   · happy path ≈ 26 min(go test -p 1 全量) + 5 min(PG 启动 / npm ci / gofmt /
+    #     go vet / `npm test` / `make build-server`) + 6.4 min(两条变体判据;本机 4 vCPU
+    #     实测两轮:空载 4m36s + 51s ≈ 5.5 min,审计当日带负载 5m17s + 1m04s ≈ 6.4 min ——
+    #     按**慢的那一轮**算) + 1.9 min(`node scripts/check-go-build-tags.mjs --expect-cut`;
+    #     该步骤自记 4 vCPU 暖缓存 8 组合全跑 ≈ 1m52s) ≈ **39.3 min** ⇒ 60/39.3 ≈ **1.53×**
+    #     余量(≥ 注释口径的 1.4×);
+    #   · 最坏路径 = 单包挂满 15m + 其余 ~21m + 6.4(变体判据) + 1.9(build-tags) ≈ **44.3 min**
+    #     ≤ 60 ⇒ 留 ~15.7 min,使 `-timeout 15m` 的 `panic: test timed out` + goroutine dump +
+    #     用例名一定能打出来(取 45 min 时这条路只剩 0.7 min);
+    #   · 与 [SK-7b] 的序关系:2×15+14 = 44 ≤ 60 ✓(该策略的固定开销常量与本节同批由 12 改成 14,
+    #     否则判据自己的模型还是旧账 —— 见 `check-workflows.mjs` 的 `CI_JOB_FIXED_OVERHEAD_MINUTES`)。
+    #     同一处还有**逐 job 的预算登记** `CI_JOB_BUDGET_MINUTES = { server: 60 }`:这个 60
+    #     是登记过的承诺值,改回 45 会被当场判红(此前只判下界,静默回退无人拦)。
+    # 变体判据是分钟级的,本可以拆成独立 job 并行;没有拆是因为它需要 `server/webadmin`
+    # 的 node_modules(server job 已 `npm ci`),拆出去要再装一遍依赖,收益被吃掉。
+    # 代价(认账):真挂的 job 从 45 min 起到 60 min 才被取消 —— 但那时单个包的 `-timeout 15m`
+    # 早已先到点并打出 dump,这条正是 R2-SK-7 要的形态。
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: server
@@ -968,7 +986,45 @@ jobs:
             echo "::error::gofmt 未通过: $FILES"
             exit 1
           fi
-      - run: go vet ./...
+      # 2026-10-14（P1 第一片）：vet 也带上服务端可选模块的构建变体，与 `go test` 那一步
+      # 同值（发布态 = 全开）——要钉的是"CI 的静态分析面对的是发布出去的那套组合"。
+      #   · `GO_TAGS` 的缺省值与 `server/Makefile` 的 `GO_TAGS ?= skills,apps,connectors`
+      #     **逐字相同**；本文件刻意自持这一份字面量而不是去读 Makefile 的变量：
+      #     CI 的判据面不该随构建脚本的变量漂移（与本文件 `go test` 的 `-timeout 15m`
+      #     同一口径 —— Makefile 注释里明说 CI 那一份是写死的）。改这里就要同时改
+      #     `go test` 那一步，两处必须同值。
+      #   · **`-tags` 必须在包面之前**：`go` 的 flag 解析在第一个非 flag 词处停止，
+      #     `go vet ./... -tags=…` 会被当成包模式（`malformed import path "-tags=…"`，退出码 1）。
+      #     `scripts/check-workflows.mjs` 的 `ci-go-vet` 载荷因此判"**第一个不以 `-` 开头的词**
+      #     逐字 `./...`"（2026-10-14 由 argv[1] 改口径，意图不变：缩面照样红）。
+      #   · **不要**改用 `GOFLAGS` 之类的环境键来传（那会同时给出 `-toolexec` 通道）；也**不要**
+      #     改成 `env: GO_TAGS:` + `-tags=$GO_TAGS` 的变量形态 —— 被钉步骤上的 env 键是白名单制
+      #     （`PINNED_ENV_ALLOWED_KEYS`），实测会被 `[SK-17]` 当场判红，注册它等于多开一条
+      #     "判据步骤的构建变体由环境决定"的通道。这里保持**字面量**，与 `go test` 那一步同值。
+      # @generated:module-contract (scripts/gen-module-contract.mjs) — 手改会被 --check 判红
+      - run: go vet -tags=skills,apps,connectors ./...
+      # @end:module-contract
+      # 变体矩阵判据（2026-10-14 P1 第三片接入；判据本体见
+      # `docs/decisions/2026-10-14-server-build-tags.md` §4）。
+      #
+      # 它判什么：对**每一个**可选模块子集（三个独立开关 ⇒ 8 个组合）各跑一次
+      # `go build ./...` + `go vet ./...`，并断言 `go list -deps ./cmd/server` 里
+      # "开着的模块包树在、关掉的模块包树不在"（`--expect-cut` 让这条断言拦门禁）。
+      #
+      # 为什么必须进 CI（而不是留在 `make -C server check-tags` 里）：它是**唯一**在
+      # "包树真被裁掉"这一层判"关掉模块"的判据 —— 上面的 `go vet`/`go test` 两步都只跑
+      # 发布态组合（全开），所以减配变体的**编译面**在别处没有任何自动化。2026-10-14
+      # 独立审计 P1-4 的现场：`server/Makefile` 当时自称"CI 侧由本文件的 server job
+      # 单列一步"，而本文件对 `check-tags` **零命中** ⇒ 这条判据只在人手敲命令时生效。
+      #
+      # 形态：命令位是一步 `node scripts/check-go-build-tags.mjs`（脚本自己按组合循环），
+      # 参数在 CI 侧**自持字面量**（与上面 `-tags=…` 同一条口径：判据面不随构建脚本的
+      # 变量漂移）。`--expect-cut` 逐字写在这里，删掉它会让裁剪断言退化成"只报告"、
+      # 退出码恒 0 —— `check-workflows.mjs` 的 `ci-check-go-build-tags` 策略把这条载荷
+      # 也钉住了（`if: false` / 换命令 / 去掉 `--expect-cut` 三种形态都红）。
+      # 成本实测：本机 4 vCPU 暖缓存 8 组合全跑 ≈ 1m52s（build + vet）；它排在
+      # `go test` 之前，顺带把发布态组合的编译缓存预热掉。
+      - run: node scripts/check-go-build-tags.mjs --expect-cut
       # -p 1 串行跑测试包:多个包并行时总连接数仍可能挤压 service 的
       # max_connections(500),串行换取确定性。实测全量 wall ≈ 26 min
       # (2026-09-19,4 vCPU 与 runner 同规格,51 包全绿;最慢单包
@@ -1002,7 +1058,9 @@ jobs:
           # 报告**不进 CI 日志**:上千个用例的 JSON 会把 job log 刷爆,而 GitHub 会截断
           # 中段(本仓踩过"失败用例名被自己人挤出日志")⇒ 重定向落盘,失败时另存 artifact。
           GO_TEST_STATUS=0
-          go test ./... -count=1 -p 1 -timeout 15m -json > go-test.json || GO_TEST_STATUS=$?
+          # @generated:module-contract (scripts/gen-module-contract.mjs) — 手改会被 --check 判红
+          go test -tags=skills,apps,connectors ./... -count=1 -p 1 -timeout 15m -json > go-test.json || GO_TEST_STATUS=$?
+          # @end:module-contract
           CHECK_STATUS=0
           node ../scripts/wasm/check-go-test-json.mjs go-test.json \
             --scope internal/wasmapp,internal/router,internal/marketplace,internal/agentshare \
@@ -1026,6 +1084,16 @@ jobs:
           if-no-files-found: ignore
       - run: npm test
         working-directory: server/webadmin
+      # 2026-10-14 独立审计 P1:上面那步是**缺省（全开）变体**的 webadmin 单测,而
+      # `nav.test.ts` / `routes.test.ts` 是按变体给期望的 —— 关闭变体的回归（实测:删掉
+      # `nav.ts` 的开关过滤后,关闭变体会发布指向不存在路由的侧栏条目,点进去 404）
+      # 在 CI 上无人拦。下面两步把"变体矩阵"变成**调度点**,本地 `make check` 与这里跑同一条命令:
+      #   ① webadmin-variant-tests:4 个非缺省变体各跑一遍完整单测;
+      #   ② webadmin-check-features:产物级双侧判据（真跑 5 次构建;含源码图"模块页只能经
+      #      守卫 import() 进入"与逐模块哨兵）。
+      # 两步的存在性由 `scripts/verify-ci-scripts.mjs` 的「变体调度点」一节判（删任一步即红）。
+      - run: make webadmin-variant-tests
+      - run: make webadmin-check-features
       - run: make build-server
       - name: Deployment asset syntax checks
         # 部署脚本(deploy.sh / install-server.sh)已于 2026-09-10 移除,此处只校验

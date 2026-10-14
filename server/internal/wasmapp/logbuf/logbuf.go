@@ -12,8 +12,8 @@ package logbuf
 import (
 	"sync"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/util"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // Entry 是一条已接受的日志。

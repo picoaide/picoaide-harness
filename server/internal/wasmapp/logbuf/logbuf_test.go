@@ -9,7 +9,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
+	"github.com/picoaide/picoaide/internal/limits"
 )
 
 // ---- 2026-09-21 审计（temp/audit-w0-data/logbuf-respond）A-P2-1 / A-P2-2 的判据 ----

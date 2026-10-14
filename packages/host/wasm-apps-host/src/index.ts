@@ -39,6 +39,7 @@ import { parseAppDeepLink, parseForeignAppDeepLink } from './deep-link.ts'
 import type { AppSchemeRequestHandler, WasmAppsHostAdapter, WasmAppsWindowAdapter } from './electron-adapter.ts'
 import { createAppSchemeHandler } from './handler.ts'
 import { createHostRequestSurface, type SurfaceReply } from './host-request.ts'
+import { registerAppRoutes, type HostLocalRouteFence } from './app-routes.ts'
 import { hostCopy, hostLocaleFrom, type HostLocale } from './locale.ts'
 import { browserPartitionFor, serverPartitionHash } from './partition.ts'
 import { createScopeReset } from './scope-reset.ts'
@@ -55,12 +56,27 @@ import {
 export const name = 'pico-wasm-apps-host'
 
 /**
+ * 渠道功能模块 `apps` 的**端到端哨兵串**（契约见
+ * `docs/decisions/2026-10-13-channel-feature-modules.md`）。
+ *
+ * 为什么定义在这里、而不是只放在某个常量模块里：哨兵只有在**本模块真正被装配**的
+ * 那条路径上才有意义 —— 没被引用的字符串会被打包器/链接器一起丢掉，"产物里没有这个
+ * 串"于是既可能是"模块被裁掉了"、也可能只是"串被优化掉了"。所以它由 `apply()`
+ * 写进一行装配日志。
+ *
+ * **它只是副证**（不要把它当承重判据）：承重的是依赖图/文件清单（模块是否真的没被
+ * 打进去），而且哨兵判据必须**双侧** —— 开启变体里必须也存在，这个量具才算数。
+ * 串的命名规则唯一真源是 `channel-constants.ts` 的 `featureSentinel()`。
+ */
+export const WASM_APPS_FEATURE_SENTINEL = 'picoaide.feature.apps.v1'
+
+/**
  * 本插件需要的服务：员工会话（enterprise 提供）与本机 webServer（本机路由）。
  *
  * 适配器**不进 inject**：它是桌面壳 `provide` 进来的普通值，且允许缺席（纯 Node
  * 宿主/单测）—— 缺席时协议注册是 no-op 并记一条 warn，本机路由 fail-closed。
  */
-export const inject = ['picoSession', 'webServer']
+export const inject = ['picoSession', 'webServer', 'picoLocalRoutes']
 
 /** 桌面壳 `provide` 适配器用的服务名。 */
 export const WASM_APPS_HOST_ADAPTER_SERVICE = 'wasmAppsHostAdapter'
@@ -226,6 +242,9 @@ function parseJsonBody(body: Uint8Array): unknown {
  * @param config - scheme / 产品名 / 分区覆盖 / 出站预算。
  */
 export function apply(ctx: Context, config: Config = {}): void {
+  // 渠道功能模块 `apps` 的装配哨兵（见 WASM_APPS_FEATURE_SENTINEL 的说明）：
+  // 一行 info 日志，让"这个模块在这次装配里真的到位了"在端到端产物里有一条可查的痕迹。
+  ctx.logger?.info?.(`pico-wasm-apps-host: registered (${WASM_APPS_FEATURE_SENTINEL})`)
   const warn = (message: string): void => { ctx.logger?.warn?.(message) }
   const service = (): PicoSessionLike | undefined => ctx.get('picoSession') as PicoSessionLike | undefined
   const currentSession = (): ReturnType<typeof readAppSession> => readAppSession(service())
@@ -1001,6 +1020,24 @@ export function apply(ctx: Context, config: Config = {}): void {
     })
     return () => { surface.dispose() }
   }, 'pico wasm apps host: local request surface')
+
+  // ---- 应用中心（应用平台）的宿主面：`/api/pico/apps/wasm*` + 宿主工具面 ----
+  //
+  // 2026-10-13（P0-b）自 `@picoaide/dsh-enterprise` 的 auth-gate 搬入：那一整块
+  // （目录 / 预检 / 发布编排 / 生命周期代理 / `wasm_app_*` 工具）是**应用模块**的
+  // 内容，留在必需包里就等于"关掉应用中心它的代码照样进产物"。
+  //
+  // 围栏不在这里重实现：auth-gate 经服务 `picoLocalRoutes` 交出同一批闭包
+  // （回环 + 同源 + 持有性证明、审计只读、按请求解析的语言），本行只做结构探测。
+  ctx.effect(() => {
+    const fence = ctx.get('picoLocalRoutes') as HostLocalRouteFence | undefined
+    if (fence === undefined) {
+      // 组合被改坏时的**可见**失败：安静地少掉整块本机 API 正是本仓要消灭的形态。
+      ctx.logger?.error?.('pico-wasm-apps-host: picoLocalRoutes is absent — the /api/pico/apps/wasm* routes and the wasm_app_* tools were NOT registered')
+      return () => {}
+    }
+    return registerAppRoutes(ctx, fence)
+  }, 'pico wasm apps host: app store routes')
 }
 
 /** 应用源 scheme 前缀（导出给跨包对拍用例：渲染层拼接分享链接时必须用它）。 */

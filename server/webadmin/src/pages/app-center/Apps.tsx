@@ -353,6 +353,18 @@ function writeAccessFilterToUrl(value: string) {
   } catch { /* 见上 */ }
 }
 
+/**
+ * 应用中心 · 应用页的**变体哨兵串**（P3；命名 = `picoaide.feature.<模块>.v1`，模块名 `apps`
+ * 与 Go 侧 `-tags`、渠道配置 `features` 逐字一致）。
+ *
+ * **每个模块页各自带哨兵**（不是只在分区布局 `AppCenterLayout.tsx` 上写一份）：产物判据的
+ * 内容面按"这个文件会不会被别的 chunk 拉进来"判，而静态引用一个子页时（审计 M6 的形态）
+ * 被拉进来的正是**这个文件** —— 哨兵不在它身上，泄漏就没有任何观测面。落点必须是**真的
+ * 会渲染**的那条路径（这里作为根元素的 data 属性渲染出去）；双侧判据与两条纪律见
+ * `pages/CapabilityCenter.tsx` 的同名常量，产物级断言在 `scripts/check-feature-chunks.mjs`。
+ */
+export const FEATURE_SENTINEL = 'picoaide.feature.apps.v1'
+
 export default function Apps() {
   const [apps, setApps] = useState<WasmApp[]>([])
   const [reviewRequired, setReviewRequired] = useState(false)
@@ -894,7 +906,7 @@ export default function Apps() {
   const currentVersionShown = pendingLoaded ? pendingCurrent : (detail?.current_version ?? '')
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4" data-feature-sentinel={FEATURE_SENTINEL}>
       <PageHeader
         title="应用"
         desc="员工自建的 WASM 应用:查看访问级别与运行状态,并做上下架、冻结、归属转移、版本审核等平台级处置"

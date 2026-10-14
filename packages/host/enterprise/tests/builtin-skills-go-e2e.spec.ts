@@ -20,8 +20,9 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as tar from 'tar'
 import { afterAll, beforeAll, expect, it, vi } from 'vitest'
-import { apply, type Config } from '../src/auth-gate.ts'
-import { resolveSkillsDir } from '../src/skill-install.ts'
+import { type Config } from '../src/auth-gate.ts'
+import { applyFullComposition as apply } from './helpers/apply-full-composition.ts'
+import { resolveSkillsDir } from '../../capability-center/src/host/skill-install.ts'
 import type { Session } from '../src/server-connector/config.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -74,6 +75,7 @@ function skillsRoute(): (req: IncomingMessage, res: ServerResponse) => Promise<v
   const routes: Route[] = []
   const ctx = {
     effect: (fn: () => unknown) => { fn() },
+    provide: (name: string, value: unknown) => { (ctx as unknown as Record<string, unknown>)[`__svc_${name}`] = value },
     get: (name: string) => (name === 'connection'
       ? { requestRejection: (r: { headers: Record<string, unknown> }) => (r.headers['cookie'] === undefined ? 401 as const : undefined) }
       : undefined),
@@ -121,7 +123,7 @@ beforeAll(async () => {
     GOMODCACHE: process.env.GOMODCACHE ?? join(work, 'gomodcache'),
     GOPATH: process.env.GOPATH ?? join(work, 'gopath'),
   }
-  const log = execFileSync('go', ['test', './internal/wasmapp/skillseed/', '-run', 'TestExportArchiveForE2E', '-count=1', '-v'], {
+  const log = execFileSync('go', ['test', './internal/skillseed/', '-run', 'TestExportArchiveForE2E', '-count=1', '-v'], {
     cwd: SERVER_DIR, env, encoding: 'utf8',
   })
   const match = /sha256=([0-9a-f]{64})/u.exec(log)
@@ -149,6 +151,10 @@ it.skipIf(!enabled)('服务端（Go）打的包 → 真安装器 → <dshHome>/s
   expect(entries).toContain('SKILL.md')
   expect(entries).toContain('references/publishing.md')
   expect(entries).toContain('examples/go/main.go')
+  // 构建期由中性源**注入**技能目录的文件也必须在包里（2026-10-13 打包器解耦）：它不在
+  // `server/skills/` 源树上，只由 `server/Dockerfile` 注入 —— 出口若打的是源树，员工装到的
+  // 技能就缺这个文件，而技能文档仍按这个相对路径引用它。
+  expect(entries).toContain('scripts/pack-assets.mjs')
   expect(entries.every(p => !p.startsWith('/') && !p.split('/').includes('..'))).toBe(true)
 
   vi.stubGlobal('fetch', vi.fn(async (url: string | URL) => {

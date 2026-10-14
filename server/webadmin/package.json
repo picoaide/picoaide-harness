@@ -9,6 +9,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "check:features": "node scripts/check-feature-chunks.mjs",
+    "check:variant-tests": "node scripts/check-feature-variants.mjs",
     "postbuild": "node -e \"require('fs').writeFileSync('dist/.gitkeep','')\""
   },
   "dependencies": {

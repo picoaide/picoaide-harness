@@ -25,7 +25,8 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '
 
 const ROWS_GO = 'server/internal/wasmapp/api/rows.go'
 const PANEL_TSX = 'packages/client/wasm-apps/src/client/DataBrowserPanel.tsx'
-const TOOLS_TS = 'packages/host/enterprise/src/wasm-app-tools.ts'
+// 2026-10-13（P0-b）：`wasm_app_*` 工具面随 host 面搬到 `packages/host/wasm-apps-host/src/`。
+const TOOLS_TS = 'packages/host/wasm-apps-host/src/wasm-app-tools.ts'
 
 /** 从 Go 源码里读一个 `name = <int>` 形式的常量；读不到即抛（不静默回落）。 */
 function goIntConst(source: string, name: string): number {

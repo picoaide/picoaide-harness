@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isAppId, isVersion, precheckSkillPackage, PrecheckCode } from '../src/manifest-precheck.ts'
+import { isAppId, isVersion, precheckSkillPackage, PrecheckCode } from '../../capability-center/src/host/manifest-precheck.ts'
 
 const BODY = '本技能用于单元测试:正文需要足够长才能通过空壳校验,因此这里补充两句完整的说明文字,确保长度稳稳超过下限要求。'
 

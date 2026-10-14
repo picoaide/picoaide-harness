@@ -13,8 +13,8 @@ import {
   packPreset,
   uninstallPreset,
   validatePresetId,
-} from '../src/agent-preset-install.ts'
-import { ArchiveInstallRefusal, readProvenance } from '../src/skill-install.ts'
+} from '../../capability-center/src/host/agent-preset-install.ts'
+import { ArchiveInstallRefusal, readProvenance } from '../../capability-center/src/host/skill-install.ts'
 
 /** R19A-S2-04：来源判据两侧（标记/当前会话）都要有地址才算"同一台服务端"。 */
 const PRESET_SERVER = 'https://harness.example'

@@ -43,7 +43,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
+	"github.com/picoaide/picoaide/internal/limits"
 )
 
 // authorDocLimitAnchors 是「作者文档里点了名的某个上限」→「limits 表的键」的登记表。
@@ -75,7 +75,7 @@ func TestRowsPageMaxIsBoundToLimitsTruthSource(t *testing.T) {
 	if rowsMaxLimit != limits.RowsPageMax {
 		t.Errorf("rows.go 的 rowsMaxLimit = %d，而 limits.RowsPageMax = %d —— "+
 			"这个上限的真源是 limits 表（会进生成物 references/limits.md），两处必须同值。\n"+
-			"  改上限的正确顺序：①改 limits.go 的 RowsPageMax；②跑 `go generate ./internal/wasmapp/limits`；"+
+			"  改上限的正确顺序：①改 limits.go 的 RowsPageMax；②跑 `go generate ./internal/limits`；"+
 			"③同步 rows.go 与作者文档（本条与 TestAuthorDocLimitsAnchorsMatchTable 会逐条判红）。",
 			rowsMaxLimit, limits.RowsPageMax)
 	}

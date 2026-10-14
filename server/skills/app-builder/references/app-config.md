@@ -1,6 +1,6 @@
 # 字段规格（应用配置文件 + 发布载荷）
 
-本文件由 `go generate ./internal/wasmapp/limits` 生成，不要手改；单一真源是 `server/internal/wasmapp/appcfg/appcfgspec.go`。
+本文件由 `go generate ./internal/limits` 生成，不要手改；单一真源是 `server/internal/wasmapp/appcfg/appcfgspec.go`。
 
 上限数字与单位不在本文件里重复：一律见 `references/limits.md`（同一生成器产出）。
 改字段 = 改平台的 `appcfgspec.go` 并重新生成，**不要手改本文件**。

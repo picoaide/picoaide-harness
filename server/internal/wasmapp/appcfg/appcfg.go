@@ -33,9 +33,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/abi"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // 顶层字段名（§4.2 新 schema 的字段集合是**封闭**的：多一个即拒，见 Parse 的未知字段检查）。

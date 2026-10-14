@@ -325,6 +325,27 @@ function dshHomePath(...segments) {
 	return join(resolveDshHome(), ...segments);
 }
 /**
+* 技能库根（`<数据根>/skills`）——**唯一实现**。
+*
+* 为什么它住在数据根叶子里，而不是技能安装器里（2026-10-13，P0-b）：这个路径的
+* 消费方横跨**两个可选模块** —— 技能模块的安装/卸载落点，与应用模块的
+* `wasm_app_*` 工具（"内置作者手册装了没有"必须看磁盘事实，
+* `packages/host/wasm-apps-host/src/builtin-skills.ts`）。判定若留在技能包里，
+* 应用包就得声明"应用 → 技能"的依赖（于是关掉技能就发布不了应用），或者各自
+* 复制一份路径拼接（第二真源，本仓明确反对）。
+*
+* 第三个理由更根本：`<数据根>/skills` 本来就是**基础**组合里
+* `@deepseek-ai/dsh-skill-filesystem` 行的扫描根（桌面 profile 的
+* `pico-skill-filesystem` 行，见 `enterprise/cordis.patch.yml` 的
+* "Local skill discovery" 段）—— 它是数据根布局的一部分，不是某个可选模块的
+* 私有知识。
+* @param env - environment used to resolve the data root (test seam).
+* @returns 技能库根的绝对路径。
+*/
+function resolveSkillsDir(env = process.env) {
+	return join(dshHomeSafe({ env }), "skills");
+}
+/**
 * Is `cwd` a filesystem root or a system directory (P2-34)? A packaged app
 * launched with such a working directory (desktop-entry `Path=`, a Windows
 * shortcut with a wrong "start in", a service manager) would create project
@@ -348,6 +369,6 @@ function dshHome() {
 	return resolveDshHome();
 }
 //#endregion
-export { DEFAULT_DSH_HOME_DISPLAY, DSH_HOME_ENV, OFFICIAL_CHANNEL_ID, PRODUCT_DSH_HOME_DIR, applyInstallDshHome, channelDshHomeDir, dshHome, dshHomePath, dshHomeSafe, expandHomePath, isSafeDshHome, isSafeDshHomeDirName, isSystemWorkingDirectory, resolveDshHome };
+export { DEFAULT_DSH_HOME_DISPLAY, DSH_HOME_ENV, OFFICIAL_CHANNEL_ID, PRODUCT_DSH_HOME_DIR, applyInstallDshHome, channelDshHomeDir, dshHome, dshHomePath, dshHomeSafe, expandHomePath, isSafeDshHome, isSafeDshHomeDirName, isSystemWorkingDirectory, resolveDshHome, resolveSkillsDir };
 
 //# sourceMappingURL=index.js.map

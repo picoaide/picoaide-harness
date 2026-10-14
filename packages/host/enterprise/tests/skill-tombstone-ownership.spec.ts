@@ -38,13 +38,14 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // @ts-expect-error vendored plain JS (no types)
 import { BUILTIN_SKILLS, syncBuiltinSkills } from '../../../vendor/memory-evolve/lib/coi/skills-sync.js'
-import { apply, type Config } from '../src/auth-gate.ts'
-import { SKILL_REMOVED_DIR } from '../src/skill-install.ts'
+import { type Config } from '../src/auth-gate.ts'
+import { applyFullComposition as apply } from './helpers/apply-full-composition.ts'
+import { SKILL_REMOVED_DIR } from '../../capability-center/src/host/skill-install.ts'
 import {
   localRemoveEndpoint,
   planCardAction,
   uninstallRequestUrl,
-} from '../src/client/CapabilityCenterPanel.tsx'
+} from '../../capability-center/src/client/CapabilityCenterPanel.tsx'
 import type { Session } from '../src/server-connector/config.ts'
 import { isolateRuntimeSkillRoots } from './helpers/runtime-skill-roots.ts'
 
@@ -148,6 +149,7 @@ function harness(): { call: (method: string, url: string) => Promise<{ code: num
   const routes: Route[] = []
   const ctx = {
     effect: (fn: () => unknown) => { fn() },
+    provide: (name: string, value: unknown) => { (ctx as unknown as Record<string, unknown>)[`__svc_${name}`] = value },
     get: (name: string) => (name === 'connection'
       ? { requestRejection: (r: { headers: Record<string, unknown> }) => (r.headers['cookie'] === undefined ? (401 as const) : undefined) }
       : undefined),
@@ -271,7 +273,7 @@ describe('C2-1 面板接线：归属证明不了时把 `ownership=unknown` 拼�
  * `uninstallRequestUrl` 自己的用例照样全绿（实测过）。
  */
 describe('C2-1 接线判据：卸载请求真的走 uninstallRequestUrl', () => {
-  const source = readFileSync(fileURLToPath(new URL('../src/client/CapabilityCenterPanel.tsx', import.meta.url)), 'utf8')
+  const source = readFileSync(fileURLToPath(new URL('../../capability-center/src/client/CapabilityCenterPanel.tsx', import.meta.url)), 'utf8')
 
   it('卸载那一发用 uninstallRequestUrl 拼 URL（旧写法不得留在卸载路径上）', () => {
     expect(source).toContain("fetch(uninstallRequestUrl(item, { overwrite: true }), { method: 'POST' })")

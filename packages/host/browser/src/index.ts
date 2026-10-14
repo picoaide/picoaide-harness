@@ -25,10 +25,13 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { createRequire } from 'node:module'
 import { readdir } from 'node:fs/promises'
-import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type {} from '@deepseek-ai/dsh-host-webserver'
+// 零依赖叶子包：数据根（`dshHomePath`）的唯一源。**不是**连接器包 —— 连接器包的
+// `user-scope.ts` 只是把它 re-export 出去，所以这里直连不改变任何解析结果。
+import { dshHomePath } from '@picoaide/dsh-host-home'
+import { connectorStoreContractViolation, connectorStoreCtorOf, type ConnectorStoreLike } from './connectors-contract.ts'
 import { credentialSiteOrigin } from './credential-site.ts'
 import { browserError, type BrowserError } from './errors.ts'
 import { browserPartitionFor, createRealElectronAdapter } from './electron-adapter.ts'
@@ -208,13 +211,20 @@ async function assertScopeListable(dir: string): Promise<void> {
  * 构造 `browser_fill_credentials` 用的凭据解析器（导出以便单测：站点绑定基准
  * 必须与工具侧闸门同源，2026-09-15 审计 BUG-03）。
  *
- * `@picoaide/dsh-connectors` 用 `createRequire` 惰性解析：本插件在没有连接器包
- * 的宿主里也必须能加载（此时返回 undefined，工具侧对 fill_credentials 一律
- * fail-closed 拒绝）。
+ * `@picoaide/dsh-connectors` 用 `createRequire` 惰性解析，并且**不 import 它的
+ * 类型**：连接器模块是可选的（关掉它之后本插件仍要能编译、能启动），需求侧的
+ * 契约声明在 `./connectors-contract.ts`。包不在时返回 `undefined`，工具侧对
+ * fill_credentials 一律 fail-closed 拒绝。
+ *
+ * 模块在、但形状不符合契约（改造连接器包时漏改了一处）走**另一条**路径：告警
+ * 一次 + 同样返回 `undefined`（详见 `./connectors-contract.ts` 的文件头 —— 这是
+ * 窄接口换掉编译期检查之后接上来的那条判据）。
  * @param options.currentUser - 当前登录用户名（scoping 凭据库）。
  * @param options.currentServer - 当前会话的服务端地址（凭据库作用域的第二半；
- *   与连接器插件同一份解析，见 `@picoaide/dsh-connectors/user-scope`）。
+ *   与连接器插件同一份解析，见 `./connectors-contract.ts` 的 `ConnectorStoreOptionsLike`）。
  * @param options.credentialSites - 部署显式声明的连接器站点地址。
+ * @param options.onContractViolation - 连接器模块**在**、但形状不符契约时的告警出口
+ *   （装配方注入 `ctx.logger.warn`）。"模块不在"是正常状态，不走这里。
  */
 export function createCredentialResolver(options: {
   currentUser: () => string | null
@@ -233,18 +243,39 @@ export function createCredentialResolver(options: {
    * （CHN-3）—— 缺省值只是官方构建的兜底。
    */
   appOriginScheme?: string
+  /**
+   * 形状漂移的告警出口（可选：单测不必注入）。见 {@link createCredentialResolver}。
+   */
+  onContractViolation?: (message: string) => void
 }): CredentialResolver | undefined {
+  // 只有**模块真的在**（require 成功）才谈得上"形状不符"：不在 = 连接器模块被
+  // 关掉，是文档化的正常状态，不该每次启动都刷一条告警。
+  let loadedModule: unknown
   try {
     const require = createRequire(import.meta.url)
-    const { ConnectorStore } = require('@picoaide/dsh-connectors/store') as typeof import('@picoaide/dsh-connectors/store')
+    loadedModule = require('@picoaide/dsh-connectors/store')
+  } catch {
+    return undefined
+  }
+  const ConnectorStore = connectorStoreCtorOf(loadedModule)
+  if (ConnectorStore === undefined) {
+    options.onContractViolation?.(
+      `pico-browser: the installed connector package does not match the credential contract `
+      + `(${connectorStoreContractViolation(loadedModule) ?? 'unknown shape'}) — browser_fill_credentials and `
+      + `browser_credentials_list stay refused until the connector package and this plugin agree again`,
+    )
+    return undefined
+  }
+
+  try {
     /** 与连接器插件逐字相同的作用域解析（username + 服务端地址）。 */
-    const scopeStore = (): InstanceType<typeof ConnectorStore> =>
+    const scopeStore = (): ConnectorStoreLike =>
       new ConnectorStore({ username: options.currentUser(), serverURL: options.currentServer?.() ?? null })
     /**
      * 读一份凭据：ENOENT → `null`（**真的没有**）；其余读失败 → 带分类的工具面错误
      * （2026-09-27 FIX-34：这是三处解析面共用的**唯一**读点，也是唯一的收口点）。
      */
-    const readCredential = async (connectorId: string): Promise<Awaited<ReturnType<InstanceType<typeof ConnectorStore>['readCredential']>>> => {
+    const readCredential = async (connectorId: string): Promise<Awaited<ReturnType<ConnectorStoreLike['readCredential']>>> => {
       const store = scopeStore()
       try {
         return await store.readCredential(connectorId)
@@ -524,6 +555,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     currentUser,
     currentServer: currentServerURL,
     ...(config.credentialSites === undefined ? {} : { credentialSites: config.credentialSites }),
+    // 形状漂移的告警出口：连接器模块在、但不符合 `./connectors-contract.ts` 的契约。
+    onContractViolation: (message: string) => { ctx.logger?.warn?.(message) },
   })
 
   const userDataDir = resolveUserDataDir()
@@ -531,17 +564,16 @@ export function apply(ctx: Context, config: Config = {}): void {
   // P2-38b: with no Electron userData dir (headless loader smoke, tests) the
   // store must NOT fall back to a cwd-relative `<cwd>/.browser-store` — that
   // silently writes untracked files into whatever directory the process
-  // started in. Use the product DSH home instead (same source as downloadDir),
-  // resolved through the shared connectors user-scope module.
-  const fallbackDataRoot = (): string => {
-    try {
-      const require = createRequire(import.meta.url)
-      const { dshHomePath } = require('@picoaide/dsh-connectors/user-scope') as typeof import('@picoaide/dsh-connectors/user-scope')
-      return dshHomePath()
-    } catch {
-      return join(homedir(), '.picoaide-harness')
-    }
-  }
+  // started in. Use the product DSH home instead (same source as downloadDir).
+  //
+  // 2026-10-13（去连接器耦合）：这里原先 `require('@picoaide/dsh-connectors/user-scope')`
+  // 取 `dshHomePath`（该模块只是把它从叶子包 re-export 出来）。连接器模块关掉之后
+  // 那个 require 必失败，于是落到下面那句**硬编码** `~/.picoaide-harness` —— 渠道
+  // 构建的数据根不是它（渠道包 `desktop.home_dir`），浏览器存储会写进另一个目录。
+  // 改为直接静态 import 零依赖叶子包 `@picoaide/dsh-host-home`：**同一份实现**
+  // （`user-scope.ts` 的 re-export 就是把这一份交出去的），数据根唯一源不变，
+  // 连接器在不在都解析到同一个目录 ⇒ 硬编码兜底连同它的渠道盲区一起删掉。
+  const fallbackDataRoot = (): string => dshHomePath()
   const storeDirFor = (username: string): string => join(
     userDataDir !== undefined ? join(userDataDir, 'browser-store') : join(fallbackDataRoot(), 'browser-store'),
     encodePartitionSegment(username),

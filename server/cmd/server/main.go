@@ -18,31 +18,24 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/picoaide/picoaide/internal/agentshare"
 	"github.com/picoaide/picoaide/internal/appstore"
 	"github.com/picoaide/picoaide/internal/auditchain"
 	"github.com/picoaide/picoaide/internal/auditretention"
 	"github.com/picoaide/picoaide/internal/bootstrap"
-	"github.com/picoaide/picoaide/internal/capabilities"
 	"github.com/picoaide/picoaide/internal/channel"
 	"github.com/picoaide/picoaide/internal/clientrelease"
-	"github.com/picoaide/picoaide/internal/connectors"
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/llmgateway"
-	"github.com/picoaide/picoaide/internal/marketplace"
 	"github.com/picoaide/picoaide/internal/portal"
 	"github.com/picoaide/picoaide/internal/reports"
 	"github.com/picoaide/picoaide/internal/router"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
-	"github.com/picoaide/picoaide/internal/sharedskills"
 	"github.com/picoaide/picoaide/internal/telemetry"
 	"github.com/picoaide/picoaide/internal/tokenretention"
 	"github.com/picoaide/picoaide/internal/updatecheck"
 	"github.com/picoaide/picoaide/internal/usageretention"
 	"github.com/picoaide/picoaide/internal/util"
-	wasmapi "github.com/picoaide/picoaide/internal/wasmapp/api"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
-	"github.com/picoaide/picoaide/internal/wasmapp/skillseed"
 	"github.com/picoaide/picoaide/webadmin"
 )
 
@@ -234,27 +227,16 @@ func main() {
 	// `ai.chat` 已按总纲 §21 彻底删除 ⇒ 平台上不再有在手令牌，回调没有接收方。
 	// （`serverauth.SessionKey` 与 §8.2 的显式传参仍在，见 api/proof.go 的注释。）
 
-	// 内置技能（随镜像发布，见 internal/wasmapp/skillseed）：镜像内
-	// /opt/picoaide/skills（可用 PICOAI_SKILL_SEED_DIR 覆盖），服务端打包后由
-	// GET /api/client/v2/skills/builtin[/:name/archive] 下发，客户端在能力中心
-	// **按需安装**（不自动装）。这里启动即加载一次：清单要在第一个请求之前就绪，
-	// 且"资产缺失/坏掉"必须出现在启动日志里 —— 否则它只表现为"客户端里没有这条
-	// 技能"，零报错（与 clientrelease 的负载清单同一个教训）。
-	skillCatalog := skillseed.New(skillseed.Dir)
-	if lerr := skillCatalog.Load(); lerr != nil {
-		log.Printf("内置技能目录读取失败（%v），内置技能清单为空", lerr)
-	} else {
-		for _, problem := range skillCatalog.Problems() {
-			log.Printf("内置技能被跳过 —— %s", problem)
-		}
-		log.Printf("内置技能：%d 个（%s）", len(skillCatalog.Entries()), skillCatalog.Dir())
-	}
+	// 内置技能（随镜像发布，见 internal/skillseed）：加载与日志整段在
+	// `optional_skills_on.go`（`//go:build skills`）里 —— 关闭 skills 时
+	// `internal/skillseed` 包树随之从依赖图里消失，这里只留一个装配接缝。
+	skillSeedHandlers := buildSkillSeedHandlers()
 
 	registerProductionRoutes(r, productionDeps{
 		DB:        db,
 		Auth:      auth.Handlers(),
 		Admin:     adminAPI.Handlers(),
-		SkillSeed: skillseed.NewHandlers(skillCatalog),
+		SkillSeed: skillSeedHandlers,
 		Wasm:      wasmPlat.API,
 		Ready:     wasmPlat.Checker.Handler(),
 		DataDir:   *dataDir,
@@ -464,42 +446,6 @@ func resolveStartupChannel() (string, error) {
 		return "", err
 	}
 	return channelID, nil
-}
-
-// validateAppOriginScheme 校验本部署的**应用 origin scheme**（契约 §8.3/§10）。
-//
-// 为什么放在启动期而不是"用时回落"：这个 scheme 决定"服务端认哪个自身源"，
-// 客户端注册的是渠道包里配的那一个。两端不一致的后果不是"某个功能坏了"，而是
-// **所有非幂等应用请求 403**（跨源写判据永远不成立），而错误现象与配置毫无关系
-// —— 排障会先去查应用代码。R1-OPS-4/CHN-6 的结论就是"字段缺失/非法必须 fail-loud"；
-// 唯一的中性 fallback 留给"镜像没带渠道配置"（本地开发），由 channel.AppOriginScheme
-// 自己处理（目录缺失 ⇒ 默认值）。
-func validateAppOriginScheme() error {
-	scheme, err := channel.AppOriginScheme()
-	if err != nil {
-		return fmt.Errorf("应用 origin scheme 不可用（渠道配置问题）：%w；"+
-			"请在镜像内的 channel.json 里设置 desktop.app_origin_scheme"+
-			"（须匹配 ^[a-z][a-z0-9+.-]{1,31}$、不得是保留协议、不得与 desktop.deep_link_scheme 同值）",
-			err)
-	}
-	log.Printf("app origin scheme resolved: %s", scheme)
-	return nil
-}
-
-// appOriginScheme 返回本部署的应用 origin scheme（装配期读取）。
-//
-// 为什么允许在这里吞掉错误：`resolveStartupChannel` → `validateAppOriginScheme`
-// 已经在**启动期**对同一个函数做过 fail-loud 校验，能走到装配说明它已经通过。
-// 兜底默认值只覆盖"渠道目录缺失"（本地开发构建），而那种情况下 AppOriginScheme
-// 本身也不报错 ⇒ 这里的 fallback 事实上不可达，写它是为了不给调用方留一个
-// "必须处理 error"的假分支。
-func appOriginScheme() string {
-	scheme, err := channel.AppOriginScheme()
-	if err != nil {
-		log.Printf("app origin scheme: 读取失败（启动期已校验过，不应发生）：%v", err)
-		return channel.DefaultAppOriginScheme
-	}
-	return scheme
 }
 
 // validateDeepLinkScheme 校验品牌渠道必须自带合法的客户端深链 scheme。
@@ -733,11 +679,16 @@ type productionDeps struct {
 	//
 	// （`WasmSession *session.Manager` 已随 W4 删除：员工浏览器会话/换票面
 	// `/login`、`/logout`、`/app-ticket` 不再存在，见 router.Register 的注释。）
-	Wasm *wasmapi.Handlers
+	//
+	// ⚠️ 类型是 `router.WasmAPI`（`apps` 打开时 = `wasmapi.Handlers` 的**别名**）：
+	// 关闭 apps 时它是空类型，`setupWasmPlatform` 的替身给出的 API 恒为 nil，
+	// 而 router 侧的注册函数在关闭态是编译期 no-op（见 optional_apps_off.go）。
+	Wasm *router.WasmAPI
 	// Ready 是 /readyz 探针（生产 = wasmPlat.Checker.Handler()）。
 	Ready http.Handler
 	// SkillSeed 是内置技能下发面（生产随镜像发布：/opt/picoaide/skills）。
-	SkillSeed *skillseed.Handlers
+	// 类型是 `router.SkillSeedAPI`（`skills` 打开时 = `skillseed.Handlers` 的别名）。
+	SkillSeed *router.SkillSeedAPI
 	// DataDir 是应用数据根（商城/共享内容的磁盘缓存挂在它下面）。
 	DataDir string
 	// Version 是服务端版本（--version 与客户端安装包清单同一来源）。
@@ -764,7 +715,7 @@ func registerProductionRoutes(r *gin.Engine, d productionDeps) {
 	// 工程化重构(2026-09): 全部 API 路由集中在 internal/router 包声明 ——
 	// /api/server(管理面) + /api/client/v2(员工面),旧命名空间(/api、/v1、
 	// /v2/api、/v2/v1)迁移后不再注册。
-	router.Register(r, router.Deps{
+	deps := router.Deps{
 		DB:        d.DB,
 		Auth:      d.Auth,
 		Admin:     d.Admin,
@@ -780,17 +731,17 @@ func registerProductionRoutes(r *gin.Engine, d productionDeps) {
 		// 门户页配置:只管"是否公开 / 下载地址覆盖 / 说明文字"。
 		// 站点名与欢迎语来自渠道配置(上一行),因此没有在线编辑名称的入口。
 		PortalAdmin: portal.NewAdminHandlers(d.DB),
-		Market:      marketplace.NewHandlers(d.DB, d.DataDir+"/skills-cache"),
-		Agentshare:  agentshare.NewHandlers(d.DB, d.DataDir+"/agent-presets-cache"),
-		Shared:      sharedskills.NewHandlers(d.DB, d.DataDir+"/shared-skills-cache"),
-		Capability:  capabilities.NewHandlers(d.DB, d.DataDir+"/skills-cache"),
-		Connector:   connectors.NewHandlers(d.DB),
 		Telemetry:   telemetry.NewHandlers(d.DB),
 		Gateway:     llmgateway.NewHandlers(d.DB),
 		Reports:     reports.NewHandlers(d.DB),
 		// WASM 应用平台操作面（§8）。
 		Wasm: d.Wasm,
-	})
+	}
+	// 三个可选模块的 handler 各自在 build-tag 文件里接线（关闭时是编译期 no-op）——
+	// 可选模块的包**不在本文件的 import 面内**，否则关掉它们也照样进依赖图。
+	applySkillsDeps(&deps, d)
+	applyConnectorDeps(&deps, d)
+	router.Register(r, deps)
 	// 固定探针(不属于两命名空间)。
 	r.GET("/healthz", bootstrap.NewHandlers(d.DB).Health)
 	// §4.9 运维面：磁盘余量 / 编译队列 / 执行队列 / 编译缓存水位。

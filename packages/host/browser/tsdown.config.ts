@@ -29,7 +29,13 @@ export default defineConfig([
       '@deepseek-ai/dsh-system-prompt',
       '@deepseek-ai/dsh-tools',
       '@deepseek-ai/dsh-user-approval',
+      // 可选依赖：`src/index.ts` 用 `createRequire` 惰性解析，包不在时不加载
+      // （契约与 fail-closed 路径见 `src/connectors-contract.ts`）。留 external
+      // 是**必须**的 —— 内联会让"连接器模块被关掉"这件事在构建期就变成硬失败。
       '@picoaide/dsh-connectors/store',
+      // 数据根叶子包（静态 import）。留 external 让运行期解析到**同一份**实现
+      // （与连接器/桌面共用），而不是在浏览器产物里内联第二份。
+      '@picoaide/dsh-host-home',
       'electron',
       'node:crypto',
       'node:fs',

@@ -27,6 +27,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
+  variantPrunedDirs,
   declaredExportArtifacts,
   isUpToDate,
   missingDeclaredArtifacts,
@@ -348,7 +349,11 @@ export default defineConfig({
 
 describe('真实工作区的声明面对拍（静态读取，不扫 lib/）', () => {
   it('每个 workspace 包都能读出声明产物（否则该包会静默退回纯 mtime 判定）', () => {
-    expect(WORKSPACE_PACKAGES.length).toBeGreaterThanOrEqual(13)
+    // 2026-10-13：13 → 14（能力中心的客户端面搬进 `@picoaide/dsh-capability-center`）。
+    // 同日 P0-b：14 → 15（该包 host 面搬入并把包移到 `packages/host/`，另加宿主侧
+    // 网关客户端叶子包 `@picoaide/dsh-gateway-client`）。
+    // 棘轮只允许上调：这条下限的用途是"表被整段掏空 / 删行"时立刻红，贴着真值最有效。
+    expect(WORKSPACE_PACKAGES.length).toBeGreaterThanOrEqual(15)
     for (const pkg of WORKSPACE_PACKAGES) {
       const packageRoot = join(repoRoot, pkg.dir)
       const declared = [...declaredExportArtifacts(packageRoot), ...tsdownEntryKeys(packageRoot)]
@@ -427,5 +432,53 @@ describe('真实工作区的声明面对拍（静态读取，不扫 lib/）', ()
       .map(target => target.slice(2))
       .sort()
     expect([...new Set(expected)]).toEqual(declared)
+  })
+})
+
+/**
+ * 功能模块变体下的预构建裁剪（2026-10-13，P2）。
+ *
+ * 三个 `dist:*` 入口默认先跑 `prebuildWorkspaceDeps()`，它会去构建**被渠道关掉的
+ * 模块**（白付一次 tsdown）。但"能跳"有一个硬前提：**没有任何保留包把它当构建
+ * 输入**。本仓的实例就在同一张表里 —— `browser` 的 `deps` 含
+ * `packages/host/connectors`（tsc 与运行期惰性 require 都读它的 `lib/`）。
+ * 所以这里同时钉住两侧：能跳的跳、不能跳的**必须照建**。
+ */
+describe('变体裁剪：被关闭的模块里哪些可以安全跳过预构建', () => {
+  /** 三个键的开关表（`closed` 里的模块为 false）。 */
+  function switches(closed: readonly string[]): Record<string, boolean> {
+    return Object.fromEntries(['skills', 'apps', 'connectors'].map(name => [name, !closed.includes(name)]))
+  }
+
+  it('没传 features（= 不知道本轮变体）时一个包都不跳', () => {
+    // 2026-10-14 R2 审计 S2：跳过判定的输入必须是**本轮** features。旧实现读磁盘上的
+    // `temp/channel-variant.json`（后一步才写）⇒ 读到上一轮残留、静默跳过全开构建
+    // 必需的包。现在没传就一个都不跳（多建一个包只是慢，跳过是错）。
+    expect([...variantPrunedDirs(undefined).keys()]).toEqual([])
+    expect([...variantPrunedDirs(switches([])).keys()]).toEqual([])
+  })
+
+  it('关闭 skills：能力中心可以跳（没有保留包把它当构建输入）', () => {
+    const pruned = variantPrunedDirs(switches(['skills']))
+    expect([...pruned.keys()]).toEqual(['packages/host/capability-center'])
+    // 变体标识与 `channelFeaturesVariant()` 同源（日志里印的就是这一份）。
+    expect(pruned.get('packages/host/capability-center')).toBe('apps,connectors')
+  })
+
+  it('关闭 connectors：**不跳** —— browser 的构建输入里有它（跳了保留包会构建失败）', () => {
+    expect([...variantPrunedDirs(switches(['connectors'])).keys()]).toEqual([])
+  })
+
+  it('两个都关：只有能力中心被跳，connectors 仍照建', () => {
+    expect([...variantPrunedDirs(switches(['skills', 'connectors'])).keys()])
+      .toEqual(['packages/host/capability-center'])
+  })
+
+  it('"不能跳"的理由是表里的真实边，不是硬编码豁免', () => {
+    // 从**真源**反推：connectors 之所以不能跳，是因为有保留包把它列进 deps。
+    const kept = WORKSPACE_PACKAGES.filter(pkg => pkg.dir !== 'packages/host/connectors')
+    expect(kept.some(pkg => (pkg.deps ?? []).includes('packages/host/connectors'))).toBe(true)
+    const keptCapability = WORKSPACE_PACKAGES.filter(pkg => pkg.dir !== 'packages/host/capability-center')
+    expect(keptCapability.some(pkg => (pkg.deps ?? []).includes('packages/host/capability-center'))).toBe(false)
   })
 })

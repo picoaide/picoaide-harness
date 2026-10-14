@@ -58,7 +58,7 @@
 cd server/demoapps/showcase
 export GOCACHE=/data/picoaide-harness/temp/showcase-gocache GOMODCACHE=/root/go/pkg/mod GOPROXY=off
 GOOS=wasip1 GOARCH=wasm go build -o /tmp/showcase.wasm .
-node ../../skills/app-builder/scripts/pack-assets.mjs --in /tmp/showcase.wasm --out /tmp/showcase-packed.wasm \
+node ../scripts/pack-assets.mjs --in /tmp/showcase.wasm --out /tmp/showcase-packed.wasm \
   web/index.html=index.html web/app.css=static/app.css web/app.js=static/app.js
 
 # 入口（走 wasm：先判名单再给页面）

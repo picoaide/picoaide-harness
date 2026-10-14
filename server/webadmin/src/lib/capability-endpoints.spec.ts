@@ -30,7 +30,7 @@
  * （组织行的 URL 前缀与所属 channel 不符，且 `/skills/<org 名>` 这类 URL 的动词/
  * 路径组合与组织端点对不上）。把 `org: () => null` 改成回落到市场端点 ⇒ 第 5 条必红。
  */
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { ADMIN_API } from './api-paths'
@@ -129,16 +129,107 @@ function requireMatch(routes: Route[], method: string, url: string, where: strin
 }
 
 // ---------------------------------------------------------------------------
-// 生产路由表：internal/router/router.go（逐级推导前缀，任何一环断链即抛错）
+// 生产路由表：`internal/router/` 下**全部含 `AdminRoute(` 声明的文件**
+// （逐级推导前缀，任何一环断链即抛错）
+//
+// **为什么不是一个文件**（2026-10-14 P1 第二片起）：可选模块（skills / apps /
+// connectors）的路由声明被搬进按 build tag 分片的 `optional_<module>_on.go`，
+// 关闭态由同名 `_off.go` 提供空实现。只读 `router.go` 会让模块面的管理面路由
+// **静默从对拍面消失**：实测（合并 p1b 之后、默认 features）本文件 5 条锚点红，
+// 报"生产路由表缺少锚点 PUT /api/server/admin/shared-skills/:name/enabled" ——
+// 那不是真源缺失，是**解析面缩水**。对拍口径 = 发布态（全开）声明集。
+//
+// 口径修订（2026-10-14 对抗审计 P3）：`optional_*_on.go` 里共 **87 条** `AdminRoute`
+// 声明，但本判据只覆盖 `authed` 组那 **69 条**；另 18 条在
+// `optional_apps_on.go` 的 `ag := r.Group(NamespaceServer+"/admin/wasm-apps", …)`
+// 组内，**本判据的 `authed` 面从不覆盖**（由 wasm 应用平台自己的对拍判据负责）。
+//
+// 两条加固（2026-10-14 对抗审计）：
+//   1. **先剥注释再匹配**：本判据用正则读源码，而注释里同样可能出现 `AdminRoute(`
+//      或 `NamespaceServer = "…"` —— 实测把一条真声明整行注释掉，未剥注释的解析器
+//      仍认为它存在（假绿通道）。`must()` 用的是同一个已剥注释的 `ROUTER`，一并免疫。
+//   2. **声明面棘轮按"谁真的在声明"而不是"文件名长什么样"**：任何非测试、非 `_off`
+//      的 `internal/router/**/*.go`（递归）里出现 `AdminRoute(` 就必须显式登记；
+//      否则改名（`skills_routes_on.go`）、换目录（`internal/router/wasm/routes.go`）、
+//      或塞进既有邻居文件都会静默掉出对拍面。
 // ---------------------------------------------------------------------------
 
-const ROUTER = readFileSync(ROUTER_GO, 'utf8')
+/**
+ * 剥掉 Go 注释后的"代码面"（块注释 + 整行 `//`）。
+ *
+ * 与 `src/pages/app-center/opens-contract-parity.spec.ts` 的 `stripComments()` 同口径。
+ * 行尾注释不在这里剥：那种形态由 {@link hasUncommentedMatch} 的见证断言兜住
+ * （`//` 一旦出现在匹配点之前就判为注释）。
+ */
+const codeOnly = (source: string): string =>
+  source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '')
+
+const ROUTER = codeOnly(readFileSync(ROUTER_GO, 'utf8'))
+
+const ROUTER_PKG_DIR = join(SERVER_DIR, 'internal', 'router')
+
+/**
+ * 登记的**路由声明文件**（相对 `internal/router/`，POSIX 分隔）。
+ * 新增任何一个含 `AdminRoute(` 声明的文件都必须进这张表 —— 见文件头加固 2。
+ */
+const REGISTERED_DECLARING_FILES: readonly string[] = [
+  'router.go',
+  'optional_skills_on.go',
+  'optional_apps_on.go',
+  'optional_connectors_on.go',
+]
+
+/** 真源里**实际含 `AdminRoute(` 声明**的文件（递归；排除 `_test.go` 与 `_off.go`）。 */
+const DECLARING_FILES: readonly string[] = (() => {
+  const discovered = (readdirSync(ROUTER_PKG_DIR, { recursive: true }) as string[])
+    .map((path) => path.split(/[\\/]/u).join('/'))
+    .filter((path) => path.endsWith('.go'))
+    .filter((path) => !path.endsWith('_test.go'))
+    .filter((path) => !/_off\.go$/u.test(path))
+    .filter((path) => /AdminRoute\(/u.test(codeOnly(readFileSync(join(ROUTER_PKG_DIR, path), 'utf8'))))
+    .sort()
+  const registered = [...REGISTERED_DECLARING_FILES].sort()
+  if (discovered.join('\u0000') !== registered.join('\u0000')) {
+    throw new Error(
+      `生产路由声明面与登记不一致：真源 ${JSON.stringify(discovered)} vs 登记 ${JSON.stringify(registered)}`
+        + '（任何文件里出现 `AdminRoute(` 声明都必须显式登记 —— 否则它的路由会静默掉出对拍面；'
+        + '改名、换目录、塞进既有邻居文件都在这条判据的抓取面内）',
+    )
+  }
+  return discovered
+})()
+
+/** 生产路由**声明集**：所有声明文件（已剥注释）的内容。 */
+const ROUTE_SOURCES: readonly string[] = DECLARING_FILES.map((file) =>
+  file === 'router.go' ? ROUTER : codeOnly(readFileSync(join(ROUTER_PKG_DIR, file), 'utf8')),
+)
+
+/**
+ * 见证断言：`index` 处**不是行尾注释**（同一行前面已经出现 `//`）。
+ *
+ * 为什么要它：{@link codeOnly} 只剥得掉**整行**注释与块注释，`x := 1 // AdminRoute(…)`
+ * 这种行尾形态仍会命中正则。这里宁可**抛错**也不静默接受（判据面不许多出幽灵路由）。
+ *
+ * 块注释不在这里判：`codeOnly` 已经把 `/* … *\/` 整段删掉，而**保留**下来还能看到的
+ * `/*` 只可能出现在字符串字面量里（例如路由模式 `"/admin/*"`）—— 再按 `/*` 找区间
+ * 会把这些字符串误判成注释（第一版就是这么误伤 `sg := srv.Group("/admin")` 的）。
+ */
+function assertUncommented(source: string, index: number | undefined, what: string): void {
+  if (index === undefined) {
+    throw new Error(`${what}：匹配没有位置信息 ⇒ 见证断言无法执行（判据面不可信）`)
+  }
+  const lineStart = source.lastIndexOf('\n', index - 1) + 1
+  if (source.slice(lineStart, index).includes('//')) {
+    throw new Error(`${what} 落在行尾注释里（解析面只能读代码，不能读注释）`)
+  }
+}
 
 function must(pattern: RegExp, what: string): string {
   const m = pattern.exec(ROUTER)
   if (m === null) {
     throw new Error(`router.go 里找不到「${what}」（推导链断了：对拍用例必须更新，不能静默放行）`)
   }
+  assertUncommented(ROUTER, m.index, `router.go 的「${what}」`)
   return m[1]!
 }
 
@@ -152,13 +243,16 @@ const ADMIN_GROUP_VAR = must(
   'authed := sg.Group("")（会话内管理面的组变量）',
 )
 
-/** 生产路由树里的管理面路由（`AdminRoute(authed, …)` 全部声明）。 */
+/** 生产路由树里的管理面路由（`AdminRoute(authed, …)` 全部声明，含可选模块分片）。 */
 const PROD_ROUTES: Route[] = (() => {
   const routes: Route[] = []
   const re = /AdminRoute\(\s*(\w+)\s*,\s*"([A-Z]+)"\s*,\s*"([^"]*)"/g
-  for (const m of ROUTER.matchAll(re)) {
-    if (m[1] !== ADMIN_GROUP_VAR) continue
-    routes.push({ method: m[2]!, path: ADMIN_BASE + m[3]! })
+  for (const source of ROUTE_SOURCES) {
+    for (const m of source.matchAll(re)) {
+      if (m[1] !== ADMIN_GROUP_VAR) continue
+      assertUncommented(source, m.index, `AdminRoute(${m[1]}, "${m[2]}", "${m[3]}")`)
+      routes.push({ method: m[2]!, path: ADMIN_BASE + m[3]! })
+    }
   }
   return routes
 })()
@@ -416,5 +510,63 @@ describe('跨端对拍 · 对话框基路径', () => {
       expect(r.method).toBe('PUT')
       requireMatch(PROD_ROUTES, 'PUT', r.url, `归属转移 ${kind}`)
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 判据的判据：解析面**只读代码、不读注释**（2026-10-14 对抗审计 P2-①）
+//
+// 现场：把一条真声明整行注释掉（Go 里照样可编译），未剥注释的解析器**仍认为它存在**，
+// 锚点照旧命中 ⇒ 假绿通道（当时靠 Go 侧 `TestAdminRouteMirrorIsSubsetOfProduction`
+// 兜住，可那个文件带 `//go:build skills && connectors`，任一模块关掉的组合下不编译）。
+// 下面用**合成源码**把新口径钉住：注释里的声明一律不进解析面，行尾注释形态直接抛错 ——
+// 否则将来"顺手简化"掉剥注释逻辑时是静默的。
+// ---------------------------------------------------------------------------
+
+describe('判据的判据 · 解析面只读代码不读注释', () => {
+  /** 与 PROD_ROUTES 同一条口径（剥注释 → 正则 → 见证断言）。 */
+  const extract = (source: string): string[] => {
+    const code = codeOnly(source)
+    const re = /AdminRoute\(\s*(\w+)\s*,\s*"([A-Z]+)"\s*,\s*"([^"]*)"/g
+    const out: string[] = []
+    for (const m of code.matchAll(re)) {
+      assertUncommented(code, m.index, `AdminRoute(${m[1]}, "${m[2]}", "${m[3]}")`)
+      out.push(`${m[2]} ${m[3]}`)
+    }
+    return out
+  }
+
+  it('整行注释掉的声明不进解析面，真声明照旧进', () => {
+    const source = [
+      'func register(authed *gin.RouterGroup, d Deps) {',
+      '\t// serverauth.AdminRoute(authed, "GET", "/ghost", perm, h.Ghost)',
+      '\tserverauth.AdminRoute(authed, "GET", "/real", perm, h.Real)',
+      '}',
+    ].join('\n')
+    expect(extract(source)).toEqual(['GET /real'])
+  })
+
+  it('块注释里的声明不进解析面', () => {
+    const source = '/*\nserverauth.AdminRoute(authed, "GET", "/ghost", perm, h.Ghost)\n*/\n'
+      + 'serverauth.AdminRoute(authed, "POST", "/real", perm, h.Real)\n'
+    expect(extract(source)).toEqual(['POST /real'])
+  })
+
+  it('行尾注释形态直接抛错（不静默接受幽灵路由）', () => {
+    const source = 'x := 1 // serverauth.AdminRoute(authed, "GET", "/ghost", perm, h.Ghost)\n'
+    expect(() => extract(source)).toThrowError(/行尾注释/u)
+  })
+
+  it('声明面棘轮：新增一个含声明的文件必须登记（合成集合对拍）', () => {
+    // 直接对拍判据的**判定**（而不是再读一遍真树）：集合不等即抛错这条语义，
+    // 由真树那次的 `DECLARING_FILES`/`REGISTERED_DECLARING_FILES` 相等断言在 import 期执行。
+    // 这里只钉住"两边不等时必须是硬错"，防止将来把 throw 改成 console.warn。
+    const mismatch = (discovered: string[], registered: string[]): void => {
+      if ([...discovered].sort().join('\u0000') !== [...registered].sort().join('\u0000')) {
+        throw new Error('生产路由声明面与登记不一致')
+      }
+    }
+    expect(() => mismatch(['router.go', 'skills_routes_on.go'], ['router.go'])).toThrowError(/不一致/u)
+    expect(() => mismatch(['router.go'], ['router.go'])).not.toThrow()
   })
 })

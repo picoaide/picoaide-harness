@@ -49,7 +49,12 @@ import (
 //     ⇒ 本文件 A 段红。
 
 // wasmClientSourceRel 是客户端分片编排的源码位置（仓库根相对）。
-const wasmClientSourceRel = "packages/host/enterprise/src/wasm-apps.ts"
+//
+// P0-b 把模块宿主面搬出了 enterprise 包：`enterprise/src/wasm-apps.ts` →
+// `wasm-apps-host/src/wasm-apps.ts`（旧家已不存在；搬迁只重写了 import 接线，
+// 本判据依赖的结构标记逐条仍在，见下）。路径常量必须跟着搬，否则本判据退化成
+// 假红（"读不到源码 = 仓库结构事故"）。
+const wasmClientSourceRel = "packages/host/wasm-apps-host/src/wasm-apps.ts"
 
 // resumableEnvelopeMarker 是可续传信封的**唯一**标记（构造点里的那个字面量）。
 const resumableEnvelopeMarker = "code: 'UPLOAD_INCOMPLETE'"

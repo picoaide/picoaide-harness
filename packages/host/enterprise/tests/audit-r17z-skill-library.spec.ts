@@ -22,9 +22,10 @@ import { fileURLToPath } from 'node:url'
 import AdmZip from 'adm-zip'
 import { gzipSync } from 'node:zlib'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { apply, type Config as AuthGateConfig } from '../src/auth-gate.ts'
-import { assertArchiveSafe } from '../src/archive-util.ts'
-import { precheckSkillPackage, PrecheckCode } from '../src/manifest-precheck.ts'
+import { type Config as AuthGateConfig } from '../src/auth-gate.ts'
+import { applyFullComposition as apply } from './helpers/apply-full-composition.ts'
+import { assertArchiveSafe } from '../../capability-center/src/host/archive-util.ts'
+import { precheckSkillPackage, PrecheckCode } from '../../capability-center/src/host/manifest-precheck.ts'
 import type { Session } from '../src/server-connector/config.ts'
 import {
   assertInstallableSkillName,
@@ -46,9 +47,9 @@ import {
   uninstallSkill,
   writeProvenance,
   type SkillCleanupRecord,
-} from '../src/skill-install.ts'
-import { isWindowsReservedDeviceNameSegment, reservedDeviceNameInArchivePath } from '../src/skill-name-rules.ts'
-import { isDelistedItem, mergeItems, needsOverwriteConfirm, planCardAction, type CapabilityItem } from '../src/client/CapabilityCenterPanel.tsx'
+} from '../../capability-center/src/host/skill-install.ts'
+import { isWindowsReservedDeviceNameSegment, reservedDeviceNameInArchivePath } from '../../capability-center/src/host/skill-name-rules.ts'
+import { isDelistedItem, mergeItems, needsOverwriteConfirm, planCardAction, type CapabilityItem } from '../../capability-center/src/client/CapabilityCenterPanel.tsx'
 import { listRuntimeSkills } from './helpers/upstream-skill-registry.ts'
 
 /** 一份合规技能（frontmatter 名可指定，与目录名解耦）。 */
@@ -371,7 +372,7 @@ describe('R17B-03：换入崩溃窗口（旧内容副本移出清扫面 + 自愈
     // "崩溃瞬间它在哪"；而**在哪**正是这一条 finding 的全部内容 —— 放在 `<staging>/backup`
     // 时它的祖先是 `install-*`，会被 24h 清扫连整目录删掉（旧内容的唯一副本）。
     // 变异验证：把 `backupDir` 改回 `join(staging, 'backup')` ⇒ 这条红。
-    const source = readFileSync(fileURLToPath(new URL('../src/skill-install.ts', import.meta.url)), 'utf8')
+    const source = readFileSync(fileURLToPath(new URL('../../capability-center/src/host/skill-install.ts', import.meta.url)), 'utf8')
     expect(source).toContain('`${BACKUP_PREFIX}${name}-${Date.now()}`')
     expect(source).toContain('const backupDir = join(tempRoot,')
     expect(source).not.toContain("const backupDir = join(staging, 'backup')")
@@ -641,7 +642,8 @@ function harness(session: Session): { call: (url: string) => Promise<{ code: num
   const routes: Route[] = []
   const ctx = {
     effect: (fn: () => unknown) => { fn() },
-    get: (name: string) => (name === 'connection' ? { requestRejection: () => undefined } : undefined),
+    provide: (name: string, value: unknown) => { (ctx as unknown as Record<string, unknown>)[`__svc_${name}`] = value },
+    get: (name: string) => ((ctx as unknown as Record<string, unknown>)[`__svc_${name}`] ?? ((name === 'connection' ? { requestRejection: () => undefined } : undefined))),
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     picoSession: {
       isRestored: () => true,

@@ -58,7 +58,7 @@ function readRepo(relative: string): string {
 }
 
 const PLATFORM_EDGE_PATH = 'server/internal/wasmapp/edge/primitives.go'
-const PLATFORM_LIMITS_PATH = 'server/internal/wasmapp/limits/limits.go'
+const PLATFORM_LIMITS_PATH = 'server/internal/limits/limits.go'
 const HOST_CACHE_PATH = 'packages/host/wasm-apps-host/src/cache.ts'
 const HOST_HANDLER_PATH = 'packages/host/wasm-apps-host/src/handler.ts'
 

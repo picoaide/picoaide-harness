@@ -22,6 +22,15 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import {
+  CHANNEL_TEMPLATE_KEYS,
+  FEATURE_MODULES,
+  FEATURE_SENTINELS,
+  channelFeaturesVariant,
+  channelFeaturesVariantAssignment,
+  featureSentinel,
+  normalizeChannelFeatures,
+} from '../scripts/channel-constants.ts'
 
 const REPO_ROOT = fileURLToPath(new URL('../../../..', import.meta.url))
 const CONSTANTS = `${REPO_ROOT}/packages/host/desktop/scripts/channel-constants.ts`
@@ -72,6 +81,54 @@ describe('渠道常量模块的零依赖不变量（tag 发布链的基石）', 
         .toContain('packages/host/desktop/scripts/channel-constants.ts')
       expect(source, `${probe} 不得再 import channel-build.ts（它依赖工作区包 ⇒ release job 必红）`)
         .not.toContain('packages/host/desktop/scripts/channel-build.ts')
+    }
+  })
+})
+
+/**
+ * 渠道功能模块（`features`）的**唯一真源**在单元层的最小判据（2026-10-13）。
+ *
+ * 完整判据（真跑 `ci-channels.sh` 的正/负例、官方模板键、变异证明）在
+ * `scripts/verify-ci-scripts.mjs` 第 3c 节；这里钉住的是**语义本身**，让
+ * `yarn check` 在不开根守卫的场合也能拦住"缺省全开 → 缺省全关"这一类改动。
+ * 契约见 `docs/decisions/2026-10-13-channel-feature-modules.md`。
+ */
+describe('渠道功能模块清单与规范化（features 的唯一真源）', () => {
+  it('缺省全开，且写与不写等价', () => {
+    const all = Object.fromEntries(FEATURE_MODULES.map(module => [module, true]))
+    expect(normalizeChannelFeatures(undefined)).toEqual(all)
+    expect(normalizeChannelFeatures(all)).toEqual(all)
+    expect(channelFeaturesVariant(normalizeChannelFeatures(undefined))).toBe(FEATURE_MODULES.join(','))
+    expect(channelFeaturesVariantAssignment(normalizeChannelFeatures(undefined))).toBe(`FEATURES=${FEATURE_MODULES.join(',')}`)
+  })
+
+  it('显式关闭只影响被声明的模块；全关 = none', () => {
+    expect(normalizeChannelFeatures({ [FEATURE_MODULES[0]]: false }))
+      .toEqual(Object.fromEntries(FEATURE_MODULES.map((module, index) => [module, index !== 0])))
+    const allOff = normalizeChannelFeatures(Object.fromEntries(FEATURE_MODULES.map(module => [module, false])))
+    expect(channelFeaturesVariant(allOff)).toBe('none')
+    expect(channelFeaturesVariantAssignment(allOff)).toBe('FEATURES=none')
+  })
+
+  it('未知模块名 / 非布尔 / 不是对象一律抛错（不静默吞掉）', () => {
+    for (const raw of [
+      { unknownModule: true },
+      { [FEATURE_MODULES[0]]: 'false' },
+      { [FEATURE_MODULES[0]]: 0 },
+      [FEATURE_MODULES[0]],
+      FEATURE_MODULES[0],
+      null,
+    ]) {
+      expect(() => normalizeChannelFeatures(raw), `应拒绝 ${JSON.stringify(raw)}`).toThrow(/features/u)
+    }
+  })
+
+  it('哨兵串命名从模块清单派生，且官方模板键逐模块列出 features.<module>', () => {
+    for (const module of FEATURE_MODULES) {
+      expect(featureSentinel(module)).toBe(`picoaide.feature.${module}.v1`)
+      expect(FEATURE_SENTINELS[module]).toBe(featureSentinel(module))
+      // 官方渠道 = 新增渠道的模板：少一行，拷贝模板的渠道就看不到有哪几个模块可关。
+      expect(CHANNEL_TEMPLATE_KEYS).toContain(`features.${module}`)
     }
   })
 })

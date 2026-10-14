@@ -71,6 +71,10 @@ const packageNameTable = new Map([
   // @picoaide/dsh-host-*），严格按本表比对。
   ['packages/host/host-locale', '@picoaide/dsh-host-locale'],
   ['packages/host/host-home', '@picoaide/dsh-host-home'],
+  // 2026-10-13（P0-b）：宿主侧**网关客户端**的共享叶子包（`server-connector` 的
+  // auth/config/electron 逐字迁入，enterprise 保留同名 re-export）。它是第三个
+  // "只被依赖、不依赖别人"的宿主叶子（依赖面只有 host-locale）。
+  ['packages/host/gateway-client', '@picoaide/dsh-gateway-client'],
   ['packages/host/wasm-apps-host', '@picoaide/dsh-wasm-apps-host'],
   ['packages/host/cron', '@picoaide/dsh-cron'],
   ['packages/client/account-card', '@picoaide/dsh-account-card'],
@@ -80,6 +84,13 @@ const packageNameTable = new Map([
   // **中列整页装载器 + 视觉语言**叶子包（零 `@picoaide/*` 依赖，被消费方的 client
   // bundle 内联）—— 它替掉了"cron 自持 DOM 装载 + 其余三个各写一套模态"的分叉。
   ['packages/client/panel-surface', '@picoaide/dsh-panel-surface'],
+  // 2026-10-13：能力中心（技能商店）的**客户端面**（整页面板 + 内置技能区 +
+  // `capability.*` 字典 + 底部「更多」条目），从 `packages/host/enterprise` 整块搬到
+  // 独立的客户端包 —— 拆它的目的就是让"关掉技能商店 = 整包不进产物"成为可能。
+  // 目录名跟角色走（capability-center ↔ @picoaide/dsh-capability-center）。
+  // 2026-10-13（P0-b）：host 面也搬进本包 ⇒ 它从 `packages/client/` 移到
+  // `packages/host/`（host + client 双面 = `packages/host/connectors` 的标准形态）。
+  ['packages/host/capability-center', '@picoaide/dsh-capability-center'],
   // 2026-09-21：侧边栏底部**并道行** —— 一个「更多」行 + 向上浮层，条目经客户端
   // Cordis 服务 `picoFootMenu` 从五个面板插件收集（它们不再各自注册一整行）。
   ['packages/client/foot-menu', '@picoaide/dsh-foot-menu'],

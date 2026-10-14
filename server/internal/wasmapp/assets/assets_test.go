@@ -11,9 +11,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/picoaide/picoaide/internal/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
 	"github.com/picoaide/picoaide/internal/wasmapp/assets"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/wasmmod"
 )
 
@@ -742,13 +742,18 @@ func TestSectionBudgetStillRejectsOversizeAssets(t *testing.T) {
 // packAssetsScriptPath 返回作者侧打包脚本的**绝对**路径（脚本在临时目录里执行，
 // 相对路径会按 `cmd.Dir` 解析）。
 //
+// 路径是**中性源**（`server/demoapps/scripts/pack-assets.mjs`）：它既是演示应用用的那一份，
+// 也是镜像构建期注入技能目录的那一份 —— 同一份实现、两个落点，源树里没有第二份副本
+// （`server/skills/app-builder/scripts/pack-assets.mjs` **只在镜像里**存在）。
+// 抽样判据：`skillseed.TestBuiltinSkillInventoryMatchesDiskDockerfileAndDigests`。
+//
 // `PACK_ASSETS_SCRIPT` 可覆盖：变异验证/双向对拍要指向**副本**（脚本是 Node 侧判据的
 // 实现，`go test -overlay` 只能替换 Go 源文件，替换不了它运行期读到的 .mjs）。
 func packAssetsScriptPath(t *testing.T) string {
 	t.Helper()
 	path := os.Getenv("PACK_ASSETS_SCRIPT")
 	if path == "" {
-		path = filepath.Join("..", "..", "..", "skills", "app-builder", "scripts", "pack-assets.mjs")
+		path = filepath.Join("..", "..", "..", "demoapps", "scripts", "pack-assets.mjs")
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -887,7 +892,7 @@ func TestSectionBudgetBytesMatchPackAssetsScript(t *testing.T) {
 // 背景（2026-09-21 独立审计 P3-②）：工具链段的判定在仓库里有**三处**实现 ——
 //
 //	server/internal/wasmapp/assets/assets.go            （平台唯一真源：前缀 + 精确名单）
-//	server/skills/app-builder/scripts/pack-assets.mjs   （打包期：与 Go 侧有行为对拍）
+//	server/demoapps/scripts/pack-assets.mjs             （打包期：与 Go 侧有行为对拍；中性源）
 //	server/skills/app-builder/examples/go/preview.mjs   （本地预览：**此前没有任何对拍**）
 //
 // 第三份此前**没有 `.debug_` 前缀规则** ⇒ 本地预览会把几 MB 的 DWARF 当成应用资源直出，

@@ -25,6 +25,8 @@ import {
   PERM_USER_READ,
   type MeUser,
 } from './rbac'
+// P3 变体：模块条目的编译期开关（真源 features.mjs，构建期由 define 注入）。
+import { isFeatureEnabled, type FeatureModule } from './features'
 
 // 权限点常量(唯一真源在 lib/rbac.ts;这里原样转出,既有引用不受影响)。
 export {
@@ -41,7 +43,23 @@ export interface NavEntry {
   perms?: string[]
 }
 
-export const NAV_ENTRIES: NavEntry[] = [
+/**
+ * **模块专属**的侧栏条目（P3 变体）：声明与变体**无关**，`module` 是它与编译期开关的
+ * 唯一连接点。三条与 Go 侧模块包树一一对应（`/capabilities` 与 `/app-center` 都归
+ * `skills`/`apps` 面，见 `docs/decisions/2026-10-14-webadmin-feature-variant.md` §3）。
+ *
+ * 为什么把"声明"与"当前变体的条目"分开：`NAV_ENTRIES` 是**这份产物**的侧栏，
+ * 而被关闭的模块在这个产物里根本不存在；但权限点前向守卫（`nav.test.ts`）必须仍然
+ * 看得见它声明的那几个权限点 —— 否则"关掉连接器"会让 `connector:read` 变成
+ * "没人管"的权限点，下次有人新增权限点时就少了一道闸。
+ */
+export interface FeatureNavEntry extends NavEntry {
+  /** 该条目所属的功能模块（编译期开关的键）。 */
+  module: FeatureModule
+}
+
+/** 与变体无关的条目（管理 / 运维 / 审计三个分区的固定面）。 */
+const CORE_NAV_ENTRIES_HEAD: NavEntry[] = [
   // 管理分区(super_admin 专属; auditor 仅有 user:read 只读)
   { to: '/users', label: '用户', icon: Users, section: '管理', perms: [PERM_USER_READ] },
   { to: '/departments', label: '部门', icon: Network, section: '管理', perms: [PERM_DEPT_READ] },
@@ -58,19 +76,56 @@ export const NAV_ENTRIES: NavEntry[] = [
   // 页面实际不可达。Go 真源里承载错误监控配置面的是 server-info:read。
   { to: '/error-monitoring', label: '错误监控', icon: Bug, section: '运维', perms: [PERM_SERVERINFO_READ] },
   { to: '/usage', label: '用量中心', icon: BarChart3, section: '运维', perms: [PERM_USAGE_READ] },
+]
+
+/** 与变体无关的条目（模块条目之后的剩余部分）。 */
+const CORE_NAV_ENTRIES_TAIL: NavEntry[] = [
+  { to: '/server-info', label: '服务器信息', icon: Server, section: '运维', perms: [PERM_SERVERINFO_READ] },
+  // 审计分区(auditor + super_admin 只读)
+  { to: '/audit', label: '审计日志', icon: ScrollText, section: '审计', perms: [PERM_AUDIT_READ] },
+]
+
+/** 模块条目（顺序 = 侧栏里的相对顺序；与改造前逐条一致）。 */
+export const FEATURE_NAV_ENTRIES: FeatureNavEntry[] = [
   // 2026-09-02:合并「市场 · 技能」与「能力中心」为单入口(客户端同构)。
-  { to: '/capabilities', label: '能力中心', icon: Store, section: '运维', perms: [PERM_MARKET_READ, PERM_CAP_READ] },
+  { module: 'skills', to: '/capabilities', label: '能力中心', icon: Store, section: '运维', perms: [PERM_MARKET_READ, PERM_CAP_READ] },
   // 2026-09-18:员工自建 WASM 应用的平台管理员面(列表/上下架/冻结/转移归属/更新审批)。
   // 读权限复用 capability:read(与后端路由申报的权限点一致);写动作在页面内另按
   // capability:write 收敛(体验层,服务端 RequirePermission 才是护栏)。
   // 2026-09-19:原独立条目「应用平台」(`/app-platform`,并发/内存限制项)已并入本页
   // 成为「限制项」子页(应用域名在「设置」子页)—— 两个条目此前同用 Boxes 图标,
   // 侧栏看起来像重复入口,合并后一条。
-  { to: '/app-center', label: '应用中心', icon: Boxes, section: '运维', perms: [PERM_CAP_READ] },
-  { to: '/connectors', label: '连接器', icon: Plug, section: '运维', perms: [PERM_CONNECTOR_READ] },
-  { to: '/server-info', label: '服务器信息', icon: Server, section: '运维', perms: [PERM_SERVERINFO_READ] },
-  // 审计分区(auditor + super_admin 只读)
-  { to: '/audit', label: '审计日志', icon: ScrollText, section: '审计', perms: [PERM_AUDIT_READ] },
+  { module: 'apps', to: '/app-center', label: '应用中心', icon: Boxes, section: '运维', perms: [PERM_CAP_READ] },
+  { module: 'connectors', to: '/connectors', label: '连接器', icon: Plug, section: '运维', perms: [PERM_CONNECTOR_READ] },
+]
+
+/**
+ * **这份产物**的侧栏（被关闭的模块整条不在）。
+ *
+ * 判定走 {@link isFeatureEnabled}（数据面）：被关闭模块的条目**不会出现在侧栏里**。
+ *
+ * ⚠️ **但"不在侧栏里"不等于"字符串不进产物"**（2026-10-14 独立审计 P2-4 的措辞更正）：
+ * 过滤发生在**运行期**（下面是 `.filter()` 调用），所以 `FEATURE_NAV_ENTRIES` 里的
+ * 路径 / 标签 / 图标**仍然会被打进 chunk**（实测 `FEATURES=none` 的产物里
+ * `grep -rl '/connectors' assets/` 命中 `assets/index-*.js`）。真裁剪面（编译期、由产物
+ * 字节判据咬住）= **模块页 chunk** + **`<Route>`**，不是这几个字符串。
+ * 想看渲染面为什么必须留着声明数据，见 `DECLARED_NAV_ENTRIES` 与 `nav.test.ts` 的权限点前向守卫。
+ */
+export const NAV_ENTRIES: NavEntry[] = [
+  ...CORE_NAV_ENTRIES_HEAD,
+  ...FEATURE_NAV_ENTRIES.filter((entry) => isFeatureEnabled(entry.module)),
+  ...CORE_NAV_ENTRIES_TAIL,
+]
+
+/**
+ * 全部**声明**的条目（**含**被关闭的模块）—— 与变体无关。
+ *
+ * 只给判据用（权限点前向守卫 + 变体对拍），**不要**拿它渲染：它不是这份产物的侧栏。
+ */
+export const DECLARED_NAV_ENTRIES: NavEntry[] = [
+  ...CORE_NAV_ENTRIES_HEAD,
+  ...FEATURE_NAV_ENTRIES,
+  ...CORE_NAV_ENTRIES_TAIL,
 ]
 
 /** 单个条目是否对当前用户可见。 */

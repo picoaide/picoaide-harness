@@ -3,7 +3,7 @@ package compile
 import (
 	"fmt"
 
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
+	"github.com/picoaide/picoaide/internal/limits"
 )
 
 // 本文件是编译侧用到的**平台契约的薄封装**：上限值转发、字节数渲染。

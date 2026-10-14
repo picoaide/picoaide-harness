@@ -24,6 +24,11 @@ import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } 
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { channelDshHomeDir, isSafeDshHomeDirName } from '../src/desktop-home.ts'
+import {
+  channelFeaturesVariant,
+  normalizeChannelFeatures,
+  type ChannelFeatures,
+} from './channel-constants.ts'
 
 /** 选择渠道的环境变量（CI 渠道矩阵注入）。 */
 export const CHANNEL_ENV = 'DSH_BUILD_CHANNEL'
@@ -118,6 +123,23 @@ export interface ChannelBuildContext {
    * 显式 false 就把它清掉（残留比没生效更糟：上一个渠道构建的载荷会被打进下一个产物）。
    */
   readonly speechBundleModel: boolean
+  /**
+   * 本次构建的**功能模块开关**（`channel.json` 的 `features`，**缺省全开**）。
+   *
+   * 唯一真源是 `./channel-constants.ts` 的 `normalizeChannelFeatures()`；这里只承载
+   * 解析结果，**不**在别处再实现一遍"缺省全开"。语义与消费契约见
+   * `docs/decisions/2026-10-13-channel-feature-modules.md`。
+   */
+  readonly features: ChannelFeatures
+  /**
+   * 本渠道的**稳定变体标识**（`skills,apps,connectors` / `apps` / `none`…）。
+   *
+   * 构建期取值 + 输出点：随包 `build/channel.json` 的 `features_variant` 就是它。
+   * 将来的三个消费者（Go `-tags`、客户端组装清单、webadmin `--build-arg`）必须读
+   * **同一个**串 —— 各自按布尔重新拼一遍就会出现"镜像里有、客户端里没有"的半通状态。
+   * 派生规则只在 `channelFeaturesVariant()` 里一份。
+   */
+  readonly featuresVariant: string
 }
 
 /** 取非空字符串，否则 undefined。 */
@@ -174,6 +196,15 @@ export interface ChannelDesktopBranding {
    * `scripts/ci-channels.sh` 会把非布尔值判红，让拼写错误在发版前现形。
    */
   readonly speechBundleModel?: boolean
+  /**
+   * 本次构建的**功能模块开关**（渠道包 `features`）。缺省 = 三个模块全开。
+   *
+   * 畸形取值（未知模块名 / 非布尔 / 不是对象）在这里 **fail-loud**
+   * （{@link normalizeChannelFeatures} 抛错）—— 构建期绝不能"猜一个"：猜窄了
+   * 客户拿不到他要的功能，猜宽了把他明确关掉的模块交付出去，两种都不会有红灯。
+   * `scripts/ci-channels.sh` 在更上游用同一份规则判一次（同源：都走这个函数）。
+   */
+  readonly features?: ChannelFeatures
 }
 
 /**
@@ -214,6 +245,7 @@ export function readChannelDesktopBranding(channelDir: string): ChannelDesktopBr
     deepLinkName?: string
     homeDir?: string
     speechBundleModel?: boolean
+    features?: ChannelFeatures
   } = {}
   if (productName !== undefined) result.productName = productName
   if (slug !== undefined) result.slug = slug
@@ -244,6 +276,10 @@ export function readChannelDesktopBranding(channelDir: string): ChannelDesktopBr
   // 默认打开）。非布尔取值按缺省（随包）处理 —— 误读方向是"可用优先"，而构建期
   // `ci-channels.sh` 会把非布尔值判红，拼写错误不会静默变成关。
   if (typeof desktop.speech_bundle_model === 'boolean') result.speechBundleModel = desktop.speech_bundle_model
+  // 功能模块声明：**缺省全开**，但畸形取值一律 fail-loud（不做"忽略坏键、其余照旧"——
+  // 忽略的方向恒是"多交付一个模块"，而且从配置上完全看不出来）。规则只有一份，
+  // 与 `scripts/ci-channels.sh` 的校验同源。
+  if (root.features !== undefined) result.features = normalizeChannelFeatures(root.features)
   return result
 }
 
@@ -304,6 +340,12 @@ export function resolveChannelBuildContext(
     ? join(repoRoot, 'brands', 'official')
     : channelDir
 
+  // 功能模块：渠道没写 `features` ⇒ 全开（基础功能恒开，既有渠道行为逐字节不变）。
+  // 解析在 readChannelDesktopBranding 里已经做过（畸形值那里 fail-loud），这里只补缺省。
+  // 变体标识在同一处派生（`channelFeaturesVariant` 是唯一实现），随包写进
+  // `build/channel.json` 的 `features_variant` —— 见 stageChannelProfile。
+  const features = branding.features ?? normalizeChannelFeatures(undefined)
+
   return {
     channelId,
     official,
@@ -328,6 +370,11 @@ export function resolveChannelBuildContext(
     }),
     artifactNames: artifactNames(slug),
     speechBundleModel: branding.speechBundleModel !== false,
+    // 功能模块：渠道没写 `features` ⇒ 全开（基础功能恒开，既有渠道行为逐字节不变）。
+    // 变体标识在同一处派生（`channelFeaturesVariant` 是唯一实现），随包写进
+    // `build/channel.json` 的 `features_variant` —— 见 stageChannelProfile。
+    features: features,
+    featuresVariant: channelFeaturesVariant(features),
   }
 }
 
@@ -571,8 +618,44 @@ export function stageChannelProfile(
   // 实测：acme 渠道的登录页在客户线上（旧版服务端）就是这个问题。
   // 内联成 data: URI 后，随包品牌自带 logo，登录页/侧边栏在任何服务端版本下都显
   // 客户自己的标识；服务端可达时仍以服务端下发为准（mergeChannel 逐字段覆盖）。
-  writeFileSync(target, JSON.stringify(inlineChannelAssets(value, context.channelDir), null, 2) + '\n')
+  writeFileSync(target, JSON.stringify(withChannelFeatures(inlineChannelAssets(value, context.channelDir), context), null, 2) + '\n')
   return target
+}
+
+/**
+ * 把**功能模块声明**就位进随包渠道配置（`build/channel.json`）—— 变体标识的**输出点**。
+ *
+ * 为什么落在随包 profile 上（2026-10-13 定案，本轮只建立取值/输出点/文档，**不接线**）：
+ *   - 它是**品牌渠道**客户端产物里那一份渠道内容（就是本函数写入的 `build/channel.json`）。
+ *     **覆盖边界**（2026-10-13 独立审计 P1 更正，别照"客户端包与镜像都带它"读）：
+ *     ①**官方渠道没有随包 profile** —— `stageChannelProfile()` 对 official 走删除分支；
+ *     ②服务端镜像里带的是**私有仓原文**（`ci-build-channel-images.sh` 把 `channels/<c>/.`
+ *     整份拷进 `channels-context/`，再 `COPY` 进镜像），里面**没有** `features_variant`。
+ *     所以将来的三个消费者（Go `-tags`、客户端组装清单、webadmin `--build-arg`）**不能**
+ *     假设"从产物里读现成值"：客户端组装可以读随包 profile，而镜像侧那两条路必须在镜像
+ *     构建期由同一个解析器（`normalizeChannelFeatures()` + `channelFeaturesVariant()`）
+ *     从渠道目录原文算出来，或由下一轮把派生键写进镜像用的渠道目录快照 —— 契约见
+ *     `docs/decisions/2026-10-13-channel-feature-modules.md` §5；
+ *   - 渠道没写 `features` 时这里写入的是**规范化后的全开结果**：下游读到的永远是
+ *     "三个键全在"的对象，不需要再实现一次"缺省全开"（缺省语义只有
+ *     `normalizeChannelFeatures()` 一份）。
+ *
+ * 两个键：
+ *   - `features`：规范化后的对象（三个键全在，取值都是布尔）——**人读与逐模块判定**用；
+ *   - `features_variant`：稳定变体标识（`skills,apps,connectors` / `none`…）——
+ *     **机器读**用（缓存键、变体目录名、Go tag 列表就是它）。
+ *
+ * 私有仓原文**不动**（与 `logo_inline` 同一条纪律：只改随包副本）。
+ * @param value - 已内联素材的随包渠道配置。
+ * @param context - 本次构建的渠道上下文（`features` / `featuresVariant` 的唯一来源）。
+ * @returns 追加两个键后的配置对象。
+ */
+function withChannelFeatures(value: Record<string, unknown>, context: ChannelBuildContext): Record<string, unknown> {
+  return {
+    ...value,
+    features: context.features,
+    features_variant: context.featuresVariant,
+  }
 }
 
 /** 渠道包 `assets` 里允许内联进随包配置的素材（文件名键 → 内联键）。 */

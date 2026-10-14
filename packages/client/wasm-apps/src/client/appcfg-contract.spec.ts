@@ -12,7 +12,7 @@
  *  1. `server/internal/wasmapp/appcfg/appcfg.json` —— 服务端生成的机器可读字段表，
  *     也就是字段规格的**唯一真源**。真源缺席（被删/改名/搬走）⇒ 用例**直接失败**，
  *     不是 skip（2026-09-18 审计 P1-2：skip 会让"两端契约漂移"这件事完全静默）。
- *  2. `server/internal/wasmapp/limits/limits.go` —— app_id 形态 / 版本号形态 /
+ *  2. `server/internal/limits/limits.go` —— app_id 形态 / 版本号形态 /
  *     白名单上限三条规格在 Go 里**现在就有**唯一真源，字段表落地之前先靠它守。
  *
  * 两条都**不硬编码第二份规格**：期望值来自客户端镜像，实际值从服务端文件里读出来。

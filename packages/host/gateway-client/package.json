@@ -1,0 +1,49 @@
+{
+  "name": "@picoaide/dsh-gateway-client",
+  "version": "0.1.0",
+  "description": "Host-side gateway client shared by every PicoAide host plugin: gateway fetch, auth error taxonomy, and the persisted session/bootstrap shapes",
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./auth": {
+      "types": "./lib/types/auth.d.ts",
+      "default": "./lib/auth.js"
+    },
+    "./config": {
+      "types": "./lib/types/config.d.ts",
+      "default": "./lib/config.js"
+    },
+    "./electron": {
+      "types": "./lib/types/electron.d.ts",
+      "default": "./lib/electron.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/**/*.js",
+    "lib/**/*.map",
+    "lib/types/**/*.d.ts"
+  ],
+  "scripts": {
+    "build": "tsdown && tsc -p tsconfig.json --emitDeclarationOnly",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "check": "yarn run build && yarn run test"
+  },
+  "dependencies": {
+    "@picoaide/dsh-host-locale": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "electron": "44.0.0",
+    "tsdown": "0.22.2",
+    "typescript": "6.0.3",
+    "vitest": "4.1.8"
+  }
+}

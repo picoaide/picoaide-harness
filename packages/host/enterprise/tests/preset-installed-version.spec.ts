@@ -2,9 +2,9 @@ import { describe, expect, it } from 'vitest'
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { installedVersionFor, readInstalledPresetVersion } from '../src/auth-gate.ts'
-import { writeProvenance } from '../src/skill-install.ts'
-import { hasUpdateFor, type CapabilityItem } from '../src/client/CapabilityCenterPanel.tsx'
+import { installedVersionFor, readInstalledPresetVersion } from '../../capability-center/src/host/skill-routes.ts'
+import { writeProvenance } from '../../capability-center/src/host/skill-install.ts'
+import { hasUpdateFor, type CapabilityItem } from '../../capability-center/src/client/CapabilityCenterPanel.tsx'
 
 /**
  * 审计 2026-09-12 P1-6(回归):能力中心的「更新到 vX」对**共享 Agent**

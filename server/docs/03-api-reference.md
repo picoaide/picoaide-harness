@@ -273,7 +273,7 @@ DeepSeek Files API 直通。**用途**:桌面客户端默认把会话里的图�
 > 可用 `PICOAI_SKILL_SEED_DIR` 覆盖；2026-09-19 起源码就在这里，不再从客户端 vendored 包取)，
 > 服务端直接把它打包下发 —— 内容随镜像升级而更新，客户端**不自动安装**，
 > 员工在能力中心的「平台内置技能」区点一次安装(复用市场那条安装链路:
-> 下载 → sha256 对照 → 整树解包 → `<dshHome>/skills`)。实现见 `internal/wasmapp/skillseed`。
+> 下载 → sha256 对照 → 整树解包 → `<dshHome>/skills`)。实现见 `internal/skillseed`。
 > 当前内置一个技能:`app-builder`(WASM 应用平台作者手册；2026-09-19 由 `picoaide-app-builder` 改名)。
 > 与 §6/§8b 的差别只有一处:**没有授权门**(平台自带、对全部登录员工可见)，
 > 认证口径与它们完全一致(BearerAuth)。

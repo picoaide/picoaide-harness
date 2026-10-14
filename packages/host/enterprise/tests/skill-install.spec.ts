@@ -28,8 +28,8 @@ import {
   uninstallSkill,
   validateSkillName,
   writeProvenance,
-} from '../src/skill-install.ts'
-import { MAX_ARCHIVE_BYTES } from '../src/archive-util.ts'
+} from '../../capability-center/src/host/skill-install.ts'
+import { MAX_ARCHIVE_BYTES } from '../../capability-center/src/host/archive-util.ts'
 import { isolateRuntimeSkillRoots } from './helpers/runtime-skill-roots.ts'
 
 // R13-GH3（H2 跨根）：卸载的"成功"覆盖运行时**全部已知根**（`<dshHome>/skills` +
@@ -262,7 +262,7 @@ describe('synthesizeSkillFrontmatter', () => {
     try {
       await writeFile(join(dir, 'SKILL.md'), '# 代码审查技能\n\n正文\n')
       await writeFile(join(dir, 'metadata.yaml'), 'name: code-review\ndescription: 代码审查\nversion: 1.0.0\n')
-      await import('../src/skill-install.ts').then(async (m) => {
+      await import('../../capability-center/src/host/skill-install.ts').then(async (m) => {
         await m.synthesizeSkillFrontmatter(dir, 'code-review')
       })
       const out = await readFile(join(dir, 'SKILL.md'), 'utf8')
@@ -277,7 +277,7 @@ describe('synthesizeSkillFrontmatter', () => {
     try {
       const existing = '---\nname: keep\ndescription: keep me\n---\n# Body\n'
       await writeFile(join(dir, 'SKILL.md'), existing)
-      const m = await import('../src/skill-install.ts')
+      const m = await import('../../capability-center/src/host/skill-install.ts')
       await m.synthesizeSkillFrontmatter(dir, 'fallback')
       expect(await readFile(join(dir, 'SKILL.md'), 'utf8')).toBe(existing)
     } finally {
@@ -289,7 +289,7 @@ describe('synthesizeSkillFrontmatter', () => {
     const dir = await mkdtemp(join(tmpdir(), 'pico-skill-fm-'))
     try {
       await writeFile(join(dir, 'SKILL.md'), '# Body\n')
-      const m = await import('../src/skill-install.ts')
+      const m = await import('../../capability-center/src/host/skill-install.ts')
       await m.synthesizeSkillFrontmatter(dir, 'demo')
       const out = await readFile(join(dir, 'SKILL.md'), 'utf8')
       expect(out).toMatch(/^---\nname: demo\n/)
@@ -715,7 +715,7 @@ describe('A7 并发与残留目录（备份目录不再污染技能库）', () =
     // `<skills>/.<name>.backup-<pid>-<ts>`），唯一能观测到它的消费者是上游运行时
     // `skill-filesystem`（本包的用例驱动不到它）；而"它在直接子目录层级"这件事
     // 正是 p13 探针实测出"卸载后技能仍然可用"的根因。位置契约在这里钉死。
-    const source = readFileSync(fileURLToPath(new URL('../src/skill-install.ts', import.meta.url)), 'utf8')
+    const source = readFileSync(fileURLToPath(new URL('../../capability-center/src/host/skill-install.ts', import.meta.url)), 'utf8')
     expect(source).toContain("const staging = await mkdtemp(join(tempRoot, 'install-'))")
     // R19A-S2-02（2026-09-26）：临时区不再直接用字符串路径拼（`.skill-tmp` 是库外链接/
     // junction/挂载点时 staging 会被建到**库外**），而是走**过闸**的唯一入口 —— 位置契约

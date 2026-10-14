@@ -9,10 +9,6 @@ import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 // Type-only: declares the sidebar brand slots (`sidebar.brand.mark` /
 // `sidebar.brand.name`).
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
-// Type-only: the foot-lane registry contract (`ctx.picoFootMenu`). The single
-// sidebar foot row belongs to `@picoaide/dsh-foot-menu` and reaches this bundle
-// as a Cordis service — never as a module import.
-import type {} from '@picoaide/dsh-foot-menu/client'
 // Type-only: declares the conversation hero brand-mark slot.
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
@@ -31,7 +27,6 @@ import { buildChannelCSSVars, defaultHeroTagline } from './channel-vars.ts'
 import { installFavicon } from './favicon.ts'
 import { channelTitle } from '../channel-content.ts'
 import { startChannelStore, readChannelSync, subscribeChannel } from './channel-store.ts'
-import { mountCapabilityCenter, openCapabilityCenter } from './capability-surface.tsx'
 import { en, setActiveLocale, t, type EnterpriseKey, zh } from './locales.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -47,20 +42,24 @@ export const name = 'picoaide-enterprise-client'
 /** Locale namespace owning the enterprise client copy. */
 const LOCALE_NS = 'enterprise'
 
-/** Services required: the slot registry for settings pages. `picoFootMenu` is waited on from a child scope. */
+/** Services required: the slot registry for settings pages. */
 export const inject = ['slots', 'locale']
 
 /**
  * Enterprise brand chrome: layout-only overrides for surfaces the upstream
  * slots do not cover. The sidebar foot action container is a flex row, so it
- * is pinned to column to let stacked actions (skill center, cordis panel)
- * sit one per row above Settings instead of overflowing side by side; the
- * skill center trigger matches the Settings trigger hover. The hero headline
+ * is pinned to column to let stacked actions (the capability-center row, the
+ * cordis panel) sit one per row above Settings instead of overflowing side by
+ * side. The hero headline
  * and preview badge stay upstream-owned text (`hero.headline` /
  * `hero.preview` in the `conversation` dictionary); the upstream locale
  * service registers each (namespace, locale) exactly once, so this client
  * cannot override them — give the upstream ui-conversation a configurable
  * headline and delete the two `headlineText`/`previewBadge` rules below.
+ *
+ * 能力中心的技能卡样式（`.pico-skill-card`）随面板一起搬到了
+ * `@picoaide/dsh-capability-center`（见那里的 `client/skill-card-style.ts`）——
+ * 本表只保留企业自有面（侧栏底栏容器、hero 文案）。
  *
  * 兜底字面量（`content: var(…, "…")` 的第二参）由 `brandCss()` 按**当前**界面
  * 语言求值：CSS 读不到语言，所以这份样式表随语言重绘（见 `paintBrandStyle`），
@@ -84,19 +83,6 @@ const brandCss = (tagline: string): string => `
 [class$="_headlineText"]::after, [class$="_titleGroup"] > span:first-child::after { content: var(--pico-hero-headline, "PicoAide Harness"); font-size: 26px; line-height: 32px; font-weight: 500; }
 [class$="_previewBadge"] { font-size: 0; }
 [class$="_previewBadge"]::after { content: var(--pico-hero-tagline, ${JSON.stringify(tagline)}); font-size: 12px; line-height: 18px; font-weight: 500; font-family: var(--ds-font-family-code); }
-
-/* Skill center card grid: hover lift + focus ring (inline-styled card, CSS-only affordances). */
-.pico-skill-card {
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
-}
-.pico-skill-card:hover {
-  border-color: var(--dsw-alias-brand-primary) !important;
-  box-shadow: 0 2px 8px var(--dsw-shadow-lv1, rgba(0, 0, 0, 0.08));
-}
-.pico-skill-card:focus-within {
-  outline: 2px solid var(--dsw-alias-brand-primary);
-  outline-offset: 2px;
-}
 `
 
 /** 品牌兜底样式表元素（`paintBrandStyle` 注入/重绘，随语言变化）。 */
@@ -127,10 +113,14 @@ function paintBrandStyle(): void {
 
 /**
  * Register the enterprise surfaces: the brace brand at the upstream brand
- * slots (sidebar mark/name, hero mark), the skill center foot action above
- * the sidebar Settings trigger, the account page (username + logout) at the
- * bottom of settings, the branded document title, and the layout-only brand
- * chrome above.
+ * slots (sidebar mark/name, hero mark), the account page (username + logout)
+ * at the bottom of settings, the branded document title, and the layout-only
+ * brand chrome above.
+ *
+ * The skill center (Capability Hub) panel and its sidebar foot action are
+ * **not** registered here any more: since 2026-10-13 that whole client face
+ * lives in `@picoaide/dsh-capability-center` (see that package's
+ * `src/client/index.ts`).
  * @param ctx - browser Cordis context.
  */
 export function apply(ctx: ClientContext): void {
@@ -226,25 +216,10 @@ export function apply(ctx: ClientContext): void {
     return () => { /* favicon reverts on the next navigation */ }
   }, 'enterprise: desktop favicon')
 
-  // 底部「更多」浮层条目（唯一的底栏行由 `@picoaide/dsh-foot-menu` 拥有）：
-  // id 就是 panel-surface 的 PanelId，行因此在能力中心激活时显示「更多 · 能力中心」。
-  //
-  // 登记放在**子 fiber** 里等服务到位，而不是把 `picoFootMenu` 写进 `inject`：
-  // 提供它的那一行可以被渠道覆盖层 / `$DSH_HOME/cordis.patch.yml` 禁用，硬 inject
-  // 会让整条 fiber 永久 pending（无报错），把能力中心面板、渠道 CSS 变量、品牌
-  // chrome 与 favicon 一起带走（P1-7 教训）。只有"登记这一个条目"等它。
-  ctx.inject(['picoFootMenu'], (scope: ClientContext) => {
-    scope.effect(() => scope.picoFootMenu.add({
-      id: 'capability',
-      order: -1,
-      title: () => t('capability.title'),
-      activate: openCapabilityCenter,
-    }), 'enterprise: capability center foot menu entry')
-  })
-
-  // 中列整页（插件启动时挂一次；容器常驻会话列、在 React 树之外）。切换语义与
-  // 连接器/应用中心/定时任务共用 `@picoaide/dsh-panel-surface`。
-  ctx.effect(() => mountCapabilityCenter(), 'enterprise: capability center surface')
+  // 底部「更多」浮层条目与能力中心面板**不再在这里注册**（2026-10-13）：技能商店
+  // 的客户端面整块搬到 `@picoaide/dsh-capability-center`，条目 id（`capability`）、
+  // order（-1）、文案与 `activate` 都随面板一起过去，行为逐字不变。本包只保留基础面
+  // （账号 / 渠道 / 品牌 / favicon / 文档标题）。
 
   ctx.effect(
     () => ctx.slots.inject('settings.section', () => ctx.slots.register({

@@ -36,7 +36,7 @@ import {
   discoverRuntimeSkills,
   sweepInstallerOwnedShadowSkills,
   uninstallSkill,
-} from '../src/skill-install.ts'
+} from '../../capability-center/src/host/skill-install.ts'
 
 function skillMd(name: string, marker: string): string {
   return `---\nname: ${name}\ndescription: probe skill ${name} (${marker})\n---\n\nbody ${marker}\n`

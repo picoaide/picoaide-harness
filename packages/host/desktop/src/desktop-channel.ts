@@ -33,6 +33,7 @@
 
 import { readFileSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
+import { normalizeFeatureSwitches, type FeatureSwitches } from './channel-features.ts'
 import { channelDshHomeDir } from './desktop-home.ts'
 
 /** 渠道包在应用资源里的位置（随包分发，构建时由 CI 从渠道仓复制）。 */
@@ -322,6 +323,21 @@ export interface DesktopChannelProfile {
    * 占位，绝不是厂商品牌。
    */
   readonly brand: ChannelBrand
+  /**
+   * **功能模块开关**（渠道包 `features`，2026-10-13 P2）—— 三个键全在的布尔表。
+   *
+   * 消费方只有两处，都是"别去加载一个不随包的模块"：
+   *   - `profile.ts` 的 `desktopBundleList()` / `ensureDesktopProfile()`：从 bundle 层
+   *     清单里去掉被关闭模块（否则 `createRequire().resolve()` 解析不到包、应用起不来）；
+   *   - `startup-rows.ts` 的 `requiredDesktopRows()`：从必需行清单里去掉被关闭模块的行
+   *     （否则 boot 后的必需行断言把正常的变体裁剪报成启动失败）。
+   *
+   * **不做形状校验、不抛错**（{@link normalizeFeatureSwitches} 的注释解释了为什么
+   * 运行期这一侧的方向必须是"畸形 ⇒ 当作开着"）：形状合法性的唯一判据是构建期的
+   * `scripts/channel-constants.ts` 的 `normalizeChannelFeatures()`（fail-loud）。
+   * 没有渠道包（官方/本地）时是全开 —— 与改造前的行为逐字节相同。
+   */
+  readonly features: FeatureSwitches
 }
 
 /**
@@ -518,6 +534,11 @@ export function parseDesktopChannelProfile(input: unknown): DesktopChannelProfil
     allowSystemProxy,
     speech,
     brand,
+    // 功能模块开关（P2）：渠道包由 `stageChannelProfile()` 写入规范化后的三键表
+    // （`withChannelFeatures`），而**运维手工改过的随包 channel.json** 与合成夹具
+    // 都可能缺它/写坏它 —— 所以这里再过一次 `normalizeFeatureSwitches`（缺省全开、
+    // 畸形按"开着"，方向保守）。这一层不抛错：形状判据在构建期。
+    features: normalizeFeatureSwitches(record.features as FeatureSwitches | undefined),
   }
 }
 

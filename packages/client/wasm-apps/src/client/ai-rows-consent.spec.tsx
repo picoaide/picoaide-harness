@@ -37,7 +37,9 @@ import { setActiveLocale, zh } from './locales.ts'
 /** 仓库根：从本文件（`packages/client/wasm-apps/src/client/`）往上走五级。 */
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..', '..')
 
-const HOST_WASM_APPS_TS = 'packages/host/enterprise/src/wasm-apps.ts'
+// 2026-10-13（P0-b）：应用面的宿主编排随 host 面搬到
+// `packages/host/wasm-apps-host/src/`。对拍判据的对象没变（还是那一份唯一实现）。
+const HOST_WASM_APPS_TS = 'packages/host/wasm-apps-host/src/wasm-apps.ts'
 
 /** 一次被 stub 的 fetch 调用。 */
 interface Call { url: string, method: string, body: string }

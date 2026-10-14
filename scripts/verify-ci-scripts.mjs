@@ -39,12 +39,15 @@ import { createHash, createHmac } from 'node:crypto'
 import { crc32, deflateSync } from 'node:zlib'
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { dirname, join, relative, resolve, sep } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import vm from 'node:vm'
 
 // 复用门禁自己的 run 块解析器:下面 1c 要**真跑** ci.yml 里的 shell 步骤(不是文本对拍)。
 import { extractRunBlocks } from './check-workflows.mjs'
+// 模块编译契约的**面数**（单一真源在这里：`scripts/gen-module-contract.mjs`）。
+// 第 20 节只用它拼汇总串，**不在调用点重算**（重算就是第二份口径）。
+import { MODULE_CONTRACT_FACE_COUNTS } from './gen-module-contract.mjs'
 // step 级字段(`env:`)必须走 YAML 解析 —— 1d 的 W-8 判据问的是"这一步的 env 里有没有
 // 那个变量",子串匹配会把别处(别的 job/别的 step)的同一行算进来。
 import { parse as parseYaml } from 'yaml'
@@ -3636,6 +3639,564 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
     })
     check(reserved.status !== 0, `保留 scheme ${value} 必须失败`)
     check(reserved.stderr.includes('desktop.app_origin_scheme'), `保留 scheme ${value} 的失败信息应点名该字段`)
+  }
+}
+
+// ---- 3c. 渠道功能模块声明（`features`，2026-10-13）----
+//
+// 语义：`channel.json` 顶层的 `features: { skills?, apps?, connectors? }`，**缺省全开**
+// （基础功能恒开 —— 不写这个键的既有渠道行为逐字节不变）。契约（变体标识的消费面、
+// 哨兵串的两条硬约束）见 `docs/decisions/2026-10-13-channel-feature-modules.md`。
+//
+// 为什么这一节要三层判据（缺任何一层都留下一个已知的假绿形态）：
+//   ①**纯函数**（唯一真源，真跑常量模块）：缺省全开 / 显式关闭 / 未知键 / 非法类型 ——
+//     两个方向都判，于是两种典型变异当场红：「把缺省全开改成缺省全关」（正例红）、
+//     「把 features 解析改成静默丢字段」（负例红：坏声明不再被拒）；
+//   ②**校验层**（真跑 `ci-channels.sh`）：非法声明必须让**这个渠道没有产物**，
+//     且报错**不回显取值/未知键名**（它们可能是客户品牌，而这条输出进公开 Actions 日志）；
+//   ③**官方模板 + 哨兵串**：模板键表逐模块派生（"官方渠道是新增渠道的模板"这条语义
+//     必须真的能拦住"忘了声明 features"），哨兵串钉在各模块**自己的装配点**上
+//     （命名规则从 `FEATURE_MODULES` 派生，不是四处各写一份字面量）。
+{
+  const constantsPath = join(root, 'packages/host/desktop/scripts/channel-constants.ts')
+  // 真跑常量模块：它不是"文本里出现过某几个词"，而是**被执行**的那份实现。
+  // （`.ts` 直读依赖 Node 的类型剥离 —— 第 17 节已经在裸检出里实跑过同一件事。）
+  const constants = await import(pathToFileURL(constantsPath).href)
+  const MODULES = constants.FEATURE_MODULES
+  check(Array.isArray(MODULES) && MODULES.length > 0,
+    'channel-constants.ts 必须导出非空的 FEATURE_MODULES（features 的键集合唯一真源）')
+
+  // ---- ① 纯函数：两个方向都判（这就是"缺省全开 ⇒ 缺省全关"与"静默丢字段"两个变异体的判据）----
+  const NORMALIZED_DEFAULT = constants.normalizeChannelFeatures(undefined)
+  check(JSON.stringify(NORMALIZED_DEFAULT) === JSON.stringify(Object.fromEntries(MODULES.map(m => [m, true]))),
+    `不写 features 必须规范化成**全开**（实际 ${JSON.stringify(NORMALIZED_DEFAULT)}）—— `
+    + '这是"基础功能恒开"的唯一实现；改成缺省全关会让每个既有渠道静默少交付功能，且没有任何红灯')
+  check(constants.channelFeaturesVariant(NORMALIZED_DEFAULT) === MODULES.join(','),
+    `缺省全开时变体标识必须是全部模块（实际 ${String(constants.channelFeaturesVariant(NORMALIZED_DEFAULT))}）`)
+  const oneOff = constants.normalizeChannelFeatures({ [MODULES[0]]: false })
+  check(oneOff[MODULES[0]] === false && MODULES.slice(1).every(m => oneOff[m] === true),
+    '显式关闭一个模块时，其余模块必须保持开启（部分声明不得被当成"其余也关"）')
+  check(constants.channelFeaturesVariant(oneOff) === MODULES.slice(1).join(','),
+    `关掉 ${MODULES[0]} 后的变体标识应恰好是其余模块（实际 ${String(constants.channelFeaturesVariant(oneOff))}）`)
+  const allOff = constants.normalizeChannelFeatures(Object.fromEntries(MODULES.map(m => [m, false])))
+  check(constants.channelFeaturesVariant(allOff) === 'none',
+    '三个模块全关时变体标识必须是 none（空串在 shell/CI 里到处是"没设置"的歧义）')
+  check(constants.channelFeaturesVariantAssignment(allOff) === 'FEATURES=none',
+    '变体标识的赋值形态必须是 FEATURES=<变体>（Go -tags / docker --build-arg / 客户端组装共用同一个串）')
+
+  // 负例（"坏声明必须被拒"）：每一条都必须**抛错**。这就是"静默丢字段/静默忽略坏键"
+  // 那个变异体的判据 —— 一旦改成宽容处理，这几条立刻红。
+  const REJECT_MARKER_VALUE = 'off-marker-not-a-boolean'
+  const REJECT_MARKER_KEY = 'x-marker-unknown-module'
+  for (const [raw, why] of [
+    [{ [REJECT_MARKER_KEY]: true }, '未知模块名'],
+    [{ [MODULES[0]]: REJECT_MARKER_VALUE }, '取值不是布尔（字符串 "false" 在 JS 里是真值）'],
+    [{ [MODULES[0]]: 0 }, '取值是数字'],
+    [[MODULES[0]], '不是对象（数组）'],
+    [MODULES[0], '不是对象（字符串）'],
+    [null, '不是对象（null）'],
+  ]) {
+    let thrown
+    try {
+      constants.normalizeChannelFeatures(raw)
+    } catch (error) {
+      thrown = error
+    }
+    check(thrown !== undefined,
+      `features 声明为${why}时必须抛错（静默接受 = 按"没声明"处理 ⇒ 模块照样交付，而配置上完全看不出来）`)
+    if (thrown !== undefined) {
+      const text = String(thrown?.message ?? thrown)
+      check(!text.includes(REJECT_MARKER_VALUE) && !text.includes(REJECT_MARKER_KEY),
+        `features 的报错不得回显取值/未知键名（可能是客户品牌，而构建日志是公开的）：${text.slice(0, 120)}`)
+    }
+  }
+
+  // ---- ② 校验层：真跑 ci-channels.sh（合成夹具；官方渠道缺 features 不得因此变红）----
+  /**
+   * 合成渠道仓：official + 一个品牌渠道，`features` 片段逐例注入（其余字段给全，
+   * 保证每条用例只在被测的那条规则上失败 —— 本项目最贵的假绿形态）。
+   */
+  const featuresRepo = brandFeatures => {
+    const dir = tempDir('ci-channels-features-')
+    mkdirSync(join(dir, 'channels', 'official'), { recursive: true })
+    writeFileSync(join(dir, 'channels', 'official', 'channel.json'), JSON.stringify({
+      schema: 1,
+      channel_id: 'official',
+      identity: { display_name: 'Official', short_name: 'Official' },
+      desktop: { app_origin_scheme: 'picoaide-app' },
+    }))
+    mkdirSync(join(dir, 'channels', 'example-brand'), { recursive: true })
+    writeFileSync(join(dir, 'channels', 'example-brand', 'channel.json'), JSON.stringify({
+      schema: 1,
+      channel_id: 'example-brand',
+      identity: { display_name: 'Example', short_name: 'Example' },
+      assets: { logo: 'logo.svg' },
+      desktop: {
+        slug: 'Example-AI',
+        app_id: 'com.example.brand',
+        deep_link_scheme: 'examplebrand',
+        app_origin_scheme: 'examplebrand-app',
+        home_dir: '.example-harness',
+      },
+      ...(brandFeatures === undefined ? {} : { features: brandFeatures }),
+    }))
+    writeChannelAssetFiles(dir, 'example-brand')
+    padChannelRepo(dir)
+    return dir
+  }
+  const runFeatures = (brandFeatures, extra = {}) => runChannels({
+    source: featuresRepo(brandFeatures), refName: 'v9.9.9', dest: 'channels', list: 'feat.list', ...extra,
+  })
+
+  // 正例 1：**缺省全开** —— 四个渠道都没有 features 键（= 当前私有仓的状态）时必须全绿。
+  const defaultRun = runFeatures(undefined)
+  check(defaultRun.status === 0,
+    `没有任何渠道声明 features 时必须全绿（缺省 = 全开，基础功能恒开），实际退出 ${String(defaultRun.status)}：${defaultRun.stderr.slice(0, 300)}`)
+  check(!defaultRun.stderr.includes('features('),
+    `缺省路径不得把 features 报成问题（那会让每个既有渠道都红），实际：${defaultRun.stderr.slice(0, 200)}`)
+  check(!defaultRun.stderr.includes('::error::'),
+    `缺省路径不得有任何 ::error::，实际：${defaultRun.stderr.slice(0, 200)}`)
+
+  // 正例 2：显式写全 true = 与不写等价；显式关一个 = 合法。
+  for (const [value, why] of [
+    [Object.fromEntries(MODULES.map(m => [m, true])), '显式全开'],
+    [{ [MODULES[0]]: false }, '显式关掉一个模块'],
+  ]) {
+    const ok = runFeatures(value)
+    check(ok.status === 0, `${why}的 features 必须通过，实际退出 ${String(ok.status)}：${ok.stderr.slice(0, 300)}`)
+  }
+
+  // 负例 1：取值不是布尔 —— 这是最贵的一种（`"false"` 在 JS 里是真值 ⇒ "以为关了其实没关"）。
+  const badTypeRun = runFeatures({ [MODULES[0]]: REJECT_MARKER_VALUE })
+  check(badTypeRun.status !== 0, 'features 的取值不是布尔时必须让该渠道失败（静默按"开启"处理 = 客户拿到他明确关掉的模块）')
+  check(badTypeRun.stderr.includes(`features.${MODULES[0]}`),
+    `取值非布尔的失败信息应点名 features.${MODULES[0]}，实际：${badTypeRun.stderr.slice(0, 200)}`)
+  check(!`${badTypeRun.stdout}${badTypeRun.stderr}`.includes(REJECT_MARKER_VALUE),
+    '取值非布尔的失败信息不得回显取值（渠道包里的任意字符串会进公开日志）')
+
+  // 负例 2：未知模块名 —— 拼错的键（skill→skils）必须现形，而不是被当成"没声明"。
+  const unknownRun = runFeatures({ [REJECT_MARKER_KEY]: true })
+  check(unknownRun.status !== 0, 'features 里有未登记的模块名时必须让该渠道失败')
+  check(unknownRun.stderr.includes('features'),
+    `未知模块名的失败信息应指向 features 字段，实际：${unknownRun.stderr.slice(0, 200)}`)
+  check(!`${unknownRun.stdout}${unknownRun.stderr}`.includes(REJECT_MARKER_KEY),
+    '未知模块名的失败信息不得回显键名（键名本身可能是渠道/品牌标识，与素材键同一条纪律）')
+  // 合法模块名必须**真的出现在报错里**：官网《渠道与品牌》页（中英两版）承诺"报错点名字段与
+  // 合法模块名"，而 2026-10-13 独立审计 P2 实测这里原本只有"见 channel-constants.ts 的
+  // FEATURE_MODULES" —— 读者得自己打开源码文件才拿到三个名字，承诺比实现对得宽一档。
+  // 模块名是公开仓里的常量（不是渠道身份），回显它不违反"不回显取值/未知键名"那条纪律；
+  // 这条判据钉住那句承诺：有人把清单换回"见某某文件"即红。
+  for (const module of MODULES) {
+    check(unknownRun.stderr.includes(module),
+      `未知模块名的失败信息必须列出合法模块名 ${module}（官网《渠道与品牌》页承诺"报错点名字段与合法模块名"；`
+      + '模块名是公开常量，列出它不泄露渠道身份 —— 取值与未知键名仍然不回显）')
+  }
+
+  // 负例 3：不是对象（数组/字符串/null）—— 整份声明没有意义。
+  for (const [raw, why] of [[[MODULES[0]], '数组'], [MODULES[0], '字符串'], [null, 'null']]) {
+    const run = runFeatures(raw)
+    check(run.status !== 0, `features 是${why}时必须让该渠道失败（不是对象 ⇒ 声明无效）`)
+    check(run.stderr.includes('features'), `features 是${why}的失败信息应指向 features 字段`)
+  }
+
+  // ---- ③ 官方模板：键表逐模块派生，而且**真的**拦得住缺键 ----
+  const templateKeys = constants.CHANNEL_TEMPLATE_KEYS
+  for (const module of MODULES) {
+    check(templateKeys.includes(`features.${module}`),
+      `官方渠道模板键表必须逐模块列出 features.${module}（官方渠道 = 新增渠道的模板：`
+      + '少这一行，拷贝模板的新渠道就看不到有哪几个模块可关 —— 那正是这张表要防的"藏在代码兜底值里"）')
+  }
+  /**
+   * 官方渠道夹具：**逐键**满足 `CHANNEL_TEMPLATE_KEYS`。
+   *
+   * 表里新增键时这个夹具会红（模板判据会点名缺的键）—— 那是有意的：夹具必须与
+   * "官方渠道是一份完整清单"这条语义同形，否则这一节会在模板演进后变成假绿。
+   */
+  const TEMPLATE_VALUES = {
+    'schema': 1,
+    'channel_id': 'official',
+    'meta.description': 'Official channel fixture',
+    'meta.updated': '2026-10-13',
+    'identity.display_name': 'Official',
+    'identity.short_name': 'Official',
+    'identity.tagline': 'Official harness',
+    'identity.title': 'Official',
+    'copy.login_display_name': 'Official',
+    'copy.login_tagline': 'Official harness',
+    'copy.login_welcome': 'Welcome',
+    'copy.client_display_name': 'Official',
+    'copy.client_tagline': 'Official harness',
+    'copy.portal_welcome': 'Welcome',
+    'assets.logo': 'logo.svg',
+    'assets.logo_dark': 'logo.svg',
+    'assets.favicon': 'logo.svg',
+    'assets.accent': '#123456',
+    'defaults.server_url': 'https://harness.example.com',
+    'defaults.telemetry_channel': 'official',
+    'desktop.product_name': 'Official',
+    'desktop.slug': 'Official',
+    'desktop.app_id': 'com.example.official',
+    'desktop.home_dir': '.picoaide-harness',
+    'desktop.deep_link_scheme': 'picoaide',
+    'desktop.app_origin_scheme': 'picoaide-app',
+    'desktop.platforms': ['win', 'mac', 'linux'],
+  }
+  for (const module of MODULES) TEMPLATE_VALUES[`features.${module}`] = true
+  /** 按点分路径写值（表的形状是点分路径，夹具必须与它同源）。 */
+  const setPath = (target, path, value) => {
+    const segments = path.split('.')
+    let cursor = target
+    for (const segment of segments.slice(0, -1)) {
+      cursor[segment] = cursor[segment] ?? {}
+      cursor = cursor[segment]
+    }
+    cursor[segments[segments.length - 1]] = value
+  }
+  /**
+   * 造一个 `--require-template` 用的渠道仓：官方渠道逐键显式（可选摘掉若干键）。
+   * @param dropped - 要从官方配置里摘掉的键（造"模板缺键"负例）。
+   */
+  const templateRepo = (dropped = []) => {
+    const dir = tempDir('ci-channels-template-')
+    const official = {}
+    for (const [path, value] of Object.entries(TEMPLATE_VALUES)) {
+      if (dropped.includes(path)) continue
+      setPath(official, path, value)
+    }
+    mkdirSync(join(dir, 'channels', 'official'), { recursive: true })
+    writeFileSync(join(dir, 'channels', 'official', 'channel.json'), JSON.stringify(official, null, 2))
+    for (const name of ['logo.svg']) {
+      copyFileSync(join(root, 'brands', 'official', name), join(dir, 'channels', 'official', name))
+    }
+    padChannelRepo(dir)
+    return dir
+  }
+  const templateKeysUncovered = templateKeys.filter(key => !(key in TEMPLATE_VALUES))
+  check(templateKeysUncovered.length === 0,
+    `官方模板夹具没有覆盖 ${templateKeysUncovered.length} 个模板键（新增键时夹具要跟着补，否则这一节会变成假绿）`)
+
+  const templateOk = runChannels({
+    source: templateRepo(), refName: 'v9.9.9', dest: 'channels', list: 'tpl.list', args: ['--require-template'],
+  })
+  check(templateOk.status === 0,
+    `逐键显式的官方渠道必须通过 --require-template（含 features 三个模块），实际退出 ${String(templateOk.status)}：${templateOk.stderr.slice(0, 300)}`)
+
+  const droppedModule = MODULES[MODULES.length - 1]
+  const templateMissing = runChannels({
+    source: templateRepo([`features.${droppedModule}`]),
+    refName: 'v9.9.9', dest: 'channels', list: 'tpl2.list', args: ['--require-template'],
+  })
+  check(templateMissing.status !== 0, '官方渠道漏写 features.<module> 时必须失败（模板 = 完整清单）')
+  check(templateMissing.stderr.includes(`features.${droppedModule}`),
+    `模板缺键的失败信息必须点名 features.${droppedModule}，实际：${templateMissing.stderr.slice(0, 300)}`)
+
+  // ---- ④ 哨兵串：命名规则从 FEATURE_MODULES 派生，落点在各模块自己的装配点 ----
+  //
+  // **判据的边界（写清楚，免得被当成端到端证明）**：下面是**静态代理** —— 它判的是
+  // "串在该模块的装配函数里被**可执行地**引用，因而不会被链接器整串丢掉"。真正的端到端
+  // 判据是依赖图/文件清单（模块有没有被打进产物），而哨兵只是**副证**；且哨兵判据必须
+  // **双侧**（关闭变体里"没有"是恒真的，必须有"开启变体里**存在**"的另一半）。
+  //
+  // 2026-10-13 独立审计 P1（第一版判据实测踩到的形态）：第一版判的是"标识符**文本**在
+  // `apply()` 之后出现过"，于是"**删掉 `apply()` 里唯一的可执行引用、只留一行提到它的
+  // 注释**"这个变异体**全绿**（实测：与未变异基线逐条 diff，哨兵相关的失败零条）。判
+  // "文本出现过"与判"可执行引用"的差别就是这条判据的全部内容 —— 所以下面先把注释与
+  // 字符串字面量排掉、用括号配对取出 `apply()` 的函数体、要求体内出现**值位置的读取**，
+  // 再用合成样本把判据自己钉住（⑤）。
+  /**
+   * 把一段 TS 源码扫成 **代码位置的 token 流**（注释、字符串字面量、模板字面量的**文本段**
+   * 里的名字一律不算 —— 它们同样会被打包器丢掉，判它们等于没判）。
+   *
+   * 为什么需要它（2026-10-13 独立审计 P1）：这条判据的第一版判的是"标识符文本在 `apply()`
+   * 之后出现过"，于是"**删掉 apply() 里唯一的可执行引用、只留一行提到它的注释**"这个变异体
+   * **全绿** —— 而那正是这条判据存在的唯一理由。判"文本出现过"与判"可执行引用"的差别就
+   * 在这里：先把注释/字符串排掉，剩下的才是会被链接器看见的东西。
+   *
+   * 形态：手写扫描器，认得注释、单/双引号字符串、模板字面量（`${}` 里的插值切回代码状态）、
+   * 正则字面量（按"前一个有效字符能否结束表达式"区分除号）与花括号深度（用于配对模板插值）。
+   * 它是**判据的判据**，刻意不引第三方 parser：这个脚本要在裸检出里跑（见本文件头部）。
+   * @param source - 模块源码。
+   * @returns token 列表（`kind: 'ident' | 'punct'`，`index` 为源码偏移）。
+   */
+  const scanCodeTokens = source => {
+    const tokens = []
+    const frames = [{ kind: 'code', depth: 0 }]
+    const isIdentStart = c => c !== undefined && /[A-Za-z_$]/u.test(c)
+    const isIdentPart = c => c !== undefined && /[A-Za-z0-9_$]/u.test(c)
+    /** 跳过一段引号字符串（未闭合/换行即停：绝不越界吞掉后面的代码）。 */
+    const skipQuoted = (start, quote) => {
+      let j = start + 1
+      while (j < source.length) {
+        const c = source[j]
+        if (c === '\\') { j += 2; continue }
+        if (c === quote) return j + 1
+        if (c === '\n') return j + 1
+        j += 1
+      }
+      return source.length
+    }
+    /** 跳过一段正则字面量；不是正则（跨行）时退回"当除号处理"。 */
+    const skipRegex = start => {
+      let j = start + 1
+      let inClass = false
+      while (j < source.length) {
+        const c = source[j]
+        if (c === '\\') { j += 2; continue }
+        if (c === '\n') return start + 1
+        if (inClass) { if (c === ']') inClass = false; j += 1; continue }
+        if (c === '[') { inClass = true; j += 1; continue }
+        if (c === '/') {
+          j += 1
+          while (j < source.length && /[a-z]/iu.test(source[j])) j += 1
+          return j
+        }
+        j += 1
+      }
+      return start + 1
+    }
+    let i = 0
+    while (i < source.length) {
+      const frame = frames[frames.length - 1]
+      const ch = source[i]
+      if (frame.kind === 'template') {
+        if (ch === '\\') { i += 2; continue }
+        if (ch === '`') { frames.pop(); i += 1; continue }
+        if (ch === '$' && source[i + 1] === '{') {
+          tokens.push({ value: '{', index: i + 1, end: i + 2, kind: 'punct' })
+          frames.push({ kind: 'code', depth: 0 })
+          i += 2
+          continue
+        }
+        i += 1
+        continue
+      }
+      if (ch === '/' && source[i + 1] === '/') {
+        const nl = source.indexOf('\n', i)
+        i = nl < 0 ? source.length : nl + 1
+        continue
+      }
+      if (ch === '/' && source[i + 1] === '*') {
+        const end = source.indexOf('*/', i + 2)
+        i = end < 0 ? source.length : end + 2
+        continue
+      }
+      if (ch === "'" || ch === '"') { i = skipQuoted(i, ch); continue }
+      if (ch === '`') { frames.push({ kind: 'template' }); i += 1; continue }
+      if (ch === '/') {
+        const prev = tokens[tokens.length - 1]
+        const prevChar = prev === undefined ? '' : (prev.kind === 'ident' ? 'x' : prev.value)
+        if (!/[A-Za-z0-9_$)\]]/u.test(prevChar)) { i = skipRegex(i); continue }
+        tokens.push({ value: '/', index: i, end: i + 1, kind: 'punct' })
+        i += 1
+        continue
+      }
+      if (ch === '{') {
+        frame.depth += 1
+        tokens.push({ value: '{', index: i, end: i + 1, kind: 'punct' })
+        i += 1
+        continue
+      }
+      if (ch === '}') {
+        if (frame.depth === 0 && frames.length > 1) {
+          tokens.push({ value: '}', index: i, end: i + 1, kind: 'punct' })
+          frames.pop()
+          i += 1
+          continue
+        }
+        frame.depth = Math.max(0, frame.depth - 1)
+        tokens.push({ value: '}', index: i, end: i + 1, kind: 'punct' })
+        i += 1
+        continue
+      }
+      if (isIdentStart(ch)) {
+        let j = i
+        while (j < source.length && isIdentPart(source[j])) j += 1
+        tokens.push({ value: source.slice(i, j), index: i, end: j, kind: 'ident' })
+        i = j
+        continue
+      }
+      // 空白不进 token 流：判据里的"前/后一个有效字符"必须真的是有效字符
+      // （第一版漏了这一步，于是 prev 永远是空格，判据把所有形态都判成"没有引用"）。
+      if (/\s/u.test(ch)) { i += 1; continue }
+      tokens.push({ value: ch, index: i, end: i + 1, kind: 'punct' })
+      i += 1
+    }
+    return tokens
+  }
+
+  /**
+   * 取出 `export function apply(...)` 的**函数体**字符区间（`{` 到配对的 `}`）。
+   *
+   * 为什么必须配对而不是 `indexOf('{')`：参数表里就可能有花括号
+   * （`apply(ctx, options = {})`，本仓三个落点里有两个是这样），`indexOf` 会把那个空对象
+   * 当成函数体 —— 于是"体内有没有引用"退化成"参数之后有没有这个名字"，判据当场失效。
+   * @param source - 模块源码。
+   * @returns `{ start, end }`（`end` 为配对 `}` 的下一字符）；找不到时 undefined。
+   */
+  const applyBodyRange = source => {
+    const tokens = scanCodeTokens(source)
+    const applyAt = source.indexOf('export function apply(')
+    if (applyAt < 0) return undefined
+    const open = tokens.find(token => token.value === '(' && token.index >= applyAt)
+    if (open === undefined) return undefined
+    let depth = 0
+    let close
+    for (const token of tokens) {
+      if (token.index < open.index) continue
+      if (token.value === '(') depth += 1
+      else if (token.value === ')') {
+        depth -= 1
+        if (depth === 0) { close = token; break }
+      }
+    }
+    if (close === undefined) return undefined
+    const brace = tokens.find(token => token.value === '{' && token.index > close.index)
+    if (brace === undefined) return undefined
+    depth = 0
+    for (const token of tokens) {
+      if (token.index < brace.index) continue
+      if (token.value === '{') depth += 1
+      else if (token.value === '}') {
+        depth -= 1
+        if (depth === 0) return { start: brace.index, end: token.index + 1 }
+      }
+    }
+    return undefined
+  }
+
+  /**
+   * 一处标识符出现是不是**值位置的读取**（不是赋值目标、不是属性键、不是别人的成员名）。
+   * @param tokens - {@link scanCodeTokens} 的结果。
+   * @param index - 该标识符在 token 列表里的下标。
+   * @returns 是值位置读取时为 true。
+   */
+  const isValueUse = (tokens, index) => {
+    const prev = tokens[index - 1]
+    const next = tokens[index + 1]
+    if (next === undefined) return false
+    if (next.value === '=' && tokens[index + 2]?.value !== '=') return false
+    if (next.value === ':') return false
+    if (prev === undefined) return false
+    if (prev.value === '.') return false
+    if (prev.kind === 'ident') return ['return', 'typeof', 'await', 'yield'].includes(prev.value)
+    return ['(', ',', '+', '{', '[', '=', '?', ':', '>'].includes(prev.value)
+  }
+
+  /**
+   * 哨兵引用判据（**纯函数**：合成样本必须用同一个判据正反两侧钉住，不许另写一份实现）。
+   *
+   * 判两件事：
+   *   1. 标识符在**代码位置**至少出现两次（声明处 + 至少一处引用）；
+   *   2. 其中至少一处落在 `apply()` 的**函数体**里、并且是**值位置的读取** —— 只写在注释、
+   *      字符串字面量、体内重声明（遮蔽）或属性键里都不算。
+   * @param source - 模块源码。
+   * @param identifier - 哨兵常量的标识符（从声明处抓出来的那个）。
+   * @returns 问题清单（空数组 = 通过）。
+   */
+  const sentinelReferenceProblems = (source, identifier) => {
+    const problems = []
+    const tokens = scanCodeTokens(source)
+    const occurrences = tokens.filter(token => token.kind === 'ident' && token.value === identifier).length
+    if (occurrences < 2) {
+      problems.push(`哨兵常量 ${identifier} 在**代码位置**只出现 ${occurrences} 次（注释与字符串字面量里的名字不算：它们同样会被打包器丢掉）`)
+    }
+    const body = applyBodyRange(source)
+    if (body === undefined) {
+      problems.push('取不到 `export function apply(` 的函数体（哨兵必须写在该模块的装配点：模块注册/装配时写入日志或登记表的那一处）')
+      return problems
+    }
+    const inBody = []
+    tokens.forEach((token, index) => {
+      if (token.kind !== 'ident' || token.value !== identifier) return
+      if (token.index <= body.start || token.index >= body.end) return
+      inBody.push(index)
+    })
+    if (inBody.some(index => ['const', 'let', 'var', 'function', 'class'].includes(tokens[index - 1]?.value ?? ''))) {
+      problems.push(`apply() 的函数体里**重声明**了 ${identifier}（遮蔽同名常量：模块级那个哨兵串从此没有任何可执行引用，链接器可以整串丢掉）`)
+    }
+    if (!inBody.some(index => isValueUse(tokens, index))) {
+      problems.push(`apply() 的函数体里没有 ${identifier} 的**可执行引用**（值位置：模板插值 \${IDENT} / 拼接 + IDENT / 实参 f(IDENT) / 属性值 k: IDENT —— 只写在注释、字符串或体内重声明里都与"这个模块被装配了"无关）`)
+    }
+    return problems
+  }
+  const SENTINEL_SITES = {
+    // 2026-10-13（P0-b）：技能遥测行随技能面从 enterprise 搬进能力中心包。
+    skills: 'packages/host/capability-center/src/host/skill-telemetry.ts',
+    apps: 'packages/host/wasm-apps-host/src/index.ts',
+    connectors: 'packages/host/connectors/src/index.ts',
+  }
+  for (const module of MODULES) {
+    const relative = SENTINEL_SITES[module]
+    check(typeof relative === 'string' && relative !== '',
+      `模块 ${module} 没有登记哨兵串的落点 —— 新增模块时必须在 SENTINEL_SITES 里写明它的装配点，`
+      + '否则"这个模块的哨兵在不在产物里"没有任何判据')
+    if (typeof relative !== 'string' || relative === '') continue
+    const file = join(root, relative)
+    if (!check(existsSync(file), `哨兵落点不存在：${relative}`)) continue
+    const source = readFileSync(file, 'utf8')
+    const sentinel = constants.featureSentinel(module)
+    const declaration = new RegExp(`export const ([A-Z0-9_]+) = '${sentinel.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}'`, 'u').exec(source)
+    check(declaration !== null,
+      `${relative} 必须把哨兵串 ${sentinel} 作为字面量声明（命名规则不许各写一份：`
+      + '它是从 channel-constants.ts 的 featureSentinel() 派生的）')
+    if (declaration === null) continue
+    const identifier = declaration[1]
+    const problems = sentinelReferenceProblems(source, identifier)
+    check(problems.length === 0,
+      `${relative} 的哨兵常量 ${identifier} 没有通过"可执行引用"判据：${problems.join('；')}`)
+  }
+
+  // ---- ⑤ 量具自检：合成样本必须落在判据的两侧 ----
+  //
+  // 为什么必须常驻这一段（2026-10-13 独立审计 P1 的直接教训）：④ 的第一版判"文本出现过"，
+  // 于是"删掉可执行引用、只留注释"的变异体全绿。判据改成"可执行引用"之后，**那个变异形态
+  // 本身**必须是常驻的红灯来源 —— 否则下一轮谁把实现退回 `includes()`，本节其它样本不会有
+  // 任何反应："判据被判据钉住"的那一半缺了，这一节就只是看起来在判。
+  const PROBE_SENTINEL_IDENTIFIER = 'PROBE_FEATURE_SENTINEL'
+  const probeSentinelSource = body => `export const ${PROBE_SENTINEL_IDENTIFIER} = 'picoaide.feature.probe.v1'\n${body}\n`
+  /** 合成正例：这些都是"真的读了那个常量"，判据必须接受（判红正确写法 = 判据本身是坏的）。 */
+  const SENTINEL_PROBE_ACCEPT = [
+    ['模板插值（三个落点当前的形态）',
+      'export function apply(ctx) {\n  ctx.logger?.info?.(`registered (${' + PROBE_SENTINEL_IDENTIFIER + '})`)\n}'],
+    ['字符串拼接（参数表里带默认对象：函数体必须靠括号配对取，不能 indexOf 第一个花括号）',
+      'export function apply(ctx, options = {}) {\n  ctx.logger.info(\'registered (\' + ' + PROBE_SENTINEL_IDENTIFIER + ')\n}'],
+    ['调用实参', 'export function apply(ctx) {\n  register(ctx, ' + PROBE_SENTINEL_IDENTIFIER + ')\n}'],
+    ['属性值', 'export function apply(ctx) {\n  record({ sentinel: ' + PROBE_SENTINEL_IDENTIFIER + ' })\n}'],
+  ]
+  /** 合成负例：**串没有被任何可执行代码读到**的几种形态，判据必须逐条拒绝。 */
+  const SENTINEL_PROBE_REJECT = [
+    ['删掉可执行引用、只留一行注释（审计实测全绿的那个变异体）',
+      'export function apply(ctx) {\n  // 装配哨兵 ' + PROBE_SENTINEL_IDENTIFIER + ' 曾经写在这一行\n}'],
+    ['只剩字符串字面量里的名字（文本出现过，但读的是那个字符串）',
+      'export function apply(ctx) {\n  ctx.logger.info(\'registered (' + PROBE_SENTINEL_IDENTIFIER + ')\')\n}'],
+    ['apply() 体内完全不出现（只在模块顶层声明）',
+      'export function apply(ctx) {\n  ctx.logger.info(\'registered\')\n}'],
+    ['体内重声明同名常量（遮蔽：模块级那个串再没被读到）',
+      'export function apply(ctx) {\n  const ' + PROBE_SENTINEL_IDENTIFIER + ' = 1\n  register(String(' + PROBE_SENTINEL_IDENTIFIER + '))\n}'],
+    ['体内只作为属性键（读的是键名，不是那个常量）',
+      'export function apply(ctx) {\n  record({ ' + PROBE_SENTINEL_IDENTIFIER + ': 1 })\n}'],
+  ]
+  for (const [why, body] of SENTINEL_PROBE_ACCEPT) {
+    const problems = sentinelReferenceProblems(probeSentinelSource(body), PROBE_SENTINEL_IDENTIFIER)
+    check(problems.length === 0,
+      `哨兵判据必须接受${why}（合成正例）—— 把正确写法判红就等于没有判据，实际判为问题：${problems.join('；')}`)
+  }
+  for (const [why, body] of SENTINEL_PROBE_REJECT) {
+    const problems = sentinelReferenceProblems(probeSentinelSource(body), PROBE_SENTINEL_IDENTIFIER)
+    check(problems.length > 0,
+      `哨兵判据必须拒绝${why}（合成负例）—— 这一条是"判据被判据钉住"的那一半：`
+      + '缺了它，判据退回"标识符文本出现过"不会有任何红灯')
+  }
+  // 契约文档是本轮的交付物之一：它不在，变体标识的消费面与哨兵的两条硬约束就没有出处。
+  const contractDoc = join(root, 'docs', 'decisions', '2026-10-13-channel-feature-modules.md')
+  if (check(existsSync(contractDoc), '渠道功能模块契约文档必须存在（docs/decisions/2026-10-13-channel-feature-modules.md）')) {
+    const docText = readFileSync(contractDoc, 'utf8')
+    for (const module of MODULES) {
+      check(docText.includes(constants.featureSentinel(module)),
+        `契约文档必须列出 ${module} 的哨兵串（${constants.featureSentinel(module)}）—— 文档与模块清单一起漂移就没人能对账`)
+    }
+    check(docText.includes(`${constants.CHANNEL_FEATURES_VARIANT_KEY}=`),
+      '契约文档必须写明变体标识的赋值形态（FEATURES=<变体>）—— 那是给 Go -tags / build-arg 的消费契约')
   }
 }
 
@@ -7507,6 +8068,532 @@ exit 0
   }
 }
 
+// ---- 19. webadmin 变体接线：缺省值同源 / 哨兵落点登记 / 调度点（2026-10-14 独立审计 P1+P2）----
+//
+// 三条各自对应的现场（都能在没有本节的树里复现，且**都不产生任何红灯**）：
+//
+//   · **P2-4 缺省值三处手抄**：`server/Dockerfile` 的 `ARG FEATURES=` / `ARG GO_TAGS=`、
+//     `server/Makefile` 的 `GO_TAGS ?=`、`webadmin/features.mjs` 的 `DEFAULT_FEATURES_VARIANT`
+//     各自写一遍。把 FEATURES 缺省改成 `none` 而 GO_TAGS 不动 ⇒ 造出契约文档 §6 描述的
+//     "服务端裁了、管理端没裁"半通镜像，两侧判据都只看自己那半边 ⇒ 全绿。
+//   · **P2-6 webadmin 侧哨兵不在 P0 真源的判据面内**：哨兵串的唯一真源是
+//     `channel-constants.ts` 的 `featureSentinel()`（host 包的三处落点由本文件 3c 节判），
+//     而 webadmin 页面又手抄了同名串 —— 命名规则变更时 host 侧被强制更新、webadmin 侧
+//     （页面 + 产物判据）两边自洽地留着旧串，跨面语义静默分裂。
+//   · **P1-2 变体测试矩阵没有调度点**：`nav.test.ts` / `routes.test.ts` 按变体给期望
+//     （关掉的模块其侧栏条目 / 路由不得留在产物里），但 CI 的 `npm test` 与 `make check`
+//     缺省都只跑全开变体。实测（变异 M3：删掉 `nav.ts` 的开关过滤）：
+//     `FEATURES=skills,apps npm test` 红，而产物判据 `check:features` 与全开门禁全绿 ⇒
+//     关闭变体会发布一个指向不存在路由的侧栏条目（点进去 404），无人拦。
+//
+// 判据形态：**真跑**两侧的实现（渠道常量模块 + `webadmin/features.mjs`）比对**值**，
+// 而不是"文本里出现过某个串"；调度点（Makefile 目标 + `check` 调它 + CI server job 调它）
+// 三处缺一即红 —— "判据存在但没人启动"与"判据被删"在这里是同一件事。
+{
+  const constantsPath = join(root, 'packages/host/desktop/scripts/channel-constants.ts')
+  const constants = await import(pathToFileURL(constantsPath).href)
+  /** 模块清单的唯一真源（渠道契约）。 */
+  const MODULES = constants.FEATURE_MODULES
+  /** 缺省变体标识（全开）。 */
+  const DEFAULT_VARIANT = MODULES.join(',')
+
+  const featuresPath = join(root, 'server', 'webadmin', 'features.mjs')
+  check(existsSync(featuresPath), 'server/webadmin/features.mjs 必须存在（webadmin 侧变体解析的唯一真源）')
+  const webadminFeatures = existsSync(featuresPath) ? await import(pathToFileURL(featuresPath).href) : {}
+  check(JSON.stringify(webadminFeatures.FEATURE_MODULES) === JSON.stringify(MODULES),
+    'webadmin features.mjs 的 FEATURE_MODULES 必须与渠道契约（channel-constants.ts）逐字同源：'
+      + `实际 ${JSON.stringify(webadminFeatures.FEATURE_MODULES ?? null)}，期望 ${JSON.stringify(MODULES)}`
+      + ' —— 两个面各写一份模块清单时，"关掉的一个模块"在一侧存在、在另一侧不存在')
+  check(webadminFeatures.DEFAULT_FEATURES_VARIANT === DEFAULT_VARIANT,
+    `webadmin 的缺省变体必须是全部模块（期望 ${DEFAULT_VARIANT}，实际 `
+      + `${JSON.stringify(webadminFeatures.DEFAULT_FEATURES_VARIANT ?? null)}）—— 缺省变了而 Dockerfile/`
+      + 'Makefile 的缺省没变，就是"服务端裁了、管理端没裁"的半通镜像')
+
+  const dockerfile = readFileSync(join(root, 'server', 'Dockerfile'), 'utf8')
+  const makefile = readFileSync(join(root, 'server', 'Makefile'), 'utf8')
+
+  // ---- ① 三处缺省值必须同源（P2-4）------------------------------------------------
+  /**
+   * 取 Dockerfile 里某个 `ARG <name>=<默认值>` 的**全部**默认值（按出现顺序）。
+   *
+   * 2026-10-14（P2-5 收口）：`ARG GO_TAGS=` 现在出现**两次** —— webadmin stage 要拿它做
+   * fail-loud 断言（下面 ②b），Go stage 拿它喂 `go build -tags=`。旧口径（`exec` 只取第一条）
+   * 在"两处缺省值漂移"时不会有任何红灯：webadmin stage 写 `none`、Go stage 写全开照样过，
+   * 而那正是半通镜像的一种。所以改成取**全集** + 逐条相等。
+   * @param name - ARG 名。
+   * @returns 默认值数组（没有该 ARG ⇒ 空数组）。
+   */
+  const dockerArgDefaults = (name) =>
+    [...dockerfile.matchAll(new RegExp(`^ARG\\s+${name}=(.*)$`, 'gmu'))].map(match => match[1].trim())
+  const dockerFeatures = dockerArgDefaults('FEATURES')
+  const dockerGoTags = dockerArgDefaults('GO_TAGS')
+  const makeGoTags = (/^GO_TAGS\s*\?=\s*(.*)$/mu.exec(makefile) ?? [])[1]?.trim() ?? null
+  check(dockerFeatures.length >= 1 && dockerFeatures.every(value => value === DEFAULT_VARIANT),
+    `server/Dockerfile 的**每一处** \`ARG FEATURES=\` 缺省值都必须 = ${DEFAULT_VARIANT}`
+      + `（实际 ${JSON.stringify(dockerFeatures)}）—— 镜像的 webadmin 变体与 Go 变体是同一个串的`
+      + '两种编码，缺省不一致就是半通状态')
+  check(dockerGoTags.length >= 2 && new Set(dockerGoTags).size === 1 && dockerGoTags[0] === makeGoTags
+    && makeGoTags === DEFAULT_VARIANT,
+    'server/Dockerfile 的 `ARG GO_TAGS=` 必须**每一处**（webadmin stage 与 Go stage 各一处）都与'
+      + ' server/Makefile 的 `GO_TAGS ?=` 逐字相同、'
+      + `且 = ${DEFAULT_VARIANT}（Dockerfile ${JSON.stringify(dockerGoTags)} / Makefile ${String(makeGoTags)}）`
+      + ' —— 只判第一处时，两处漂移（webadmin 侧裁了、Go 侧没裁）不会有任何红灯')
+  check(/^FEATURES\s*\?=.*GO_TAGS/mu.test(makefile),
+    'server/Makefile 必须把 webadmin 的 FEATURES 从 GO_TAGS **机械翻译**出来'
+      + '（`FEATURES ?= $(if $(strip $(GO_TAGS)),$(GO_TAGS),none)` 那一行）—— 两个变量各自手填时，'
+      + '只覆盖一个就造出半通状态且没有任何红灯')
+
+  // ---- ② 变体开关必须写在依赖安装之后（P2-5：每个变体都要重跑 npm ci 的那个坑）------
+  {
+    // 三条都按**指令行**取（`^RUN …$`）：注释里提一句 `RUN npm run build` 不算数 ——
+    // 否则这条判据会被自己的说明文字骗过去（第一版就是这么红的）。
+    const npmCi = dockerfile.search(/^RUN npm ci\s*$/mu)
+    const argFeatures = dockerfile.search(/^ARG\s+FEATURES=/mu)
+    const envFeatures = dockerfile.search(/^ENV\s+FEATURES=\$FEATURES\s*$/mu)
+    const npmBuild = dockerfile.search(/^RUN npm run build\s*$/mu)
+    check(npmCi >= 0 && argFeatures > npmCi && envFeatures > npmCi && argFeatures < npmBuild && envFeatures < npmBuild,
+      'server/Dockerfile 的 `ARG FEATURES=` / `ENV FEATURES=$FEATURES` 必须写在 `RUN npm ci` **之后**、'
+        + '`RUN npm run build` **之前** —— ENV 是构建链上的一层，写在依赖安装之前时每换一个变体都会让'
+        + '它之后的全部层失效（实测：每个变体重跑一次全量 `npm ci`，含外网下载）')
+  }
+
+  // ---- ②b 两个变体 build-arg 必须**成对**：Dockerfile 里那条 fail-loud 断言（P2-5 收口）----
+  //
+  // 现场（2026-10-14 独立审计 P2-5）：`ARG FEATURES=`（webadmin stage）与 `ARG GO_TAGS=`
+  // （Go stage）此前**各自独立、无派生关系**，而 Dockerfile 里 Go stage 的注释又把
+  // `--build-arg GO_TAGS=`（空 = 三个模块全关）单独写成合法姿势 ⇒
+  // `docker build --build-arg GO_TAGS=apps,connectors .` 直接得到"服务端裁了、管理端全开"的
+  // 半通镜像（管理员点得进菜单、每个请求 404），而两侧判据都只看自己那半边 ⇒ 全绿。
+  // 决策文档 §6/§7.2 已把这条认账为"靠『只覆盖一个变量的入口纪律』"，但纪律只存在于散文里，
+  // 任何地方都没有红灯。
+  //
+  // 判据：Dockerfile 里必须**恰好一条**这样的 `RUN` 断言 —— 同时读 `$FEATURES` 与 `$GO_TAGS`、
+  // 做 `none` ⟺ 空 tag 集的翻译、不一致时 `exit 1`；且它必须落在 `ARG FEATURES=` **之后**、
+  // `RUN npm run build` **之前**（fail-loud 要在管理端构建之前发生，而不是构建完才发现）。
+  // 断言本身在构建期执行（实测：只传 GO_TAGS 或只传 FEATURES 都 EXIT=1、成对或缺省都通过、
+  // 且 `npm ci` 层跨变体仍命中缓存）—— 本判据保证它**不会**被后来的人删掉/改成恒真。
+  {
+    /** Dockerfile 里每个 `RUN` 指令的完整文本（含 `\` 续行）。 */
+    const dockerRunBlocks = [...dockerfile.matchAll(/^RUN[ \t]+((?:[^\n]*\\\n)*[^\n]*)$/gmu)]
+      .map(match => match[1])
+    /**
+     * "变体一致性断言"的问题清单（空 = 通过）。纯函数：量具自检直接喂合成样本。
+     * @param body - `RUN` 指令文本。
+     * @returns 问题说明数组。
+     */
+    const variantGuardProblems = (body) => {
+      if (!/\$\{?FEATURES\}?/u.test(body) || !/\$\{?GO_TAGS\}?/u.test(body)) {
+        return ['它没有同时读 `$FEATURES` 与 `$GO_TAGS`']
+      }
+      const problems = []
+      if (!/none/u.test(body) || !/=\s*""/u.test(body)) {
+        problems.push('它没有做 `none` ⟺ 空 tag 集的翻译（webadmin 用显式 `none` 表示三个全关，'
+          + 'Go 用空串；少了这一步，`make docker-image GO_TAGS=` 这条正常入口会被自己的断言拒掉）')
+      }
+      if (!/!=/u.test(body) || !/exit\s+1/u.test(body)) {
+        problems.push('它不一致时不会失败（缺 `!=` 比较或 `exit 1`）—— 那就只是一段打印')
+      }
+      return problems
+    }
+    const guardBlocks = dockerRunBlocks.filter(body => variantGuardProblems(body).length === 0)
+    const candidateBlocks = dockerRunBlocks.filter(body =>
+      /\$\{?FEATURES\}?/u.test(body) && /\$\{?GO_TAGS\}?/u.test(body))
+    check(guardBlocks.length === 1,
+      'server/Dockerfile 必须**恰好一条**"变体 build-arg 一致性"的 fail-loud `RUN`'
+        + `（同时读两个 build-arg + \`none\` 翻译 + 不一致时 \`exit 1\`；命中 ${guardBlocks.length} 条；`
+        + `同时读两个变量的 RUN 共 ${candidateBlocks.length} 条`
+        + (candidateBlocks.length === 0 ? ''
+          : `，问题：${candidateBlocks.map((body, at) =>
+            `#${at + 1} ${variantGuardProblems(body).join('、')}`).join('；')}`)
+        + '）。理由：只覆盖一个 build-arg 会造出半通镜像（页面在、接口 404）而两侧判据全绿')
+    const guardBody = guardBlocks[0] ?? ''
+    if (guardBody !== '') {
+      const argFeaturesAt = dockerfile.search(/^ARG\s+FEATURES=/mu)
+      const npmBuildAt = dockerfile.search(/^RUN npm run build\s*$/mu)
+      const guardAt = dockerfile.indexOf(guardBody)
+      check(argFeaturesAt >= 0 && guardAt > argFeaturesAt && npmBuildAt > guardAt,
+        'server/Dockerfile 的变体一致性断言必须在 `ARG FEATURES=` **之后**、`RUN npm run build` '
+          + '**之前** —— 写在构建之后时"半通镜像"已经建出来了（只是没被使用），'
+          + '而写在 `ARG FEATURES=` 之前时它读到的还是缺省值')
+    }
+    // ---- 量具自检：合成样本必须落在判据的两侧（与第 18 节 ⑨ 同一手法）----
+    // 上面那三条判据全在纯函数/文本匹配里，把 `variantGuardProblems` 掏空成 `return []`
+    // 会让任意 RUN 都算"断言"、把 `exit 1` 检查放宽到恒真也不会被真 Dockerfile 发现
+    // （真的那条本来就是绿的）。样本给出下限。
+    const GUARD_SAMPLES = [
+      {
+        name: '正例（与 Dockerfile 同形）',
+        body: 'set -eu; \\\n    expect="$FEATURES"; \\\n    if [ "$expect" = "none" ]; then expect=""; fi; \\\n'
+          + '    if [ "$expect" != "$GO_TAGS" ]; then echo x >&2; exit 1; fi',
+        ok: true,
+      },
+      {
+        name: '变异①：删掉 exit 1（不一致也只打印）',
+        body: 'expect="$FEATURES"; if [ "$expect" = "none" ]; then expect=""; fi; '
+          + 'if [ "$expect" != "$GO_TAGS" ]; then echo x >&2; fi',
+        ok: false,
+      },
+      {
+        name: '变异②：只读一个变量（另一半永远是缺省值）',
+        body: 'if [ "$FEATURES" != "skills,apps,connectors" ]; then exit 1; fi',
+        ok: false,
+      },
+      {
+        name: '变异③：没有 none 翻译（正常入口会被自己的断言拒掉）',
+        body: 'if [ "$FEATURES" != "$GO_TAGS" ]; then exit 1; fi',
+        ok: false,
+      },
+    ]
+    for (const sample of GUARD_SAMPLES) {
+      const problems = variantGuardProblems(sample.body)
+      check((problems.length === 0) === sample.ok,
+        `量具自检「${sample.name}」：期望${sample.ok ? '通过' : '报错'}，实际`
+          + `${problems.length === 0 ? '通过' : `报错(${problems.join('、')})`}`
+          + ' —— 这条谓词被改松/改紧了（改判据请同批改本样本并写明理由）')
+    }
+  }
+
+  // ---- ③ webadmin 侧哨兵落点必须登记且与真源同源（P2-6）----------------------------
+  const webadminRoot = join(root, 'server', 'webadmin')
+  const checkerPath = join('scripts', 'check-feature-chunks.mjs')
+  const featuresTestPath = join('src', 'lib', 'features.test.ts')
+  /** 哨兵串字面量（`picoaide.feature.<module>.v1`）。 */
+  const SENTINEL_LITERAL_RE = /picoaide\.feature\.[a-z0-9_]+\.v1/gu
+  /**
+   * 文本里的哨兵字面量集合。
+   * @param text - 文件内容。
+   * @returns 去重升序的字面量数组。
+   */
+  const sentinelLiteralsIn = (text) => [...new Set(text.match(SENTINEL_LITERAL_RE) ?? [])].sort()
+  const checkerSource = readFileSync(join(webadminRoot, checkerPath), 'utf8')
+  const expectationRe = /\{\s*module:\s*'([a-z0-9_]+)',[^}]*?sentinel:\s*'([^']+)',[^}]*?pages:\s*\[([^\]]*)\]/gsu
+  const expectations = [...checkerSource.matchAll(expectationRe)].map(match => ({
+    module: match[1],
+    sentinel: match[2],
+    pages: [...match[3].matchAll(/'([^']+)'/gu)].map(entry => entry[1]),
+  }))
+  check(expectations.length === MODULES.length,
+    `从 ${checkerPath} 的 MODULE_EXPECTATIONS 抽到的期望项 ${expectations.length} 条 ≠ 模块数 ${MODULES.length}`
+      + '（表被改写或抽取失效 —— 这张表是本节的登记面，抽取失败必须红而不是"当作没有落点"）')
+  /** 登记页 → 模块。 */
+  const registeredPages = new Map()
+  for (const module of MODULES) {
+    const entry = expectations.find(item => item.module === module)
+    check(entry !== undefined, `check-feature-chunks.mjs 的 MODULE_EXPECTATIONS 里必须有模块 ${module} 一项`)
+    if (entry === undefined) continue
+    check(entry.sentinel === constants.featureSentinel(module),
+      `${module} 的哨兵串必须由 channel-constants.ts 的 featureSentinel() 派生（契约 §6）：`
+        + `判据表里是 ${entry.sentinel}，真源给出 ${constants.featureSentinel(module)}`)
+    check(entry.pages.length > 0, `模块 ${module} 的页表是空的（内容面的覆盖面塌了）`)
+    for (const page of entry.pages) registeredPages.set(page.split(sep).join('/'), module)
+  }
+  // 方向 ①：每个登记页都必须带本模块哨兵（声明 + 真渲染）。
+  for (const [page, module] of registeredPages) {
+    const file = join(webadminRoot, page)
+    check(existsSync(file), `登记在哨兵落点表里的页面不存在：${page}`)
+    if (!existsSync(file)) continue
+    const source = readFileSync(file, 'utf8')
+    const sentinel = constants.featureSentinel(module)
+    check(new RegExp(`export const FEATURE_SENTINEL\\s*=\\s*['"]${sentinel}['"]`, 'u').test(source),
+      `${page} 必须声明本模块的哨兵字面量（期望 \`export const FEATURE_SENTINEL = '${sentinel}'\`）——`
+        + '每个模块页各自带哨兵，静态引用某一个子页时才看得见（审计 M6）')
+    check(/data-feature-sentinel=\{FEATURE_SENTINEL\}/u.test(source),
+      `${page} 必须把哨兵渲染出去（期望 \`data-feature-sentinel={FEATURE_SENTINEL}\`）——`
+        + '只声明不渲染的串会被打包器一起丢掉，"产物里没有它"就失去意义')
+    const literals = sentinelLiteralsIn(source)
+    check(literals.length === 1 && literals[0] === sentinel,
+      `${page} 里的哨兵字面量必须只有本模块那一个（实际 ${JSON.stringify(literals)}）——`
+        + '一个页面带着别的模块的串，会把"关闭变体里没有它"变成偶然')
+  }
+  // 方向 ②：反过来，webadmin 里出现哨兵字面量的文件必须是**登记过的**落点。
+  //
+  // 两份判据脚本刻意各持一份期望（判据的期望独立于被测实现），所以它们是登记在案的
+  // "判据侧落点"：它们必须持有**全部**模块的串（漏一个模块就没在判它），且改命名规则时
+  // 必须跟着真源一起改 —— 否则 webadmin 侧两边自洽地留着旧串，跨面语义静默分裂。
+  const judgeSites = [checkerPath, featuresTestPath]
+  const allSentinels = MODULES.map(module => constants.featureSentinel(module)).sort()
+  for (const relativePath of judgeSites) {
+    const file = join(webadminRoot, relativePath)
+    check(existsSync(file), `登记在案的判据侧哨兵落点不存在：${relativePath}`)
+    if (!existsSync(file)) continue
+    const literals = sentinelLiteralsIn(readFileSync(file, 'utf8'))
+    check(JSON.stringify(literals) === JSON.stringify(allSentinels),
+      `${relativePath} 里的哨兵字面量必须恰好是全部 ${MODULES.length} 个模块的串`
+        + `（实际 ${JSON.stringify(literals)}，期望 ${JSON.stringify(allSentinels)}）`)
+  }
+  /** 递归列出目录下的文件（只用于"未登记落点"普查）。 */
+  const listFilesUnder = (dir, out = []) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) listFilesUnder(full, out)
+      else if (entry.isFile()) out.push(full)
+    }
+    return out
+  }
+  const registeredFiles = new Set([...registeredPages.keys()].map(page => join(webadminRoot, page)))
+  const judgeFiles = new Set(judgeSites.map(site => join(webadminRoot, site)))
+  for (const scanRoot of ['src', 'scripts']) {
+    const dir = join(webadminRoot, scanRoot)
+    if (!existsSync(dir)) continue
+    for (const file of listFilesUnder(dir)) {
+      if (registeredFiles.has(file) || judgeFiles.has(file)) continue
+      const literals = sentinelLiteralsIn(readFileSync(file, 'utf8'))
+      if (literals.length === 0) continue
+      check(false,
+        `${relative(root, file).split(sep).join('/')} 里出现了哨兵字面量 ${JSON.stringify(literals)}，`
+          + '但它不在登记表里 —— 新增落点必须同时登记（页面落点进 MODULE_EXPECTATIONS 的 pages，'
+          + '判据侧落点进本节的 judgeSites），否则命名规则变更时这一处会静默留在旧串上')
+    }
+  }
+
+  // ---- ④ 变体测试矩阵必须有调度点（P1-2）------------------------------------------
+  /**
+   * 取 Makefile 里某个目标的配方（到下一个顶层行/目标为止）。
+   * @param text - Makefile 内容。
+   * @param target - 目标名。
+   * @returns 配方文本（没有该目标 ⇒ null）。
+   */
+  const makeRecipeOf = (text, target) => {
+    const start = new RegExp(`^${target}:[^\\n]*\\n`, 'mu').exec(text)
+    if (start === null) return null
+    const rest = text.slice(start.index + start[0].length)
+    const end = rest.search(/^\S/mu)
+    return end === -1 ? rest : rest.slice(0, end)
+  }
+  const VARIANT_TARGET = 'webadmin-variant-tests'
+  const FEATURES_TARGET = 'webadmin-check-features'
+  const VARIANTS_SCRIPT = join('scripts', 'check-feature-variants.mjs')
+  const variantRecipe = makeRecipeOf(makefile, VARIANT_TARGET)
+  check(variantRecipe !== null, `server/Makefile 必须定义 ${VARIANT_TARGET} 目标（非缺省变体的单测矩阵）`)
+  check(variantRecipe !== null && variantRecipe.includes('npm run check:variant-tests'),
+    `${VARIANT_TARGET} 必须跑 \`webadmin/scripts/check-feature-variants.mjs\`（经 npm script `
+      + '`check:variant-tests`）—— 矩阵的实现在仓内脚本里，CI 执行面闭包跟得下去；'
+      + '写成 Makefile 里的 `for` 循环时闭包读不懂命令位（fail-closed 记红）')
+  check(makeRecipeOf(makefile, FEATURES_TARGET) !== null,
+    `server/Makefile 必须定义 ${FEATURES_TARGET} 目标（产物级变体判据）`)
+  // 矩阵从**唯一真源**读（真跑那个脚本模块；它在被 import 时零副作用）。
+  const variantsScriptPath = join(webadminRoot, VARIANTS_SCRIPT)
+  check(existsSync(variantsScriptPath), `变体矩阵脚本必须存在：server/webadmin/${VARIANTS_SCRIPT.split(sep).join('/')}`)
+  const variantsModule = existsSync(variantsScriptPath)
+    ? await import(pathToFileURL(variantsScriptPath).href)
+    : {}
+  const matrix = Array.isArray(variantsModule.VARIANT_MATRIX) ? variantsModule.VARIANT_MATRIX : []
+  check(matrix.length > 0, `${VARIANTS_SCRIPT} 的 VARIANT_MATRIX 不能为空（空矩阵 = 一条变体都没跑）`)
+  check(matrix.some(variant => variant !== DEFAULT_VARIANT),
+    `变体矩阵必须包含**非缺省**变体（实际 ${JSON.stringify(matrix)}）—— 缺省变体由上层 \`npm test\` 覆盖，`
+      + '矩阵只重复跑它等于什么都没加')
+  check(matrix.every(variant => MODULES.includes(variant) || variant === 'none'
+    || variant.split(',').every(module => MODULES.includes(module))),
+    `变体矩阵里有未知取值（实际 ${JSON.stringify(matrix)}）：合法取值是模块名的逗号子集或显式 none`)
+  // 矩阵脚本必须真的把变体喂给单测（**跑 npm test 且设 FEATURES**），否则"调度了"也只是空壳。
+  const variantsSource = existsSync(variantsScriptPath) ? readFileSync(variantsScriptPath, 'utf8') : ''
+  check(/spawnSync\(\s*'npm'[\s\S]{0,200}?\['test'\]/u.test(variantsSource)
+    && /FEATURES:\s*variant/u.test(variantsSource),
+    `${VARIANTS_SCRIPT} 必须真的跑 \`npm test\` 并把变体写进 \`FEATURES\` 环境`
+      + '（只打印矩阵不跑测试 = 调度点空转）')
+  for (const [target, recipe] of [['check', makeRecipeOf(makefile, 'check')]]) {
+    check(recipe !== null && recipe.includes(`$(MAKE) ${VARIANT_TARGET}`),
+      `\`make ${target}\`（发布门禁）必须调度 ${VARIANT_TARGET} —— 判据不进 check 就等于只在手动跑时存在`)
+    check(recipe !== null && recipe.includes(`$(MAKE) ${FEATURES_TARGET}`),
+      `\`make ${target}\`（发布门禁）必须调度 ${FEATURES_TARGET}（产物级变体判据）`)
+  }
+  // CI 侧：server job 必须真的起这两条（命令位，不是注释里提一句）。
+  const workflowText = readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8')
+  const jobText = (() => {
+    const lines = workflowText.split('\n')
+    const start = lines.findIndex(line => /^  server:\s*$/u.test(line))
+    if (start === -1) return null
+    let end = lines.length
+    for (let index = start + 1; index < lines.length; index += 1) {
+      if (/^  [A-Za-z0-9_-]+:\s*$/u.test(lines[index])) { end = index; break }
+    }
+    return lines.slice(start, end).join('\n')
+  })()
+  check(jobText !== null, 'ci.yml 里找不到 `server` job（变体调度点的 CI 侧落点）')
+  /**
+   * job 文本里是否有"命令位"调用某个 make 目标（跳过注释行与 `#` 之后的说明）。
+   * @param text - job 文本。
+   * @param target - make 目标名。
+   * @returns 是否命中。
+   */
+  const schedulesTarget = (text, target) => (text ?? '').split('\n').some((line) => {
+    const trimmed = line.trim()
+    if (trimmed.startsWith('#')) return false
+    return new RegExp(`(^|\\s)make\\s+${target}(\\s|$)`, 'u').test(trimmed)
+  })
+  check(schedulesTarget(jobText, VARIANT_TARGET),
+    `ci.yml 的 server job 必须调度 ${VARIANT_TARGET} —— 缺了它，变体回归只在本地手动跑时存在`
+      + '（CI 的 `npm test` 是缺省全开变体）')
+  check(schedulesTarget(jobText, FEATURES_TARGET),
+    `ci.yml 的 server job 必须调度 ${FEATURES_TARGET} —— 产物级变体判据此前只进本地 make check，`
+      + '判据存在但 CI 从不启动它')
+}
+
+// ---- 20. 模块编译契约：生成物 ↔ 单一真源（2026-10-14 独立审计 P0）----
+//
+// 现场（本仓实测，跨语言漂移）：编译期功能模块（skills / apps / connectors）的名字此前在
+// **六个端**各写一遍 —— Go 权威（`ModuleX` + `allModules`）、webadmin `FEATURE_MODULES`、
+// 客户端 `FEATURE_MODULES` + `features.<m>` 模板键族、`server/Makefile` 的 `GO_TAGS ?=`、
+// `server/Dockerfile` 的两个 `ARG` 缺省值、ci.yml 的两处 `-tags=` 字面量。每一端都有自己的
+// 判据，却**没有一条跨端机械对拍**：把 `'connectors'` 在 TS 侧两处**一起**改成 `'connector'`，
+// JS 判据与 Go 判据**都会绿** ⇒ 跨语言漂移无人抓。
+//
+// 收口形态 = **单一真源 + 代码生成**（而不是"再写一条对拍"）：真源 = 仓库根
+// `module-contract.json`；各端的模块名清单与**渠道缺省表**（`FEATURE_MODULE_DEFAULTS`）
+// 都是**生成物**，由 `scripts/gen-module-contract.mjs` 重写标记块
+// （`@generated:module-contract` / `@end:module-contract`）内的内容。
+//
+// 本节**真跑**那个脚本的 `--check`（子进程，与维护者/CI 跑的是同一条命令）：
+//   · 手改生成区（例如把 Makefile 的 `GO_TAGS ?=` 改成别的串）⇒ 红；
+//   · 改了真源却没跑生成器 ⇒ 红（点名每一个没跟上的端）；
+//   · 真源/生成端文件读不到 ⇒ 红（仓库结构事故不是 skip）。
+// 判据本体（真源解析、逐字节比较、4 处结构核验：客户端 `module:` 顺序 / router 标签分片
+// 与孤儿标签 / `featureGlobalName()` 真跑 / Go `AllModules()` 顺序）都在那个脚本里 ——
+// 本节**不重复实现**它们，只真跑 + 兜住"脚本位读不到/退出码非 0"。
+//
+// 本节另外**真跑**面向人的渠道清单工具 `scripts/channel-modules.mjs`（`--list` /
+// `--template` / `--check`）：它不是"生成物"那一件事（工具本身不写文件），但同样是
+// "决定渠道交付面"的执行体 —— 判据存在却没人启动等于不存在。
+{
+  /** 生成端（6 个文件 / 11 个生成区）与真源都必须真的存在 —— "脚本位读不到"不是 skip。 */
+  check(existsSync(join(root, 'module-contract.json')),
+    '仓库根必须有 `module-contract.json`（编译期功能模块的**单一真源**）—— 它是六个生成端的输入，'
+      + '缺了它各端的模块名清单就又回到"六处各写一遍"的状态')
+  const wiringRun = spawnSync(
+    process.execPath,
+    [fileURLToPath(new URL('./gen-module-contract.mjs', import.meta.url)), '--check'],
+    { cwd: root, encoding: 'utf8' },
+  )
+  check(wiringRun.status === 0,
+    '`node scripts/gen-module-contract.mjs --check` 必须通过（各端生成物与单一真源逐字节一致）：'
+      + `实际 exit ${wiringRun.status}（signal ${wiringRun.signal ?? 'null'}）；`
+      + `stdout ${JSON.stringify((wiringRun.stdout ?? '').trim())}；`
+      + `stderr ${JSON.stringify((wiringRun.stderr ?? '').trim())}`
+      + ' —— 修法：跑 `node scripts/gen-module-contract.mjs` 重新生成（生成区是**生成物**，'
+      + '手改会被判红；改了 `module-contract.json` 也必须重跑生成器）')
+  check(typeof MODULE_CONTRACT_FACE_COUNTS.generatedFiles === 'number'
+    && MODULE_CONTRACT_FACE_COUNTS.generatedFiles > 0
+    && typeof MODULE_CONTRACT_FACE_COUNTS.verifiedFaces === 'number'
+    && MODULE_CONTRACT_FACE_COUNTS.verifiedFaces > 0,
+    '`scripts/gen-module-contract.mjs` 必须导出非空的 `MODULE_CONTRACT_FACE_COUNTS`'
+      + '（汇总串的"端数/核验处数"取自那里；在调用点重算就是第二份口径）')
+
+  // ---- 渠道缺省（`defaultInChannel` → `FEATURE_MODULE_DEFAULTS`）-------------------
+  //
+  // 现场：缺省 `true` 的意思是"渠道**不写** `features.<m>` = 这个模块要发给它"。这个值一旦
+  // 被硬编码回 `normalizeChannelFeatures()`，将来新增的模块就会**自动发给所有既有渠道**
+  // （含已经交付的客户包），而真源里明明写的是 `false` —— 两边各自自洽，没有任何红灯。
+  const constantsPath = join(root, 'packages', 'host', 'desktop', 'scripts', 'channel-constants.ts')
+  check(existsSync(constantsPath),
+    'packages/host/desktop/scripts/channel-constants.ts 必须存在（渠道缺省表与 features 解析的唯一真源）')
+  const constantsSource = existsSync(constantsPath) ? readFileSync(constantsPath, 'utf8') : ''
+  const constantsModule = existsSync(constantsPath)
+    ? await import(pathToFileURL(constantsPath).href)
+    : {}
+  const contractRaw = existsSync(join(root, 'module-contract.json'))
+    ? JSON.parse(readFileSync(join(root, 'module-contract.json'), 'utf8'))
+    : null
+  const contractModules = Array.isArray(contractRaw?.modules) ? contractRaw.modules : []
+  check(contractModules.length > 0,
+    'module-contract.json 的 modules 必须是非空数组（渠道缺省表的真源就是各自的 defaultInChannel）')
+  const generatedDefaults = constantsModule.FEATURE_MODULE_DEFAULTS ?? null
+  check(generatedDefaults !== null && contractModules.length > 0
+    && contractModules.every(module => generatedDefaults?.[module.id] === module.defaultInChannel),
+    '生成的 `FEATURE_MODULE_DEFAULTS` 必须逐模块等于 module-contract.json 的 `defaultInChannel`：'
+      + `契约 ${JSON.stringify(Object.fromEntries(contractModules.map(module =>
+        [module.id, module.defaultInChannel])))} vs 生成物 ${JSON.stringify(generatedDefaults)}`
+      + ' —— 两处不一致时"渠道不写 features 会拿到什么"就有了两套答案'
+      + '（跑 `node scripts/gen-module-contract.mjs` 重新生成）')
+
+  // **真跑**证明"缺键取值来自这张表"（而不是硬编码 true）：把表里**一个模块**的缺省翻过来，
+  // 复制成临时模块（channel-constants.ts 零 import ⇒ 副本自洽），断言 `{}` 的解析结果跟着变；
+  // 再用未改动的那份做对照组。样本**从契约派生**（挑第一个缺省 true 的模块，没有就挑第一个），
+  // 所以增删模块时这条判据自动跟着走。
+  {
+    const ids = contractModules.map(module => module.id)
+    const target = ids.find(id => generatedDefaults?.[id] === true) ?? ids[0]
+    const flipped = !(generatedDefaults?.[target] === true)
+    const mutated = target === undefined ? constantsSource : constantsSource.replace(
+      new RegExp(`^([ \\t]*)${target}:([ \\t]*)(?:true|false),$`, 'mu'),
+      `$1${target}:$2${flipped},`,
+    )
+    const constructed = target !== undefined && mutated !== constantsSource
+    check(constructed,
+      `构造"渠道缺省取自 FEATURE_MODULE_DEFAULTS"的反证样本失败（在 channel-constants.ts 里找不到 `
+        + `\`${String(target)}: <bool>,\` 那一行）—— 缺省表被换成别的写法时这条判据必须红，`
+        + '不能静默退化成"没有样本"')
+    if (constructed) {
+      const fixtureDir = tempDir('module-defaults-')
+      scratch.push(fixtureDir)
+      const fixturePath = join(fixtureDir, 'channel-constants.ts')
+      writeFileSync(fixturePath, mutated)
+      const fixture = await import(pathToFileURL(fixturePath).href)
+      const fromUndefined = fixture.normalizeChannelFeatures(undefined)
+      const fromEmpty = fixture.normalizeChannelFeatures({})
+      check(fromUndefined?.[target] === flipped && fromEmpty?.[target] === flipped,
+        `把 ${target} 的渠道缺省翻成 ${String(flipped)} 后，normalizeChannelFeatures(undefined)/({}) 的 `
+          + `${target} 必须跟着变（实际 ${JSON.stringify(fromUndefined?.[target])} / `
+          + `${JSON.stringify(fromEmpty?.[target])}）—— 缺省值必须**读表**：硬编码 true 会让将来`
+          + '新增的模块（契约里 defaultInChannel:false）悄悄发给所有既有渠道')
+      check(constantsModule.normalizeChannelFeatures(undefined)?.[target] === generatedDefaults?.[target],
+        `未改动的 channel-constants.ts 里 normalizeChannelFeatures(undefined) 的 ${target} 必须等于 `
+          + `FEATURE_MODULE_DEFAULTS.${target}（对照组：证明上一条真的是"翻转样本"在起作用）`)
+    }
+  }
+
+  // ---- 渠道清单工具 `scripts/channel-modules.mjs`（真跑 CLI）----------------------
+  {
+    const tool = fileURLToPath(new URL('./channel-modules.mjs', import.meta.url))
+    check(existsSync(tool), 'scripts/channel-modules.mjs 必须存在（渠道 × 模块清单工具）')
+    const listRun = spawnSync(process.execPath, [tool, '--list'], { cwd: root, encoding: 'utf8' })
+    check(listRun.status === 0, '`channel-modules.mjs --list` 必须通过（实际 exit '
+      + `${listRun.status}；stderr ${JSON.stringify((listRun.stderr ?? '').trim())}）`)
+    const templateRun = spawnSync(process.execPath, [tool, '--template'], { cwd: root, encoding: 'utf8' })
+    check(templateRun.status === 0, '`channel-modules.mjs --template` 必须通过（实际 exit '
+      + `${templateRun.status}；stderr ${JSON.stringify((templateRun.stderr ?? '').trim())}）`)
+    check(contractModules.every(module => (templateRun.stdout ?? '').includes(`"${module.id}"`)),
+      '`--template` 打印的片段必须列出**全部**模块（少一个 = 新渠道照抄时会漏声明一个模块）：'
+        + `实际输出 ${JSON.stringify((templateRun.stdout ?? '').trim())}`)
+
+    const fixtureDir = tempDir('channel-modules-')
+    scratch.push(fixtureDir)
+    const ids = contractModules.map(module => module.id)
+    const first = ids[0]
+    const defaultsOf = Object.fromEntries(
+      contractModules.map(module => [module.id, module.defaultInChannel === true]),
+    )
+    /** 期望的"实际交付"变体串 —— 从契约派生（不写死），增删模块时本判据跟着变。 */
+    const expectedVariant = (skip) => {
+      const on = ids.filter(id => id !== skip && defaultsOf[id] === true)
+      return on.length === 0 ? 'none' : on.join(',')
+    }
+    const cases = [
+      {
+        name: '显式关闭一个模块（其余按契约缺省）',
+        body: { features: { [first]: false } },
+        wantExit: 0,
+        wantText: `实际交付 ${expectedVariant(first)}`,
+      },
+      { name: '非布尔取值（字符串 "false" 不是 false）', body: { features: { [first]: 'false' } }, wantExit: 1 },
+      { name: '未知模块键', body: { features: { wibble: true } }, wantExit: 1 },
+    ]
+    for (const [index, item] of cases.entries()) {
+      const file = join(fixtureDir, `sample-${index}.json`)
+      writeFileSync(file, `${JSON.stringify({ channel_id: 'sample', ...item.body })}\n`)
+      const run = spawnSync(process.execPath, [tool, '--check', file], { cwd: root, encoding: 'utf8' })
+      const output = `${run.stdout ?? ''}${run.stderr ?? ''}`
+      check(run.status === item.wantExit,
+        `channel-modules.mjs --check「${item.name}」必须 exit ${item.wantExit}（实际 ${run.status}）：`
+          + JSON.stringify(output.trim()))
+      if (item.wantText !== undefined) {
+        check(output.includes(item.wantText),
+          `channel-modules.mjs --check「${item.name}」的输出必须含 ${JSON.stringify(item.wantText)}`
+            + `（实际 ${JSON.stringify(output.trim())}）—— 期望值从契约派生，不写死变体串`)
+      }
+    }
+  }
+}
+
 for (const dir of scratch) rmSync(dir, { recursive: true, force: true })
 if (failures.length > 0) {
   process.stderr.write(`\nverify-ci-scripts: ${failures.length} 项断言失败\n`)
@@ -7538,4 +8625,31 @@ process.stdout.write('verify-ci-scripts: OK — ref 形态判定唯一真源(tag
   + '阈值内的新鲜对象与**本次前缀**绝不删、预演不删、阈值 0 可补做存量、'
   + '非法阈值 fail-loud、列表失败只出 ::warning:: 不阻断发布;并钉住清扫日志不回显对象键)/'
   + '渠道交付平台收窄(desktop.platforms:镜像装配丢弃未声明平台 + 声明了却没有产物即 fail-loud 并点名;'
-  + 'R2 中转 push 不上传未声明平台、pull 的齐全判据只要求声明平台,并用三端对照组证明判据仍有牙)\n')
+  + 'R2 中转 push 不上传未声明平台、pull 的齐全判据只要求声明平台,并用三端对照组证明判据仍有牙)/'
+  + '渠道功能模块声明(features:唯一真源 channel-constants.ts **真跑**——缺省全开/显式关闭/未知键/非法类型两个方向都判,'
+  + '于是「缺省全开→缺省全关」与「解析改成静默丢字段」两种变异当场红;'
+  + 'ci-channels.sh 真跑四类坏声明(非布尔/未知模块/数组/字符串)各自红且不回显取值与未知键名;'
+  + '官方模板键表逐模块派生 + 漏写 features.<module> 的负例;'
+  + '哨兵串命名从 FEATURE_MODULES 派生、且必须是 apply() 体内**值位置的可执行引用**'
+  + '(注释/字符串字面量/体内重声明都不算:先扫代码位置的标识符、再括号配对取函数体;'
+  + '静态代理:没被引用的串会被链接器一起丢掉) + 该判据**自带量具自检**'
+  + '(合成正例 4 例必须接受 / 合成负例 5 例必须拒绝,含"删掉可执行引用只留注释")'
+  + ' + 契约文档必须存在且列出三个哨兵串)/'
+  + 'webadmin 变体接线(三处缺省值同源:真跑 webadmin/features.mjs 与 channel-constants.ts 后的值对拍 '
+  + 'Dockerfile **每一处** ARG 与 Makefile 的 `GO_TAGS ?=`;变体开关必须写在 `RUN npm ci` 之后'
+  + '(否则每个变体重跑全量依赖安装);**两个变体 build-arg 必须成对**——Dockerfile 里必须恰好一条'
+  + 'fail-loud 断言(`$FEATURES`/`$GO_TAGS` 并读 + `none` ⟺ 空 tag 集翻译 + 不一致 `exit 1`,'
+  + '位置在 `ARG FEATURES=` 之后与 `RUN npm run build` 之前),该谓词自带量具自检(1 正 3 负);'
+  + 'webadmin 侧哨兵落点登记——每个模块页各自声明并渲染'
+  + '真源派生的串、两份判据脚本各持全部串、其余文件出现哨兵字面量即红;'
+  + '变体测试矩阵的调度点三处缺一即红:Makefile 目标 + `make check` 调它 + CI server job 起它)/'
+  + `模块编译契约(${MODULE_CONTRACT_FACE_COUNTS.faces} 端 / `
+  + `${MODULE_CONTRACT_FACE_COUNTS.regions} 处核验：生成物与真源一致 —— 真跑 `
+  + '`gen-module-contract.mjs --check`;六端模块名清单不再是手抄,而是根 `module-contract.json` 的'
+  + '生成物(标记块 `@generated:module-contract`),手改生成区或改了真源没重跑生成器都判红;'
+  + '另有 4 处结构核验:客户端 `module:` 顺序 / router 标签分片成对且无孤儿标签 /'
+  + '`featureGlobalName()` 真跑 / Go `AllModules()` 源码顺序;'
+  + '渠道缺省 `FEATURE_MODULE_DEFAULTS` 也是生成物且 `normalizeChannelFeatures()` **真跑读表**'
+  + '(把某个模块的缺省翻过来做样本 + 未改动那份做对照,硬编码 true 当场红);'
+  + '面向人的 `channel-modules.mjs` 的 `--list` / `--template`(逐模块列出) / `--check` 三例'
+  + '(显式关闭按契约缺省交付、字符串 "false"、未知键)真跑并派生期望值)\n')

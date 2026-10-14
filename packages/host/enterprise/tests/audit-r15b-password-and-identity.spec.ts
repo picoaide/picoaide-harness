@@ -37,7 +37,8 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { apply, loginServerSwitchConflict, renderChangePasswordPage, type Config } from '../src/auth-gate.ts'
+import { loginServerSwitchConflict, renderChangePasswordPage, type Config } from '../src/auth-gate.ts'
+import { applyFullComposition as apply } from './helpers/apply-full-composition.ts'
 import { isPasswordChangeRequired, PASSWORD_CHANGE_REQUIRED_ACTION, PASSWORD_CHANGE_REQUIRED_CODE } from '../src/server-connector/auth.ts'
 import { sessionIdentity, sessionIdentityChanged } from '../src/session-identity.ts'
 import type { Session } from '../src/server-connector/config.ts'
@@ -104,7 +105,8 @@ function harness(initial: Session | null): Harness {
   const warn = vi.fn()
   const ctx = {
     effect: (fn: () => unknown) => { fn() },
-    get: (name: string) => (name === 'connection' ? { requestRejection: () => undefined } : undefined),
+    provide: (name: string, value: unknown) => { (ctx as unknown as Record<string, unknown>)[`__svc_${name}`] = value },
+    get: (name: string) => ((ctx as unknown as Record<string, unknown>)[`__svc_${name}`] ?? ((name === 'connection' ? { requestRejection: () => undefined } : undefined))),
     logger: { info: vi.fn(), warn, error: vi.fn() },
     picoSession: {
       isRestored: () => true,

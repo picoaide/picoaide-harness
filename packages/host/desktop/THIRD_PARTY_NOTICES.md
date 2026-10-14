@@ -353,10 +353,12 @@ the package names, versions, and licenses for transparency.
 | @opentelemetry/semantic-conventions | 1.43.0 | Apache-2.0 |
 | @picoaide/dsh-account-card | 0.1.0 | MIT |
 | @picoaide/dsh-browser | 0.1.0 | MIT |
+| @picoaide/dsh-capability-center | 0.1.0 | MIT |
 | @picoaide/dsh-connectors | 0.1.0 | MIT |
 | @picoaide/dsh-cron | 0.1.0 | MIT |
 | @picoaide/dsh-enterprise | 0.1.0 | MIT |
 | @picoaide/dsh-foot-menu | 0.1.0 | MIT |
+| @picoaide/dsh-gateway-client | 0.1.0 | MIT |
 | @picoaide/dsh-host-home | 0.1.0 | MIT |
 | @picoaide/dsh-host-locale | 0.1.0 | MIT |
 | @picoaide/dsh-wasm-apps | 0.1.0 | MIT |

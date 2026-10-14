@@ -35,8 +35,58 @@ WORKDIR /build
 # webadmin 不再编译期注入任何品牌素材:logo/名称全部来自渠道内容
 # (GET /api/client/v2/channel,镜像内 /opt/picoaide/channel/)。仓库里不留
 # 品牌描述,因此这里也不需要 root 构建上下文(2026-09-10 审计)。
+#
+# 功能模块变体（2026-10-14，P3 第二片）：**必须与 Stage 2 的 GO_TAGS 是同一个串**，
+# 否则会出现"服务端裁了接口、管理端还留着页面"（点进去全是 404）或反过来的半通状态。
+# 两种编码：webadmin 用显式 `none` 表示三个全关，Go 用空 tag 集。
+#   变体标识   skills,apps,connectors / apps,connectors / … / none
+#   不传这个 build-arg ⇒ 缺省全开（与本次改造之前的产物同源）。
+# 判据：webadmin 侧的产物双侧断言 = `server/webadmin/scripts/check-feature-chunks.mjs`
+#       （`make -C server webadmin-check-features`）；Go 侧 = `make -C server check-tags`。
+#
+# ⚠️ **ARG/ENV 必须写在 `npm ci` 之后**（P2-5，2026-10-14 独立审计实测）：ENV 是构建链上的
+# 一层，写在依赖安装之前时每换一个变体都会让 ENV 之后的全部层失效 —— 合成 Dockerfile 实测
+# （本地缓存 node:24-alpine）：换 `--build-arg FEATURES` 后 `ENV` 之后的 `RUN` 一律重跑，
+# 也就是**每个变体重跑一次全量 `npm ci`（含外网下载）**。把它挪到 `COPY webadmin/` 之后、
+# `RUN npm run build` 之前：变体在构建链里照旧可见（ENV 对后面的 RUN 生效），依赖层跨变体复用。
+# 两个 ARG 的**缺省值**与 `server/Makefile` 的 `GO_TAGS ?=`、`webadmin/features.mjs` 的
+# `DEFAULT_FEATURES_VARIANT` 由 `scripts/verify-ci-scripts.mjs` 的「变体缺省值同源」一节对拍。
 COPY webadmin/package.json webadmin/package-lock.json ./
 RUN npm ci
+# 用 ENV 而不是把变量写进 RUN：`npm run build`（tsc -b && vite build）整条链路都要能读到
+# 同一个值（vite.config.ts 与 vitest.config.ts 都从环境读，真源解析在 webadmin/features.mjs）。
+#
+# ⚠️ 变体标识的**唯一输入是 `GO_TAGS`**（与 Stage 2 是同一个串，见那边的 `ARG GO_TAGS=`）：
+# 两个 build-arg 必须描述**同一个变体**，下面那条 RUN 就是这条不变量本身。
+# @generated:module-contract (scripts/gen-module-contract.mjs) — 手改会被 --check 判红
+ARG GO_TAGS=skills,apps,connectors
+ARG FEATURES=skills,apps,connectors
+# @end:module-contract
+ENV FEATURES=$FEATURES
+# **fail-loud：两个变体 build-arg 必须一致**（2026-10-14 独立审计 P2-5 的收口）。
+#
+# 不一致 = **半通镜像**：`FEATURES` 决定页面在不在、`GO_TAGS` 决定接口在不在，两者不同时
+# 管理员点得进菜单而每个请求 404（或反过来少一个运维入口）—— 而两侧各自的判据都只看自己
+# 那半边 ⇒ **没有任何红灯**。此前这条只写在文档的散文里（"靠只覆盖一个变量的入口纪律"），
+# 而 Stage 2 的注释又把 `--build-arg GO_TAGS=` 单独写成合法姿势 ⇒
+# `docker build --build-arg GO_TAGS=apps,connectors .` 会静默造出半通镜像（管理端全开、
+# 服务端已裁）。实测（本地缓存 node:24-alpine/BuildKit）：两个 arg 各自缺省时一致、
+# `make docker-image` 与 `scripts/ci-build-channel-images.sh` 两条入口分别成对传值 / 都用
+# 缺省，因此正常路径不受影响；只有"只覆盖一个变量"的手工形态会在这里当场失败。
+#
+# 断言只判"传进来的两个值是不是同一个变体"：两种编码的**翻译**（空 tag 集 ⟺ 显式 `none`）
+# 仍然只在 `server/Makefile` 一处（`FEATURES ?= $(if $(strip $(GO_TAGS)),$(GO_TAGS),none)`），
+# 本文件不重复实现它。
+RUN set -eu; \
+    expect="$FEATURES"; \
+    if [ "$expect" = "none" ]; then expect=""; fi; \
+    if [ "$expect" != "$GO_TAGS" ]; then \
+      echo "build-arg 不一致：FEATURES=[$FEATURES] GO_TAGS=[$GO_TAGS]" >&2; \
+      echo "两者是同一个变体标识的两种编码（webadmin 用 none 表示三个全关，Go 用空 tag 集）。" >&2; \
+      echo "请成对传：--build-arg GO_TAGS=<变体> --build-arg FEATURES=<同一变体|none>；" >&2; \
+      echo "或改用 make -C server docker-image GO_TAGS=<变体>（翻译由 Makefile 一处完成）。" >&2; \
+      exit 1; \
+    fi
 COPY webadmin/ ./
 RUN npm run build
 
@@ -48,6 +98,18 @@ ARG TARGETARCH=amd64
 # VERSION 由构建方注入(CI 传 git tag 去掉 v 前缀;本地默认 dev):
 #   cmd/server/main.go 的 var version = "dev",用 -X main.version=$VERSION 覆盖
 ARG VERSION=dev
+# 可选模块的编译期开关（2026-10-14，P1 第一片）：唯一真源 = `internal/features` 的
+# build tag 文件，模块名与渠道契约逐字一致（skills / apps / connectors）。**缺省全开** ⇒
+# 不传这个 build-arg 时镜像内容与本改造之前同源（本片只接线、不裁剪）。
+# 取值逗号分隔、不加空格；`--build-arg GO_TAGS=`（空）= 三个模块全关的变体 —— 但它**必须与
+# Stage 1 的 `FEATURES` 成对传**（空 tag 集对应 webadmin 的显式 `none`），只传这一个会被
+# Stage 1 的 fail-loud 断言当场拒掉（2026-10-14 独立审计 P2-5：此前这段注释正是"半通镜像"
+# 的入口）。最省事的姿势是 `make -C server docker-image GO_TAGS=<变体>`。
+# `make docker-image` 会把自己的 `GO_TAGS`（同一份缺省值）透传过来；**必须写在包面
+# 之前**（`go` 的 flag 解析在第一个非 flag 词处停止）。
+# @generated:module-contract (scripts/gen-module-contract.mjs) — 手改会被 --check 判红
+ARG GO_TAGS=skills,apps,connectors
+# @end:module-contract
 COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd/ ./cmd/
@@ -58,12 +120,12 @@ COPY demoapps/ ./demoapps/
 COPY --from=webadmin /build/dist ./webadmin/dist/
 COPY webadmin/embed.go ./webadmin/
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o /out/picoaide-server ./cmd/server
+    go build -tags=$GO_TAGS -trimpath -ldflags "-s -w -X main.version=$VERSION" -o /out/picoaide-server ./cmd/server
 # WASM 应用平台的编译子进程（R19/R31）：**必须**与 server 二进制同目录 ——
 # compile.resolveChildBinary 按"自身可执行文件所在目录 + picoaide-app-compile"解析。
 # 缺它的后果：发布链路 fail-closed（启动不再 Fatal，但功能不可用）。
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -trimpath -ldflags "-s -w" -o /out/picoaide-app-compile ./cmd/picoaide-app-compile
+    go build -tags=$GO_TAGS -trimpath -ldflags "-s -w" -o /out/picoaide-app-compile ./cmd/picoaide-app-compile
 # 演示应用：目标是 **wasm32-wasip1**（不是宿主平台）。
 # 2026-09-20 起是**三个功能不同**的演示（能力全集 / 内部小论坛 / 留言板），各一份
 # 制品，清单逐条指出用哪一份（`wasm` 字段）以及窗口比例（`window`）。共用运行时
@@ -71,21 +133,23 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
 RUN mkdir -p /out/demo-apps \
  && for app in showcase forum board; do \
       CGO_ENABLED=0 GOOS=wasip1 GOARCH=wasm \
-        go build -trimpath -ldflags "-s -w" -o /out/demo-apps/$app.wasm ./demoapps/$app; \
+        go build -tags=$GO_TAGS -trimpath -ldflags "-s -w" -o /out/demo-apps/$app.wasm ./demoapps/$app; \
     done \
  && cp demoapps/demos.json /out/demo-apps/demos.json
 
 # 前端资源打进 wasm 自定义段（宿主按路径直出 `/static/*`，入口 `/` 由 wasm 读
 # `index.html` 返回 —— 这样"先判名单再给页面"才成立）。这一步需要 Node，而 Go
 # 构建阶段没有它 ⇒ 单独一个 node 阶段接力；用的打包脚本与随技能分发的那一份
-# **是同一个文件**（`skills/app-builder/scripts/pack-assets.mjs`），规则不会漂。
+# **是同一个文件**（`demoapps/scripts/pack-assets.mjs` —— 打包器已经与技能源码
+# 目录解耦，唯一实现放在**中性位置**，本阶段与技能目录都从这**同一个源** COPY）。
 FROM node:24-alpine AS demoassets
 WORKDIR /demo
 COPY --from=build /out/demo-apps /demo/apps
 COPY demoapps/showcase/web /demo/web/showcase
 COPY demoapps/forum/web /demo/web/forum
 COPY demoapps/board/web /demo/web/board
-COPY skills/app-builder/scripts/pack-assets.mjs /demo/pack-assets.mjs
+# 落点 1/2：本阶段的工作目录（打包三个演示应用时用）。
+COPY demoapps/scripts/pack-assets.mjs /demo/pack-assets.mjs
 RUN set -eu; mkdir -p /demo/packed \
  && for app in showcase forum board; do \
       node pack-assets.mjs --in apps/$app.wasm --out packed/$app.wasm \
@@ -181,7 +245,7 @@ ENV PICOAI_CLIENT_RELEASE_DIR=/opt/picoaide/client
 # "被跳过的坏资产"，把真正的告警淹掉。
 #
 # **新增一个平台内置技能 = 三处一起改**（缺一处就红）：判据是
-# server/internal/wasmapp/skillseed/builtin_skills_test.go 的
+# server/internal/skillseed/builtin_skills_test.go 的
 # TestBuiltinSkillInventoryMatchesDiskDockerfileAndDigests —— 它把
 # 「磁盘上的 server/skills/*/」「本节的 COPY 清单」「builtinSkillRegistry +
 # seededSkillDigests 的技能集合」三方**双向**对拍（真解析本文件的 COPY 指令；
@@ -197,7 +261,28 @@ ENV PICOAI_CLIENT_RELEASE_DIR=/opt/picoaide/client
 #      R1-pm-8 那类"装过的员工永远拿不到新版"会静默复发）。
 # 只想把某个目录留在仓库里而**不**随镜像下发 ⇒ 在 builtinSkillRegistry 里登记
 # {Shipped: false, Reason: …}（豁免逐条显式，不接受通配/整目录豁免）。
+#
+# ⚠️ 技能目录里**不由 skills/ 提供**的文件（唯一实现在中性位置、构建期注入）不是"第四处"，
+# 而是登记在 skillseed 的 `skillFileInjections`（技能 / 目录内落点 / 中性源 / 落点数）：
+# 本文件里凡把**非 skills/ 源**COPY 进 <PICOAI_SKILL_SEED_DIR> 的指令，都必须在那张表里
+# 逐条登记，否则判据 Fatal（"读不出清单"不等于"清单是空的"）。
+#
+# ⚠️ 两条位置纪律（判据硬判，不是约定）：
+#   ① 凡落进 <PICOAI_SKILL_SEED_DIR> 的 COPY/ADD 必须在**最后一个构建阶段** —— 中间阶段
+#     不进入最终镜像，文件到不了 /opt/picoaide/skills（dest 写对、落点数对、摘要模型对，
+#     员工装到的技能却缺这个文件）；
+#   ② **最终阶段的 RUN 不许出现技能目录的路径**（含 `$PICOAI_SKILL_SEED_DIR`）—— 判据只
+#     解析 COPY/ADD，RUN 能在技能目录里写出判据看不见的字节（那样"镜像字节 == 中性源字节"
+#     就不成立，而摘要登记的仍是中性源的那一份）。技能目录的内容只能由 COPY/ADD 决定。
+#     要断言镜像里技能文件存在，请写进 scripts/ci-build-channel-images.sh 的 verify_image。
 COPY skills/app-builder/ /opt/picoaide/skills/app-builder/
+# 落点 2/2：把打包器从**同一个中性源**注入技能目录，镜像内布局与解耦前逐字节一致
+# （`/opt/picoaide/skills/app-builder/scripts/pack-assets.mjs` 仍在，技能文档里的
+# `scripts/pack-assets.mjs` 相对路径照旧可用）。
+# ⚠️ 这一条不是"随手补的副本"：源树里只有 `demoapps/scripts/pack-assets.mjs` 这一份
+# 实现（技能目录下**不再有**该文件），两个落点同源 ⇒ 规则不可能漂。注入关系登记在
+# skillseed 的 `skillFileInjections`，判据会核对"同源 + 两个落点 + 摘要一致"。
+COPY demoapps/scripts/pack-assets.mjs /opt/picoaide/skills/app-builder/scripts/pack-assets.mjs
 # 目录位置固定，服务端直接读（无需 entrypoint 落盘）。可用该 env 覆盖成
 # 别的路径（如挂载宿主机目录做现场排查），照 clientrelease 的
 # PICOAI_CLIENT_RELEASE_DIR 风格。

@@ -125,7 +125,7 @@ type ModuleInfo struct {
 	// 计入会让同一模块出现"资产口径通过、段总量口径超限"两个数）。
 	//
 	// 预算口径的唯一实现在 assets.CountsTowardSectionBudget；它与作者侧
-	// `skills/app-builder/scripts/pack-assets.mjs` 逐字节同源（assets 包测试对拍）。
+	// `demoapps/scripts/pack-assets.mjs` 逐字节同源（assets 包测试对拍）。
 	CustomBytes int
 	// HasStart 表示存在 start 段（实例化时会自动执行该函数；平台不因此拒绝，仅记录以便诊断）。
 	HasStart bool

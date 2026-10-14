@@ -57,7 +57,7 @@ import {
   describeArchiveFailure,
   installSkillArchive,
   type SkillInstallLog,
-} from '../src/skill-install.ts'
+} from '../../capability-center/src/host/skill-install.ts'
 // 跨端判据必须用**另一个包的真实现**持锁（企业包与 vendored 包之间禁止 import，
 // 两端各自实现同一协议 —— 这条判据就是它们的对拍面）。
 // @ts-expect-error vendored plain JS (no types)

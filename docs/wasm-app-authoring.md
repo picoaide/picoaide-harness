@@ -4,8 +4,8 @@
 > `docs/planning/2026-09-17-wasm-app-platform.md`；AI 的操作手册（随服务端镜像分发）
 > 见 `server/skills/app-builder/`。
 >
-> 平台里的每一个上限数字都来自唯一真源 `server/internal/wasmapp/limits/limits.go`
-> （生成物 `limits.md` / `limits.json` 由 `go generate ./internal/wasmapp/limits` 产出，
+> 平台里的每一个上限数字都来自唯一真源 `server/internal/limits/limits.go`
+> （生成物 `limits.md` / `limits.json` 由 `go generate ./internal/limits` 产出，
 > 门禁逐字节比对）。本文件不重复抄数字的权威性 —— 有疑问以生成物为准。
 
 ## 1. 一句话
@@ -112,8 +112,9 @@ node scripts/pack-assets.mjs --in app.wasm --out dist/app-packed.wasm \
   web/index.html=index.html web/app.css=static/app.css
 ```
 
-- 位置：`server/skills/app-builder/scripts/pack-assets.mjs`（随技能一起分发到
-  `<dshHome>/skills/app-builder/scripts/`），用法与全部规则见同目录 `README.md`。
+- 位置：唯一源在 `server/demoapps/scripts/pack-assets.mjs`（**中性位置** —— 演示应用与随技能
+  分发的那一份是同一份实现），镜像构建期注入技能目录，随技能一起分发到
+  `<dshHome>/skills/app-builder/scripts/`；用法与全部规则见技能目录的 `scripts/README.md`。
 - `SRC=DEST`：`DEST` 就是**包内逻辑路径**（段名）；规则与平台同源（相对、以 `/` 分隔、
   不含 `..` 与 `:`；整条路径不超过 256 字节、单段不超过 255 字节；自定义段总量不超过 4 MiB）。
 - **`--out` 必填且必须是新路径**：脚本绝不就地覆盖输入（原模块要留着继续编译/重打包；
@@ -235,7 +236,7 @@ JSON-RPC error `code = "NOT_FOUND"`、message 逐字 **`未知的宿主方法: a
 - 人读（同一份内容）：`server/skills/app-builder/references/app-config.md`
 - 单一真源（改字段只能改这里）：`server/internal/wasmapp/appcfg/appcfgspec.go`
 
-三份由同一个生成器产出（`go generate ./internal/wasmapp/limits`），构建期逐字节比对；
+三份由同一个生成器产出（`go generate ./internal/limits`），构建期逐字节比对；
 发布载荷（`app_id` / `version` / `title` / `changelog` / `wasm_base64` / `config`）的字段规格
 在同一份生成物里。
 
@@ -284,7 +285,7 @@ JSON-RPC error `code = "NOT_FOUND"`、message 逐字 **`未知的宿主方法: a
 - **窗口尺寸是"首开默认"，不是每次打开都强制**：之后由客户端记忆（按应用、按用户），用户手动调整过就以记忆值为准。
 - **字段表真源与本节的关系**（如实说明引用链）：字段规格的机器可读单一真源是
   `server/internal/wasmapp/appcfg/appcfg.json`，人读版是 `server/skills/app-builder/references/app-config.md`，
-  两者由 `go generate ./internal/wasmapp/limits` 从 `appcfgspec.go` 生成。**本节写在这里，是为了在生成物尚未包含 `window` 字段时作者仍有可查处**；生成物补齐后两者应一致，若不一致**以生成物为准并报给平台**。
+  两者由 `go generate ./internal/limits` 从 `appcfgspec.go` 生成。**本节写在这里，是为了在生成物尚未包含 `window` 字段时作者仍有可查处**；生成物补齐后两者应一致，若不一致**以生成物为准并报给平台**。
 
 **这份文件是平台保留资源**：宿主**不会**把它当静态资源直出（§4.2）。
 它只能由应用自己用 `assets.read("picoaide.app.json")` 读 —— 也就是说
@@ -382,7 +383,7 @@ node <技能目录>/examples/go/preview.mjs app.wasm --user someone-else   # 看
 
 平台的处置（**"哪些段算工具链段"这条分类在三处实现且必须逐字一致**：真源
 `server/internal/wasmapp/assets/assets.go` 的 `ToolchainSectionPrefixes` /
-`IsToolchainSection`，镜像在 `server/skills/app-builder/scripts/pack-assets.mjs` 与
+`IsToolchainSection`，镜像在 `server/demoapps/scripts/pack-assets.mjs` 与
 `server/skills/app-builder/examples/go/preview.mjs`。**段预算的算术只有两处** ——
 平台 `CountsTowardSectionBudget` 与打包脚本的 `countsTowardSectionBudget`（逐字节对拍）；
 本地预览**不算预算**，只用同一份分类决定"哪些段能当资源直出"）：
@@ -522,19 +523,19 @@ node <技能目录>/examples/go/preview.mjs app.wasm --user someone-else   # 看
 | --- | --- |
 | AI 操作手册（随服务端镜像分发） | `server/skills/app-builder/SKILL.md` |
 | ABI 参考 | 同目录 `references/abi.md` |
-| 上限表（生成物，勿手改） | 同目录 `references/limits.md`；源码真源 `server/internal/wasmapp/limits/limits.go` |
+| 上限表（生成物，勿手改） | 同目录 `references/limits.md`；源码真源 `server/internal/limits/limits.go` |
 | 配置字段参考（生成物，勿手改） | 同目录 `references/app-config.md`；源码真源 `server/internal/wasmapp/appcfg/appcfgspec.go` |
 | **发布字段规格（机器可读单一真源）** | `server/internal/wasmapp/appcfg/appcfg.json`（`schema=picoaide-app-config/1`）。被四处对拍：服务端解析行为 / 宿主工具参数 / 客户端表单与提交体 / 上面的字段参考 |
 | 发布与运维 | 同目录 `references/publishing.md` |
-| 静态资源打包器（官方，零依赖） | `server/skills/app-builder/scripts/pack-assets.mjs` + 同目录 `README.md`（随技能分发） |
+| 静态资源打包器（官方，零依赖） | 唯一源 `server/demoapps/scripts/pack-assets.mjs`（构建期注入技能目录的 `scripts/`）+ 技能目录的 `scripts/README.md`（随技能分发） |
 | 诊断 | 同目录 `references/diagnostics.md` |
 | 可编译示例（共享便签） | 同目录 `examples/go/`（`GOOS=wasip1 GOARCH=wasm go build` 通过，门禁真题编译） |
 | 上限生成器 | `server/cmd/picoaide-limits-gen`（`-check` 是 CI 门禁入口） |
-| 上限门禁测试 | `server/internal/wasmapp/limits/limits_gen_test.go` |
+| 上限门禁测试 | `server/internal/limits/limits_gen_test.go` |
 
 改任何上限数值或配置字段：改 `limits.go` / `appcfgspec.go` → 跑
 `go run ./cmd/picoaide-limits-gen` 重新生成**全部**产物 —— 服务端侧
-`internal/wasmapp/limits/limits.json`、`internal/wasmapp/limits/limits.md`、
+`internal/limits/limits.json`、`internal/limits/limits.md`、
 `internal/wasmapp/appcfg/appcfg.json`，以及技能目录下的 `references/limits.md` 与
 `references/app-config.md` → 提交生成物（门禁 `-check` 逐字节比对，忘生成即红灯；
 改名/搬走 `appcfg.json` 会让客户端与宿主两条对拍**直接失败**，不是静默跳过）。

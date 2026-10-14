@@ -17,7 +17,8 @@
  * (两个零依赖叶子包 `@picoaide/dsh-host-locale` / `@picoaide/dsh-host-home` 的
  * lib/types),`src/main.ts`/`src/app-ai-runner.ts` 静态 import
  * `@picoaide/dsh-wasm-apps-host`(它自己又读 `@picoaide/dsh-browser/guard`)。
- * 而 browser 的 tsc 读 connectors 的 lib/types,connectors 只读两个叶子包 ⇒
+ * 而 browser 的 tsc 只读两个叶子包的 lib/types（2026-10-13 起不再读 connectors 的
+ * 类型：契约在 `src/connectors-contract.ts` 本地声明），connectors 只读两个叶子包 ⇒
  * 正确顺序是:**叶子包 → connectors → browser → wasm-apps-host → desktop → 其余**。
  * 旧顺序(desktop 最先、wasm-apps-host 垫底)在**干净检出**下会让 desktop 的
  * `tsc` 找不到那两个包的声明文件——`yarn check` 因为调度器已先把它们建好而看不
@@ -44,6 +45,14 @@
  *      静态读配置;读不出只跳过这条来源,绝不因此判"需要重建")。
  * 漏一个就判"需要重建",绝不静默跳过。缺产物时的重建会沿依赖链向上传播
  * (依赖产物变新 ⇒ 依赖方也重建),这与既有的 mtime 语义一致。
+ *
+ * 2026-10-14(R2 审计 S2 修复)**变体跳过的输入改成本轮 features,且 force 能覆盖它**:
+ * 旧实现读 `<desktop>/temp/channel-variant.json`,而那是**后一步**
+ * `prepareChannelPackaging()` 写的 ⇒ 读到的是上一轮残留(上一轮 `skills=false`、这一轮
+ * 全开时,全开构建必需的 `capability-center` 会被静默跳过并复用陈旧 `lib/`);
+ * 且变体分支排在 `!force` 之前,`DSH_PREBUILD=force` 到不了。现在 features 由调用方
+ * (`resolveChannelBuildContext()` 已解析好的那份)当入参传入,不传就一个包都不跳;
+ * 判断是 `if (!force && variantSkip.has(...))`。
  */
 
 import { spawnSync } from 'node:child_process'
@@ -51,6 +60,8 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isDirectInvocation } from './direct-invocation.mjs'
+import { closedFeatureSurfaces, type FeatureSwitches } from '../src/channel-features.ts'
+import { channelFeaturesVariant, normalizeChannelFeatures } from './channel-constants.ts'
 
 /** 构建产物目录(相对包根):lib/ 是各包 tsdown/tsc 的 outDir;desktop 另有 build/(brand-prepare)。 */
 const OUTPUT_DIRS = ['lib', 'build']
@@ -93,12 +104,36 @@ export const WORKSPACE_PACKAGES: readonly WorkspacePackage[] = [
   { workspace: '@picoaide/dsh-host-locale', dir: 'packages/host/host-locale', deps: [] },
   { workspace: '@picoaide/dsh-host-home', dir: 'packages/host/host-home', deps: [] },
   { workspace: '@picoaide/dsh-panel-surface', dir: 'packages/client/panel-surface', deps: [] },
+  // 0a) 宿主侧**网关客户端**的共享叶子包（2026-10-13 P0-b）：只读 host-locale 的
+  //     lib/types ⇒ 排在它之后；enterprise / 能力中心 / 应用宿主三个消费方又都排在
+  //     本包之后。它没有出边通往任何模块包，故不引入新的构建环。
+  { workspace: '@picoaide/dsh-gateway-client', dir: 'packages/host/gateway-client', deps: ['packages/host/host-locale'] },
   // 0b) 底部「更多」行（2026-09-21 并道改造）：它把 panel-surface 的
   //     `activePanelId` / `PANEL_ACTIVE_ATTR` 内联进自己的 client bundle，因此
   //     **必须排在 panel-surface 之后**；五个面板插件（cron / enterprise /
   //     connectors / browser / wasm-apps）的类型面读它的 `./client` 声明
   //     （type-only import），所以它们又都排在它之后 —— 无环。
   { workspace: '@picoaide/dsh-foot-menu', dir: 'packages/client/foot-menu', deps: ['packages/client/panel-surface'] },
+  // 0c) 能力中心（技能商店）的**客户端面**（2026-10-13 从 `@picoaide/dsh-enterprise`
+  //     整块搬出）：`@picoaide/dsh-panel-surface` 被内联进它的 client bundle
+  //     （读 panel-surface 的 lib/types + lib/client.js）⇒ 必须排在 panel-surface
+  //     之后；`@picoaide/dsh-foot-menu` 的 `./client` 声明是它的 type-only 输入
+  //     （`ctx.picoFootMenu`）⇒ 排在 foot-menu 之后。两条边都不成环（两个依赖都
+  //     没有通往本包的出边）。
+  //
+  //     与 `scripts/check-workspaces.mjs` 的 `PACKAGES[*].needs` 有**一处刻意不同**：
+  //     那边另有 enterprise / account-card → 本包两条边，那是两者的**测试**读本包
+  //     源码（不产生产物输入）⇒ 只影响"何时重跑"，不进这张**构建**输入表。
+  //     2026-10-13（P0-b）：**host 面也搬进来了**（四条本机路由 + 安装器/预检/归档/
+  //     根表/frontmatter/内置技能事实），包随之从 `packages/client/` 移到
+  //     `packages/host/`。构建输入因此多三条：host-locale（文案 + 宿主语言类型）、
+  //     host-home（`dshHomeSafe` + 技能库根 `resolveSkillsDir`）、gateway-client
+  //     （网关调用与错误分类）。三条都是无出边的叶子节点。
+  {
+    workspace: '@picoaide/dsh-capability-center',
+    dir: 'packages/host/capability-center',
+    deps: ['packages/client/panel-surface', 'packages/client/foot-menu', 'packages/host/host-locale', 'packages/host/host-home', 'packages/host/gateway-client'],
+  },
   // 1) connectors：只读两个叶子包（`host-copy.ts` / `user-scope.ts`）—— 路线 A 扩展
   //    之后它**不再** import 桌面包，所以排在叶子包之后即可。
   {
@@ -106,23 +141,30 @@ export const WORKSPACE_PACKAGES: readonly WorkspacePackage[] = [
     dir: 'packages/host/connectors',
     deps: ['packages/host/host-home', 'packages/host/host-locale', 'packages/client/panel-surface', 'packages/client/foot-menu'],
   },
-  // 2) browser：读叶子包 + **connectors 的 lib/types**（`src/index.ts` 的
-  //    `typeof import('@picoaide/dsh-connectors/…')` 与
-  //    `tests/credential-site.spec.ts` 的真实 `ConnectorStore`）⇒ 必须排在 connectors 之后。
+  // 2) browser：三个叶子包 + connectors 的 `lib/`。
+  //    2026-10-13（去连接器耦合）：`src/index.ts` **不再**读 connectors 的 lib/types
+  //    （契约改在 `src/connectors-contract.ts` 本地声明 ⇒ connectors/lib 不在时
+  //    tsc 也过），改静态 import 数据根叶子包 `@picoaide/dsh-host-home`；
+  //    `deps` 里仍留 connectors，因为 `tests/*.spec.ts` 值导入真实 `ConnectorStore`
+  //    造夹具、运行期惰性 require 也解析到它的 `lib/`。
   {
     workspace: '@picoaide/dsh-browser',
     dir: 'packages/host/browser',
-    deps: ['packages/host/host-locale', 'packages/host/connectors', 'packages/client/foot-menu'],
+    deps: ['packages/host/host-home', 'packages/host/host-locale', 'packages/host/connectors', 'packages/client/foot-menu'],
   },
   // 3) 客户端专属 WASM 应用 origin：`electron-adapter.ts` 值导入
   //    `@picoaide/dsh-browser/guard` ⇒ 必须排在 browser 之后、desktop 之前
   //    （desktop 的 main.ts/app-ai-runner.ts 静态 import 它）。
   // 2026-09-24：`src/session.ts` 的订阅契约收口到叶子包（`session-events` 子路径）
   // ⇒ 它也是 wasm-apps-host 的构建输入。
+  // 2026-10-13（P0-b）：应用中心（应用平台）的 host 面也搬进来了
+  // （`src/wasm-apps.ts` / `wasm-app-tools.ts` / `wasm-apps-ai-rows-consent.ts` /
+  // `app-routes.ts`）⇒ 构建输入多两条：host-home（`dshHomeSafe`）与 gateway-client
+  // （网关调用 + 会话形状）。两条都无出边通往本包的前置节点。
   {
     workspace: '@picoaide/dsh-wasm-apps-host',
     dir: 'packages/host/wasm-apps-host',
-    deps: ['packages/host/browser', 'packages/host/host-locale'],
+    deps: ['packages/host/browser', 'packages/host/host-locale', 'packages/host/host-home', 'packages/host/gateway-client'],
   },
   // 4) desktop：读叶子包与 wasm-apps-host 的 lib/types，产出全仓共用的
   //    lib/types + build/。
@@ -136,7 +178,9 @@ export const WORKSPACE_PACKAGES: readonly WorkspacePackage[] = [
   {
     workspace: '@picoaide/dsh-enterprise',
     dir: 'packages/host/enterprise',
-    deps: ['packages/host/host-locale', 'packages/host/desktop', 'packages/client/panel-surface', 'packages/client/foot-menu'],
+    // 2026-10-13（P0-b）：`server-connector/{auth,config,electron}` 的实现收敛到
+    // `packages/host/gateway-client`（本包保留同名 re-export）⇒ 多一条构建输入。
+    deps: ['packages/host/host-locale', 'packages/host/gateway-client', 'packages/host/desktop', 'packages/client/panel-surface', 'packages/client/foot-menu'],
   },
   { workspace: '@picoaide/dsh-account-card', dir: 'packages/client/account-card', deps: ['packages/host/desktop'] },
   { workspace: '@picoaide/dsh-wasm-apps', dir: 'packages/client/wasm-apps', deps: ['packages/client/panel-surface', 'packages/client/foot-menu'] },
@@ -515,17 +559,83 @@ export function stalenessReason(
   return oldestMtime(outputs) >= newestInput ? null : 'inputs newer than oldest output'
 }
 
+/**
+ * 本次变体下**可以安全跳过**的包目录 → 该包所属的变体标识（空 Map = 全开/未声明）。
+ *
+ * ## 输入是**本轮**的渠道 features，不是磁盘上的上一轮清单（2026-10-14 R2 审计 S2 修复）
+ *
+ * 旧实现读 `<desktop>/temp/channel-variant.json`，而那份清单是**后一步**
+ * `prepareChannelPackaging()`（`channel-prepare.ts`）写的、四个打包入口都是先跑本函数
+ * ⇒ 读到的是**上一轮**构建的残留：上一轮 `skills=false`、这一轮全开时，全开构建
+ * 必需的 `capability-center` 会被静默跳过（`lib/` 在就复用陈旧产物，不在就最终在
+ * afterPack 红）。现在 features 由调用方（打包入口已解析好的渠道上下文）**显式传入**；
+ * 没传（`yarn prebuild` / 冒烟脚本直接调）就**一个包都不跳** —— "不知道本轮变体"
+ * 时多建一个包只是慢，跳过则是错。
+ *
+ * "安全"是承重的限定词：只有当**没有任何保留包**把该目录列进 `deps` 时才可跳过。
+ * 反例就在本表里 —— `browser` 的 `deps` 含 `packages/host/connectors`（它的
+ * `tests/*.spec.ts` 值导入真实 `ConnectorStore` 造夹具，运行期那一次惰性 require
+ * 也解析到那份 `lib/`）⇒ 即便渠道关掉了连接器，prebuild 也必须照常产出那份 `lib/`，
+ * 否则保留包自己构建失败。反正它会随 staging `package.json` 的依赖裁剪而不进 asar。
+ * @param features - **本轮**渠道的功能模块开关（`undefined` = 全开/未声明 ⇒ 不跳）。
+ * @returns 目录 → 变体标识（标识与 `channelFeaturesVariant()` 同源）。
+ */
+export function variantPrunedDirs(features?: FeatureSwitches): ReadonlyMap<string, string> {
+  const dirs = closedFeatureSurfaces(features).flatMap(surface => [...surface.directories])
+  if (dirs.length === 0) return new Map()
+  const variant = channelFeaturesVariant(normalizeChannelFeatures(features))
+  const closed = new Set(dirs)
+  const needed = new Set<string>()
+  for (const pkg of WORKSPACE_PACKAGES) {
+    if (closed.has(pkg.dir)) continue
+    for (const dep of pkg.deps ?? []) needed.add(dep)
+  }
+  const result = new Map<string, string>()
+  for (const dir of dirs) {
+    if (needed.has(dir)) continue
+    result.set(dir, variant)
+  }
+  return result
+}
+
+/** `prebuildWorkspaceDeps()` 的可注入输入。 */
+export interface PrebuildOptions {
+  /**
+   * **本轮**渠道的功能模块开关（打包入口从 `resolveChannelBuildContext()` 拿到的
+   * 那份）。省略 = 不按变体跳过任何包（见 {@link variantPrunedDirs}）。
+   */
+  readonly features?: FeatureSwitches
+}
+
 /** 预构建 desktop 自身 + enterprise/account-card/branding/其余自研插件包。
  *
  * `desktopRoot` 是 dsh-plugin-desktop 包根(调用方一直传这个);仓库根由它上溯三级
  * 得到(yarn workspace 命令在包内任意目录都能解析,故 cwd 统一用 desktopRoot)。
+ * @param desktopRoot - dsh-plugin-desktop 包根。
+ * @param options - 渠道 features（见 {@link PrebuildOptions}）。
  */
-export function prebuildWorkspaceDeps(desktopRoot: string): void {
+export function prebuildWorkspaceDeps(desktopRoot: string, options: PrebuildOptions = {}): void {
   const repoRoot = resolve(desktopRoot, '..', '..', '..')
   const force = process.env.DSH_PREBUILD === 'force' || process.argv.includes('--force')
+  const variantSkip = variantPrunedDirs(options.features)
   const skipped: string[] = []
+  const variantSkipped: string[] = []
   for (const pkg of WORKSPACE_PACKAGES) {
     const key = workspaceKey(pkg)
+    // 功能模块变体（2026-10-13，P2）：被关闭的模块**不再随包**，三个 `dist:*` 默认
+    // 先跑本函数 ⇒ 不跳过就会去构建一个不进产物的包（白付一次 tsdown）。
+    // `variantPrunedDirs()` 只在**没有**保留包把它当构建输入时才把它列进来：
+    // `browser` 的构建输入里有 `connectors`（见本表第 2 条的注释），跳过它会让保留包
+    // 构建失败 —— 那种"省一次构建"换来一次红是本末倒置。真正让模块不进产物的是
+    // staging `package.json` 的依赖裁剪（`pack-app-root.mjs`），不是这里。
+    //
+    // `DSH_PREBUILD=force` **压过**变体跳过（2026-10-14 R2 审计 S2）：force 的语义是
+    // "无视一切跳过理由重建"，把它挡在变体分支之后等于这个开关在最需要它的场合
+    // （上一轮清单/入参算错时的兜底）失效。
+    if (!force && variantSkip.has(pkg.dir)) {
+      variantSkipped.push(`${key} (变体 ${variantSkip.get(pkg.dir)} 关闭了该模块)`)
+      continue
+    }
     const reason = stalenessReason(repoRoot, pkg)
     if (!force && reason === null) {
       skipped.push(key)
@@ -533,9 +643,30 @@ export function prebuildWorkspaceDeps(desktopRoot: string): void {
     }
     // 带上判定原因:本缺陷的现场症状是"跳过重建"看着一切正常,日志必须能直接
     // 区分"因为缺产物重建"与"因为源文件更新重建"。
-    console.log(`[prebuild] ${key}: building${reason === null ? ' (forced)' : ` (${reason})`}`)
+    // force 时**一律**印 `(forced)`(后面再附陈旧原因):`DSH_PREBUILD=force` 的语义是
+    // "无视一切跳过理由重建",而"被变体跳过"这一条根本走不到陈旧判定 ⇒ 只看
+    // `reason === null` 会让 force 覆盖变体跳过的现场印成陈旧原因、看不出是谁下令重建
+    // (2026-10-14 R2 审计 S2 的验收判据就是这一行 `building (forced)`)。
+    const reasonLabel = force
+      ? ` (forced)${reason === null ? '' : `，另有陈旧: ${reason}`}`
+      : ` (${reason})`
+    console.log(`[prebuild] ${key}: building${reasonLabel}`)
     const args = pkg.workspace === null ? ['run', 'build'] : ['workspace', pkg.workspace, 'build']
     run(args, desktopRoot, `${key} build`)
+  }
+  if (variantSkipped.length > 0) {
+    console.log(
+      `[prebuild] 变体裁剪，跳过: ${variantSkipped.join(', ')}`
+      + '（这些模块不随包；保留包若把它当构建输入就不会列在这里 —— 见 variantPrunedDirs）',
+    )
+  }
+  if (force && variantSkip.size > 0) {
+    // 区分"变体跳过"与"force 覆盖"：force 下这里必须出现，否则说明覆盖没生效
+    // （2026-10-14 R2 审计 S2 的现场症状就是这条日志从不出现）。
+    console.log(
+      `[prebuild] DSH_PREBUILD=force：变体跳过被覆盖，${variantSkip.size} 个包照常重建`
+      + `（${[...variantSkip.keys()].join(', ')}）`,
+    )
   }
   if (skipped.length > 0) {
     console.log(`[prebuild] up to date, skipped: ${skipped.join(', ')} (DSH_PREBUILD=force 可强制重建)`)

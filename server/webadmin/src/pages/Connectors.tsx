@@ -374,6 +374,15 @@ function fmtTime(iso: string): string {
   return d.toLocaleString('zh-CN', { hour12: false })
 }
 
+/**
+ * 连接器页的**变体哨兵串**（P3；命名 = `picoaide.feature.<模块>.v1`，模块名 `connectors`
+ * 与 Go 侧 `-tags`、渠道配置 `features` 逐字一致）。
+ *
+ * 双侧判据与两条纪律见 `pages/CapabilityCenter.tsx` 的同名常量；产物级断言在
+ * `scripts/check-feature-chunks.mjs`。
+ */
+export const FEATURE_SENTINEL = 'picoaide.feature.connectors.v1'
+
 export default function Connectors() {
   const [rows, setRows] = useState<ConnectorRow[]>([])
   const [loading, setLoading] = useState(true)
@@ -575,7 +584,7 @@ export default function Connectors() {
   }
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4" data-feature-sentinel={FEATURE_SENTINEL}>
       <PageHeader
         title="连接器"
         desc="客户端连接器目录(服务端下发):图形化配置定义 JSON,保存后客户端登录自动同步;凭证仍只存客户端本地"

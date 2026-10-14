@@ -80,7 +80,7 @@ export GOCACHE=/data/picoaide-harness/temp/forum-gocache GOMODCACHE=/root/go/pkg
 
 # 编译 + 打包（资源进 wasm 自定义段）
 GOOS=wasip1 GOARCH=wasm go build -o /tmp/forum.wasm .
-node ../../skills/app-builder/scripts/pack-assets.mjs --in /tmp/forum.wasm --out /tmp/forum-packed.wasm \
+node ../scripts/pack-assets.mjs --in /tmp/forum.wasm --out /tmp/forum-packed.wasm \
   web/index.html=index.html web/app.css=static/app.css web/app.js=static/app.js
 
 # 技能自带的假宿主：静态直出 + 入口 + API

@@ -53,7 +53,7 @@ import {
   SkillLockedError,
   uninstallSkill,
   type SkillInstallLog,
-} from '../src/skill-install.ts'
+} from '../../capability-center/src/host/skill-install.ts'
 import { isolateRuntimeSkillRoots } from './helpers/runtime-skill-roots.ts'
 
 /** 死 pid（Linux 的 pid_max 上限附近，`kill(pid, 0)` 必 ESRCH）。 */

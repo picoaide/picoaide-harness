@@ -28,6 +28,9 @@
  * @module dsh-plugin-desktop/startup-rows
  */
 
+import { closedFeatureModules, prunedFeatureRows, type FeatureSwitches } from './channel-features.ts'
+import { readDesktopChannelProfile } from './desktop-channel.ts'
+
 /**
  * `FiberState.ACTIVE`。
  *
@@ -53,7 +56,7 @@ export const FIBER_FAILED = 3
  * 判据是「缺了它这个产品就不是它」：窗口与壳、桌面自有路由、登录门、企业面、
  * 四个自研业务面。**不含**可选客户端 UI 行 —— `profile.ts` 的 `filterRows` 会有意
  * 丢弃组合里解析不到的客户端行，把它们放进来会造成启动假报警。
- * 共 19 条；`tests/startup-rows.spec.ts` 会逐条断言它们真的在组合树里且未被 disable。
+ * 共 21 条；`tests/startup-rows.spec.ts` 会逐条断言它们真的在组合树里且未被 disable。
  *
  * 2026-09-21（并道改造）：`picoaide-foot-menu` 入表 —— 它是**五个面板入口的唯一
  * 承载行**（更多 + 浮层）。它不在 `filterRows` 的丢弃范围内（那只丢
@@ -77,6 +80,20 @@ export const REQUIRED_DESKTOP_ROWS = [
   'picoaide-auth-gate',
   'picoaide-channel-sync',
   'picoaide-error-reporting',
+  // 能力中心（技能商店）的 host + client 双面（capability-center/cordis.patch.yml）。
+  // 2026-10-13 从企业包拆出：这一条是"技能商店还在产物里"的唯一行级判据 ——
+  // 它一旦消失（拆包漏接线 / 被渠道覆盖层禁用），底部「更多」里的能力中心入口
+  // 会**安静地**少掉一条，正是本模块要消灭的形态，因此按"必需行"处理。
+  'picoaide-capability-center',
+  // 技能遥测行（0040：技能被真正调用后的匿名计数上报）。2026-10-13（P0-b）随技能面
+  // 从 `picoaide-skill-telemetry`（enterprise）改为 `@picoaide/dsh-capability-center`
+  // 的同名子路径。
+  //
+  // **为什么这次才入表**：它此前不在本清单里 —— 被渠道覆盖层或 home 补丁禁用时
+  // 没有任何判据会红，"技能用量系统性少计"只会以数据缺失的形式出现在服务端。
+  // 变体化（P2）会让"某行不在组合里"成为常态，因此那条静默缺口必须先补上：
+  // 要么纳入登记（本行），要么在豁免表里写明理由。这里选前者。
+  'picoaide-skill-telemetry',
   // 自研业务面
   'pico-connectors',
   'pico-cron',
@@ -86,6 +103,47 @@ export const REQUIRED_DESKTOP_ROWS = [
   // 底部「更多」行（foot-menu/cordis.patch.yml）：五个面板入口的唯一承载行
   'picoaide-foot-menu',
 ] as const
+
+/**
+ * 本次运行**真的该激活**的必需行（= {@link REQUIRED_DESKTOP_ROWS} 减去被关闭模块的行）。
+ *
+ * 为什么必需（2026-10-13，P2）：变体化之后"某行不在组合里"成为**正常**形态 ——
+ * 模块的包不随包了，它的 `cordis.patch.yml` 也就不会被加载、那几行自然不存在。
+ * 如果断言仍按全量清单判，变体版客户端会**在启动时**把这些正常的裁剪报成
+ * "必需行没激活"并走致命路径（`src/main.ts` 的 `reportFatalStartupFailure`）——
+ * 即"关掉一个面板"变成"客户端打不开"。
+ *
+ * 反过来说，清单里的其余行一条都不放宽：本函数只做减法，减掉的是**声明里显式关掉
+ * 的模块**对应的行（`features.<module> === false`），其它任何"行不见了"照旧抛错。
+ * 全开（官方渠道 / 没写 `features`）时返回的数组与 {@link REQUIRED_DESKTOP_ROWS}
+ * **逐个元素相同**。
+ *
+ * `features` 缺省取自**随包渠道包**（`build/channel.json`，`stageChannelProfile()` 写入）。
+ * @param features - 功能模块开关（测试注入；缺省读随包渠道包）。
+ * @returns 本次运行必须 ACTIVE 的行 id。
+ */
+export function requiredDesktopRows(features?: FeatureSwitches): readonly string[] {
+  const pruned = new Set(prunedFeatureRows(features ?? readDesktopChannelProfile()?.features))
+  return pruned.size === 0 ? REQUIRED_DESKTOP_ROWS : REQUIRED_DESKTOP_ROWS.filter(id => !pruned.has(id))
+}
+
+/**
+ * 本次运行被模块开关摘掉的行 id（排障与自检用；全开时为空）。
+ * @param features - 功能模块开关（缺省读随包渠道包）。
+ * @returns 被摘掉的行 id（顺序 = {@link REQUIRED_DESKTOP_ROWS} 的顺序）。
+ */
+export function prunedDesktopRows(features?: FeatureSwitches): readonly string[] {
+  return prunedFeatureRows(features ?? readDesktopChannelProfile()?.features)
+}
+
+/**
+ * 本次运行被关掉的模块名（`features` 里显式 `false` 的那些；全开时为空）。
+ * @param features - 功能模块开关（缺省读随包渠道包）。
+ * @returns 模块名列表。
+ */
+export function closedDesktopFeatureModules(features?: FeatureSwitches): string[] {
+  return closedFeatureModules(features ?? readDesktopChannelProfile()?.features)
+}
 
 /** Loader 条目里本模块读取的最小形状（避免把上游 Loader 类型引进来）。 */
 export interface LoaderEntryLike {
@@ -113,7 +171,7 @@ export interface InactiveRow {
  */
 export function inactiveRequiredRows(
   entries: Iterable<LoaderEntryLike>,
-  required: readonly string[] = REQUIRED_DESKTOP_ROWS,
+  required: readonly string[] = requiredDesktopRows(),
 ): InactiveRow[] {
   const byId = new Map<string, LoaderEntryLike>()
   for (const entry of entries) {
@@ -245,7 +303,7 @@ export function assertRequiredClientEntries(
  */
 export function assertRequiredRowsActive(
   ctx: StartupAuditContext,
-  required: readonly string[] = REQUIRED_DESKTOP_ROWS,
+  required: readonly string[] = requiredDesktopRows(),
 ): void {
   const entries = ctx.loader?.entries()
   if (entries === undefined) {

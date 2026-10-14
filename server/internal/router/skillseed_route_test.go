@@ -1,3 +1,8 @@
+//go:build skills
+
+// 本文件判的是内置技能下发面（`/api/client/v2/skills/builtin*` 的 Bearer 认证与管理
+// 端会话要求）。关闭 skills 时这一整片路由不注册、`internal/skillseed` 也不在依赖
+// 图里 ⇒ 判据按它需要的模块分文件（P1 第二片，2026-10-14）；断言一条都没有删。
 package router
 
 import (
@@ -18,7 +23,6 @@ import (
 	"github.com/picoaide/picoaide/internal/capabilities"
 	"github.com/picoaide/picoaide/internal/channel"
 	"github.com/picoaide/picoaide/internal/clientrelease"
-	"github.com/picoaide/picoaide/internal/connectors"
 	"github.com/picoaide/picoaide/internal/llmgateway"
 	"github.com/picoaide/picoaide/internal/marketplace"
 	"github.com/picoaide/picoaide/internal/portal"
@@ -26,9 +30,8 @@ import (
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/sharedskills"
+	"github.com/picoaide/picoaide/internal/skillseed"
 	"github.com/picoaide/picoaide/internal/telemetry"
-	wasmapi "github.com/picoaide/picoaide/internal/wasmapp/api"
-	"github.com/picoaide/picoaide/internal/wasmapp/skillseed"
 )
 
 // seedSkillSource 是仓库里内置技能资产的源头（Dockerfile 把它 COPY 进镜像的
@@ -78,11 +81,9 @@ func buildSkillSeedRouter(t *testing.T) (*gin.Engine, string, *sql.DB) {
 		Agentshare:    agentshare.NewHandlers(db, t.TempDir()),
 		Shared:        sharedskills.NewHandlers(db, t.TempDir()),
 		Capability:    capabilities.NewHandlers(db, t.TempDir()),
-		Connector:     connectors.NewHandlers(db),
 		Telemetry:     telemetry.NewHandlers(db),
 		Gateway:       llmgateway.NewHandlers(db),
 		Reports:       reports.NewHandlers(db),
-		Wasm:          wasmapi.NewHandlers(wasmapi.Options{}),
 		// 资产目录 = 仓库里那份真货，按镜像布局摆成 <dir>/app-builder/。
 		SkillSeed: skillseed.NewHandlers(skillseed.New(stageSeedDir(t))),
 	})

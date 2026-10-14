@@ -35,6 +35,8 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/picoaide/picoaide/internal/features"
 )
 
 // routeKeys 提取一棵路由树的 (method, path) 集合。
@@ -65,6 +67,154 @@ func keysToSet(keys []string) map[string]bool {
 		out[k] = true
 	}
 	return out
+}
+
+// routePath 从 `"GET /api/client/v2/…"` 形态的路由键里取出路径部分。
+func routePath(key string) string {
+	if _, path, ok := strings.Cut(key, " "); ok {
+		return path
+	}
+	return key
+}
+
+// routesUnderPrefixes 返回 keys 里路径命中 prefixes 任一条的路由键（升序）。
+//
+// **按路径前缀判、不看 method**：关闭态的承诺是"这一整片命名空间从路由树上消失"，
+// 而越权形态恰恰爱用被漏掉的那些 method（`DELETE`/`PUT`）绕过 method 白名单式的扫描。
+func routesUnderPrefixes(keys map[string]bool, prefixes []string) []string {
+	var out []string
+	for key := range keys {
+		path := routePath(key)
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(path, prefix) {
+				out = append(out, key)
+				break
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// optionalModuleRoutePrefixes：可选模块 → 它在路由树上的**全部命名空间前缀**
+// （路径前缀，覆盖所有 method）。
+//
+// 为什么是"登记级"而不是旧形态那 4 条子串（P1 第三片，2026-10-14 独立审计 P1-3 实测）：
+// 旧形态只匹配 `GET|POST /api/client/v2/apps/wasm`、`/admin/wasm-apps`、`/marketplace/`、
+// `/admin/connectors` —— 于是"在关闭态用**真** BearerAuth 注册三条技能面路由
+// （未认证响应与真端点逐字同形）"实测**全绿**：它既不含 `DELETE`/`PUT` method 前缀，
+// 也不含 `/skills`、`/shared-skills`、`/agent-presets`、`/capabilities` 这一整批技能面路径。
+// 关闭态的承诺是"路由树上不存在"，扫描面就必须覆盖**整片命名空间与全部 method**。
+//
+// 这张表自己也被双向判着（不是靠注释说它对）：
+//   - 键集合必须等于 `features.AllModules()`（多一个/少一个都红 —— 新增可选模块忘登记
+//     ⇒ 关闭态反向断言静默漏掉一整片）；
+//   - 每条前缀必须是非空 `/api/…` 形态，且不得跨模块重复（重复 ⇒ "该不该在树上"没有唯一答案）；
+//   - **关闭**的模块：命中它的路由必须 0 条；**开启**的模块：必须 ≥1 条
+//     （0 条说明这张表过期，或该模块的路由面真的整片没了 —— 两种都得红）。
+//
+// 前缀在这里是"该模块独占的命名空间"，所以**基础面（任何变体都在的路由）不得落在任何
+// 前缀之下** —— 否则关闭态断言会把基础路由判成泄漏。这条不另立判据：由下面"前缀不得
+// 跨模块互相遮盖"的自证 + ②③ 两个方向共同兜住（真把基础路由放进某个模块的命名空间，
+// ② 会在该模块关闭的变体上当场红 —— fail-closed 的方向，不会静默）。
+var optionalModuleRoutePrefixes = map[string][]string{
+	// 技能面：技能商城、组织共享技能、智能体共享、能力中心、内置技能下发。
+	features.ModuleSkills: {
+		"/api/client/v2/agent-presets",
+		"/api/client/v2/capabilities",
+		"/api/client/v2/marketplace/skills",
+		"/api/client/v2/shared-skills",
+		"/api/client/v2/skills/builtin",
+		"/api/server/admin/agent-presets",
+		"/api/server/admin/agents",
+		"/api/server/admin/capabilities/approvals",
+		"/api/server/admin/capability-locks",
+		"/api/server/admin/shared-skills",
+		"/api/server/admin/skills",
+	},
+	// 应用面：WASM 应用平台的客户端请求入口与管理端操作面。
+	features.ModuleApps: {
+		"/api/client/v2/apps/wasm",
+		"/api/server/admin/wasm-apps",
+	},
+	// 连接器面：连接器目录的管理端写面（客户端目录读面属基础面，随 bootstrap 下发）。
+	features.ModuleConnectors: {
+		"/api/server/admin/connectors",
+	},
+}
+
+// assertOptionalModuleRouteSurface 是**每个变体都跑**的登记级双向断言：
+// 关闭的模块在树上一条都不许有（全部 method），开启的模块必须至少有一条。
+func assertOptionalModuleRouteSurface(t *testing.T, full map[string]bool) {
+	t.Helper()
+	modules := features.AllModules()
+
+	// ① 登记表自证：扫描面与模块清单同源（键集合从 features 派生，不是第二份清单）。
+	if len(optionalModuleRoutePrefixes) != len(modules) {
+		t.Fatalf("optionalModuleRoutePrefixes 登记了 %d 个模块，features.AllModules() 有 %d 个 —— "+
+			"新增/删除可选模块必须同步这张前缀表（它是关闭态反向断言的**全部**扫描面）",
+			len(optionalModuleRoutePrefixes), len(modules))
+	}
+	owner := map[string]string{}
+	for _, module := range modules {
+		prefixes, ok := optionalModuleRoutePrefixes[module]
+		if !ok {
+			t.Fatalf("optionalModuleRoutePrefixes 缺少模块 %s —— 关闭态反向断言会静默漏掉它的整片路由", module)
+		}
+		if len(prefixes) == 0 {
+			t.Fatalf("模块 %s 的前缀表是空的 —— 空扫描面等于把关闭态判据关掉", module)
+		}
+		for _, prefix := range prefixes {
+			if !strings.HasPrefix(prefix, "/api/") {
+				t.Fatalf("模块 %s 的前缀 %q 不是 `/api/…` 形态 —— 本表判的是路由路径前缀", module, prefix)
+			}
+			if previous, dup := owner[prefix]; dup {
+				t.Fatalf("前缀 %q 同时登记在模块 %s 与 %s 名下 —— 关闭态断言会出现两种答案", prefix, previous, module)
+			}
+			owner[prefix] = module
+		}
+	}
+	// 前缀跨模块不得互相遮盖（`/api/server/admin/skills` 与 `/api/server/admin/skills/builtin`
+	// 同模块内重复是良性的；跨模块遮盖会让"哪个模块该在树上"出现两种答案）。
+	// 这一条同时**蕴含**"同一条路由最多命中一个模块"：若两条前缀都是某条路径的前缀，
+	// 短的那条必然是长的那条的前缀。
+	for prefix, module := range owner {
+		for other, otherModule := range owner {
+			if module == otherModule || prefix == other {
+				continue
+			}
+			if strings.HasPrefix(other, prefix) {
+				t.Fatalf("前缀 %q（模块 %s）遮盖了 %q（模块 %s）—— 跨模块的命名空间必须互不相交",
+					prefix, module, other, otherModule)
+			}
+		}
+	}
+
+	// ② 关闭的模块：树上必须**一条都没有**。
+	for _, module := range modules {
+		if features.Has(module) {
+			continue
+		}
+		if leaked := routesUnderPrefixes(full, optionalModuleRoutePrefixes[module]); len(leaked) > 0 {
+			t.Errorf("模块 %s 未编入本变体（features.Enabled()=%v），但它名下仍有 %d 条路由在树上：\n  %s\n"+
+				"  关闭态语义 = 整片命名空间从产物里消失（编译期 no-op），不是「仍在树上但返回 404/500」；"+
+				"见 docs/decisions/2026-10-14-server-build-tags.md。",
+				module, features.Enabled(), len(leaked), strings.Join(leaked, "\n  "))
+		}
+	}
+
+	// ③ 开启的模块：前缀必须至少命中一条 —— 否则这张表已经过期（模块改名/路由搬家），
+	//    ② 会跟着退化成"永远为真"的空断言。
+	for _, module := range modules {
+		if !features.Has(module) {
+			continue
+		}
+		if hit := routesUnderPrefixes(full, optionalModuleRoutePrefixes[module]); len(hit) == 0 {
+			t.Errorf("模块 %s 编进了本变体，但前缀表 %v 在路由树上一条都没命中 —— "+
+				"前缀表已过期（改名/搬家），或该模块的路由面整片消失了；两条都得先修这里",
+				module, optionalModuleRoutePrefixes[module])
+		}
+	}
 }
 
 // productionReferenceTree 独立调用**生产装配函数**构造参考树。
@@ -142,68 +292,6 @@ func TestRouteAssemblyMatchesProductionSource(t *testing.T) {
 // 于是干净提交上 TestRouteAssemblyGatedSlicesAreDeclared 直接失败）。
 // 反过来，**你新加了一条条件注册路由就必须把它登记进来**：失败信息会逐条
 // 列出"消失了却没声明"的路由，照着补一行即可。
-
-// wasmGatedRoutes：d.Wasm == nil 时整片消失（internal/router/registerWasm 的首行）。
-var wasmGatedRoutes = []string{
-	// 客户端面 /api/client/v2/apps/wasm（BearerAuth）
-	"POST /api/client/v2/apps/wasm/validate",
-	"POST /api/client/v2/apps/wasm/:app_id/releases",
-	"POST /api/client/v2/apps/wasm/:app_id/publish",
-	"POST /api/client/v2/apps/wasm/:app_id/unpublish",
-	"POST /api/client/v2/apps/wasm/:app_id/freeze",
-	"GET /api/client/v2/apps/wasm/:app_id/export",
-	"DELETE /api/client/v2/apps/wasm/:app_id",
-	"GET /api/client/v2/apps/wasm/:app_id/diagnostics",
-	"GET /api/client/v2/apps/wasm/:app_id/schema",
-	// 作者数据面（2026-09-21）：只读浏览自己应用库里的行。
-	"GET /api/client/v2/apps/wasm/:app_id/rows",
-	// 客户端专属访问模型（2026-09-19）：请求入口、打开校验、持有性证明（W1 新增，
-	// 与 `:app_id/opens` 管理端出口一起在本轮补齐登记 —— 条件注册的漏登记形态是
-	// "路由整片消失而没人发现"，这正是本表存在的理由）。
-	"POST /api/client/v2/apps/wasm/:app_id/request",
-	"POST /api/client/v2/apps/wasm/:app_id/open",
-	"POST /api/client/v2/apps/wasm/proof",
-	// R1-pm-3：发布者本人的版本历史 + 审核结论（含被拒理由）。条件注册
-	// （d.Wasm == nil 时整片消失）⇒ 新增就必须登记，否则本表反向断言红。
-	"GET /api/client/v2/apps/wasm/:app_id/releases",
-	"GET /api/client/v2/apps/wasm/catalog",
-	// 标识唯一性预查（2026-09-20）：发布表单填 app_id 时异步问它、提交前再问一次。
-	// 与上面几条同理 —— 条件注册（d.Wasm == nil 时整片消失），新增就必须登记。
-	"GET /api/client/v2/apps/wasm/:app_id/availability",
-	// 分片上传（§4.2）
-	"POST /api/client/v2/apps/wasm/uploads",
-	"PUT /api/client/v2/apps/wasm/uploads/:upload_id/chunks/:index",
-	"GET /api/client/v2/apps/wasm/uploads/:upload_id",
-	"POST /api/client/v2/apps/wasm/uploads/:upload_id/complete",
-	"DELETE /api/client/v2/apps/wasm/uploads/:upload_id",
-	// 管理面 /api/server/admin/wasm-apps（AdminRoute + RBAC 申报）
-	"GET /api/server/admin/wasm-apps",
-	"POST /api/server/admin/wasm-apps/:app_id/unpublish",
-	"POST /api/server/admin/wasm-apps/:app_id/publish",
-	"PUT /api/server/admin/wasm-apps/:app_id/owner",
-	"POST /api/server/admin/wasm-apps/:app_id/freeze",
-	"PUT /api/server/admin/wasm-apps/review",
-	"GET /api/server/admin/wasm-apps/limits",
-	"PUT /api/server/admin/wasm-apps/limits",
-	// 2026-09-19 审核闭环 + 运行诊断（router.go 已随本轮提交进仓 ⇒ 按约定登记）。
-	// 与本站的历史注释对照：这 5 条曾只存在于并发会话工作树、未提交，那时把它们
-	// 写进本表会让"干净提交态"报"声明表里的路由并未消失"；现在它们已在提交面内，
-	// 不登记则反向报"消失却没登记"。
-	"GET /api/server/admin/wasm-apps/:app_id/releases",
-	"POST /api/server/admin/wasm-apps/:app_id/releases/:version/approve",
-	"POST /api/server/admin/wasm-apps/:app_id/releases/:version/reject",
-	"GET /api/server/admin/wasm-apps/:app_id/diagnostics",
-	"GET /api/server/admin/wasm-apps/runtime",
-	"GET /api/server/admin/wasm-apps/:app_id/opens",
-	// 客户端专属改造 W5：打开看板概览（静态段 `opens/summary`，与上一条 `:app_id/opens`
-	// 同层但更具体）与按应用的 AI 用量。两条与上一批同类 —— 都是 `d.Wasm != nil` 才注册，
-	// 且都**后于**本表上一轮重算落地，属同一种漏登记（守卫按实跑 diff 反向断言）。
-	"GET /api/server/admin/wasm-apps/opens/summary",
-	"GET /api/server/admin/wasm-apps/:app_id/ai-usage",
-	// 管理面的只读数据面（2026-09-21）：表结构 + 行浏览（与员工面同实现，只差鉴权）。
-	"GET /api/server/admin/wasm-apps/:app_id/schema",
-	"GET /api/server/admin/wasm-apps/:app_id/rows",
-}
 
 // ⚠️ `sessionGatedRoutes` 已随 W4 删除：它登记的是"`d.WasmSession != nil` 时才注册"
 // 的五条员工浏览器 HTML 面（`/login`、`/logout`、`/app-ticket`）—— 那套入口与
@@ -509,7 +597,11 @@ func TestProductionAssemblyPassesEveryDep(t *testing.T) {
 //   - 置零即**装配期 fail-loud**（panic）的字段，必须登记进
 //     productionDepsFailFastFields —— fail-loud 是可接受的失效形态（比静默丢路由
 //     好），但同样不许是"没人知道"的隐式行为；
-//   - 其余字段置零不得让任何路由消失（新增条件注册必须显式登记）。
+//   - 其余字段置零不得让任何路由消失（新增条件注册必须显式登记）；
+//   - **关闭态的整片命名空间不得在树上**（`assertOptionalModuleRouteSurface`，登记级、
+//     覆盖全部 method、每个变体都跑）—— 这一条与 productionDeps 无关，是本用例里
+//     唯一直接判"关闭态承诺"的断言，见它的注释与
+//     `internal/router/optional_*_off_registration_test.go` 的位置级判据。
 func TestProductionDepsNilGatesDeclaredSlices(t *testing.T) {
 	full := routeKeys(productionReferenceTree(t))
 	fields := productionDepsFieldNames(t)
@@ -549,24 +641,74 @@ func TestProductionDepsNilGatesDeclaredSlices(t *testing.T) {
 		}
 	}
 
+	// 关闭态的"路由树上不存在"承诺：**登记级双向断言，每个变体都跑**（P1 第三片，
+	// 2026-10-14）。它不再依附于下面那条"本变体没有运行期 nil 门"的分支 —— 旧形态把
+	// 反向断言塞在 `len(features.Enabled()) == 0` 里，于是
+	//   ① 只有"全关"那一个变体真的扫过树，
+	//   ② 扫的还是 4 条子串（漏 method、漏整批技能面路径）。
+	// 两者叠加的实测后果：在关闭态注册三条技能面路由、判据全绿。
+	assertOptionalModuleRouteSurface(t, full)
+
+	// 变体自证（P1 第二片 2026-10-14；P1 第三片同日按"哪些模块有运行期 nil 门"重写）：
+	// 本变体里**没有任何"由 productionDeps 字段在运行期门控"的可选模块**编进来时，
+	// 字段置零当然不会让路由消失 —— 这是关闭态的正确形态（没有可选路由可丢），
+	// 不是判据空转。
+	//
+	// 哪两个模块有运行期 nil 门：apps ⇒ `productionDeps.Wasm`（`registerWasm` 的
+	// `d.Wasm == nil` 守卫）；skills ⇒ `productionDeps.SkillSeed`。**connectors 没有**
+	// —— 它的 handler 在 `cmd/server/optional_connectors_on.go` 里由 `d.DB` 现造
+	// （`applyConnectorDeps`），既不占 productionDeps 字段、也就没有可门控面。
+	//
+	// 旧形态的条件是 `len(features.Enabled()) == 0`，于是 `-tags=connectors` 这条
+	// **合法变体**自己红在下面那句 Fatal 上（"没有任何字段置零会让路由消失"），
+	// 而变体矩阵又恰好漏了它 ⇒ 这条红在任何入口都不会出现。见
+	// server/scripts/check-go-build-tags.mjs 的 COMBOS（现已从
+	// `channelFeaturesVariant` 的取值域穷尽派生）。
+	if !features.HasApps() && !features.HasSkills() {
+		if len(wasmGatedRoutes) != 0 {
+			t.Fatalf("apps 未编入本变体，但 wasmGatedRoutes 登记了 %d 条 —— 关闭态的声明表必须为空",
+				len(wasmGatedRoutes))
+		}
+		// 自证的反方向：条件放宽了，就必须证明"放宽"没有盖住真存在的门 ——
+		// 万一有人给 connectors 补上 productionDeps 字段并据此条件注册路由，
+		// 这里会红，而不是让这条分支继续替它兜着。
+		if len(gatingFields) != 0 {
+			names := make([]string, 0, len(gatingFields))
+			for name := range gatingFields {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			t.Fatalf("本变体（features.Enabled()=%v）没有 apps/skills，却仍有 %d 个 productionDeps 字段"+
+				"置零会让路由消失（%s）—— 说明新增了运行期 nil 门；请把对应模块加进这条自证分支的条件，"+
+				"别让这条分支继续替它兜着", features.Enabled(), len(gatingFields), strings.Join(names, "、"))
+		}
+		t.Logf("本变体（features.Enabled()=%v）里没有由 productionDeps 字段运行期门控的可选模块："+
+			"没有可选路由可被 nil 依赖门控（判据按变体自证）", features.Enabled())
+		return
+	}
+
 	if len(gatingFields) == 0 {
 		t.Fatal("没有任何字段置零会让路由消失 —— 判据空转（productionReferenceTree 或 productionDeps 已变）")
 	}
-	wasmGated, hasWasm := gatingFields["Wasm"]
-	if !hasWasm {
-		t.Fatalf("productionDeps.Wasm 置零后没有路由消失（registerWasm 的 `d.Wasm == nil` 守卫变了？）")
-	}
-	declared := make(map[string]bool, len(wasmGatedRoutes))
-	for _, key := range wasmGatedRoutes {
-		declared[key] = true
-	}
-	if undeclared := diffKeys(wasmGated, declared); len(undeclared) > 0 {
-		t.Errorf("d.Wasm == nil 时有路由消失却没有登记（新增条件注册却没人更新声明表）：\n  %s",
-			strings.Join(undeclared, "\n  "))
-	}
-	if stale := diffKeys(declared, wasmGated); len(stale) > 0 {
-		t.Errorf("声明表里的路由在 d.Wasm == nil 时并未消失（路由被删/不再条件注册）：\n  %s",
-			strings.Join(stale, "\n  "))
+	if features.HasApps() {
+		wasmGated, hasWasm := gatingFields["Wasm"]
+		if !hasWasm {
+			t.Fatalf("productionDeps.Wasm 置零后没有路由消失（registerWasm 的 `d.Wasm == nil` 守卫变了？）")
+		}
+		declared := make(map[string]bool, len(wasmGatedRoutes))
+		for _, key := range wasmGatedRoutes {
+			declared[key] = true
+		}
+		if undeclared := diffKeys(wasmGated, declared); len(undeclared) > 0 {
+			t.Errorf("d.Wasm == nil 时有路由消失却没有登记（新增条件注册却没人更新声明表）：\n  %s",
+				strings.Join(undeclared, "\n  "))
+		}
+		if stale := diffKeys(declared, wasmGated); len(stale) > 0 {
+			t.Errorf("声明表里的路由在 d.Wasm == nil 时并未消失（路由被删/不再条件注册）：\n  %s",
+				strings.Join(stale, "\n  "))
+		}
+	} else if len(wasmGatedRoutes) != 0 {
+		t.Fatalf("apps 未编入本变体，但 wasmGatedRoutes 登记了 %d 条 —— 关闭态的声明表必须为空", len(wasmGatedRoutes))
 	}
 
 	// 把"运行期证明会丢路由的字段"绑回 main() 的字面量：漏填/写 nil 都是真事故。
@@ -584,7 +726,7 @@ func TestProductionDepsNilGatesDeclaredSlices(t *testing.T) {
 		}
 	}
 	t.Logf("逐字段置零实测：%d 个字段会条件注册路由（Wasm=%d 条），与声明表一致",
-		len(gatingFields), len(wasmGated))
+		len(gatingFields), len(gatingFields["Wasm"]))
 }
 
 // productionDepsFailFastFields：置零即**装配期 panic** 的字段（fail-loud，可接受，

@@ -80,6 +80,7 @@ Channel content includes:
 | Copy | Sign-in page and client welcome text, portal welcome text |
 | Assets | Light and dark logos, favicon, accent colour |
 | Client | Data root directory, built-in server address, installer name (slug), application id, deep-link scheme, app origin scheme |
+| Feature modules | The switch for each of skills / WASM apps / connectors (`features`, all on by default; see below) |
 | Optional | Whether the speech model ships with the client (`desktop.speech_bundle_model`, on by default; when on the installer grows by about +140–250 MiB), whether the system proxy may be used (`desktop.allow_system_proxy`) |
 
 The same content drives the **client sign-in page, the client UI, the admin console sidebar and the
@@ -117,9 +118,45 @@ them are needed, declare the delivery surface in the channel configuration:
 > `channels/official/channel.json` declares **every key explicitly** (the key list lives in
 > `packages/host/desktop/scripts/channel-constants.ts` as `CHANNEL_TEMPLATE_KEYS`); a missing key fails
 > the build and names it. So adding a channel = copy `channels/official/` → change the identity fields
-> → trim `desktop.platforms`, without reading source code to discover which keys exist. The three
-> `desktop.speech_*` keys are **overrides** (absent = use the bundled model) and are deliberately not
-> part of the template — putting them in would pin the paths.
+> → trim `desktop.platforms` and `features`, without reading source code to discover which keys exist.
+> The three `desktop.speech_*` keys are **overrides** (absent = use the bundled model) and are
+> deliberately not part of the template — putting them in would pin the paths.
+
+### Which feature modules a channel ships (`features`)
+
+A channel package ships **every feature module** (skills / WASM apps / connectors) by default.
+If a channel does not need one of them, turn it off explicitly in the channel configuration:
+
+```json
+"features": { "skills": true, "apps": true, "connectors": false }
+```
+
+- The only valid keys are `skills` / `apps` / `connectors` and the values must be booleans;
+  **omitting the key means all of them are on** (the base features stay on, existing channels keep
+  their exact behaviour);
+- The default is **per key**: `{"connectors": false}` leaves the other modules on — there is no need
+  to spell the other switches out;
+- A mistake (an unknown module name, a value that is not a boolean — the string `"false"` reads as
+  **truthy** in the client — or `features` not being an object) **stops the build and that channel
+  produces no artefact**: the error names the field and the valid module names but **never echoes the
+  value** (any string in a channel package would end up in a public log);
+- The official channel's template lists all of these keys **per module**, so adding a channel shows at
+  a glance which modules can be turned off.
+
+> **Where this chain currently ends**: for a brand channel the declaration is written into the channel
+> configuration that ships with the client as `features` (the normalised switches, all keys present)
+> and `features_variant` (a stable variant identifier such as `skills,apps`, `connectors` or `none`);
+> the official channel has no such shipped configuration (it uses the built-in identity), and the
+> channel content inside the server image is still the raw channel-repository copy.
+> That identifier is the **same string** future consumers must share: the server image's compile tags
+> (Go `-tags`), the client assembly manifest and the admin console build argument
+> (`--build-arg FEATURES=<variant>`) — the two image-side consumers resolve it at build time from the
+> same source of truth instead of assuming the artefact already carries it. Three copies of the rule
+> would produce a half-wired state ("present in the image, missing in the client") with no failing
+> check anywhere.
+> Until those consumers are wired, changing `features` does **not** change any artefact.
+> The full contract (including how to prove a module really is absent from an artefact) lives in the
+> repository at `docs/decisions/2026-10-13-channel-feature-modules.md`.
 
 ### Getting the speech model into a customer network (`desktop.speech_*`)
 

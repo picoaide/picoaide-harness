@@ -1,3 +1,9 @@
+//go:build skills
+
+// 本文件举证的是**市场/组织技能与智能体归档**的原样字节（`/api/server/admin/skills|agents|
+// agent-presets|shared-skills`）—— 全部属于技能面（P1 第二片，2026-10-14 起按模块分文件）。
+// 断言一条都没有删。
+
 package main
 
 // 管理面**市场命名空间归档下载**端点的正向举证（2026-09-23）。

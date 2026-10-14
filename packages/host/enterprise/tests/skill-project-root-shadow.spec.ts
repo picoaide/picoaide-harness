@@ -34,9 +34,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as tar from 'tar'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { apply, type Config } from '../src/auth-gate.ts'
-import { ArchiveInstallRefusal, installSkillArchive, uninstallSkill, writeProvenance } from '../src/skill-install.ts'
-import { resolveWorkspaceProjectRoot, runtimeSkillRoots, workspaceProjectRoots } from '../src/skill-runtime-roots.ts'
+import { type Config } from '../src/auth-gate.ts'
+import { applyFullComposition as apply } from './helpers/apply-full-composition.ts'
+import { ArchiveInstallRefusal, installSkillArchive, uninstallSkill, writeProvenance } from '../../capability-center/src/host/skill-install.ts'
+import { resolveWorkspaceProjectRoot, runtimeSkillRoots, workspaceProjectRoots } from '../../capability-center/src/host/skill-runtime-roots.ts'
 import type { Session } from '../src/server-connector/config.ts'
 import { listRuntimeSkills } from './helpers/upstream-skill-registry.ts'
 import { isolateRuntimeSkillRoots } from './helpers/runtime-skill-roots.ts'
@@ -334,6 +335,7 @@ function harness(
   })
   const ctx = {
     effect: (fn: () => unknown) => { fn() },
+    provide: (name: string, value: unknown) => { (ctx as unknown as Record<string, unknown>)[`__svc_${name}`] = value },
     get: (name: string) => (name === 'connection'
       ? fence
       : name === 'workspaceRegistry'

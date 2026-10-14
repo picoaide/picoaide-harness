@@ -2,7 +2,7 @@
  * 「平台内置技能」客户端链路（2026-09-18）。
  *
  * 用户要求：**skill 内置到服务端，客户端按需安装**。服务端那一半由
- * `server/internal/wasmapp/skillseed` 提供（清单 + tar.gz 包，带 sha256 头）；
+ * `server/internal/skillseed` 提供（清单 + tar.gz 包，带 sha256 头）；
  * 本用例钉住客户端这一半：
  *
  *  1. `GET /api/pico/skills/builtin` → 服务端清单 + 本机已装列表；
@@ -29,7 +29,8 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as tar from 'tar'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { apply, type Config } from '../src/auth-gate.ts'
+import { type Config } from '../src/auth-gate.ts'
+import { applyFullComposition as apply } from './helpers/apply-full-composition.ts'
 import {
   builtinAction,
   builtinInstallEndpoint,
@@ -38,9 +39,9 @@ import {
   planBuiltinCards,
   selectBuiltinCards,
   type BuiltinSkill,
-} from '../src/client/BuiltinSkillsStrip.tsx'
-import { APP_BUILDER_SKILL, builtinSkillInstallHint, isBuiltinSkillInstalled } from '../src/builtin-skills.ts'
-import { readProvenance, resolveSkillsDir, SKILL_LOCK_DIR } from '../src/skill-install.ts'
+} from '../../capability-center/src/client/BuiltinSkillsStrip.tsx'
+import { APP_BUILDER_SKILL, builtinSkillInstallHint, isBuiltinSkillInstalled } from '../../wasm-apps-host/src/builtin-skills.ts'
+import { readProvenance, resolveSkillsDir, SKILL_LOCK_DIR } from '../../capability-center/src/host/skill-install.ts'
 import type { Session } from '../src/server-connector/config.ts'
 
 const SOURCE_SKILL_DIR = join(__dirname, '..', '..', '..', '..', 'server', 'skills', 'app-builder')
@@ -102,7 +103,8 @@ function harness(session: Session | null): { call: (url: string, method?: string
   const routes: Route[] = []
   const ctx = {
     effect: (fn: () => unknown) => { fn() },
-    get: (name: string) => (name === 'connection' ? browserFence() : undefined),
+    provide: (name: string, value: unknown) => { (ctx as unknown as Record<string, unknown>)[`__svc_${name}`] = value },
+    get: (name: string) => ((ctx as unknown as Record<string, unknown>)[`__svc_${name}`] ?? ((name === 'connection' ? browserFence() : undefined))),
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     picoSession: {
       isRestored: () => true,
@@ -131,7 +133,7 @@ function harness(session: Session | null): { call: (url: string, method?: string
 /**
  * 把真实技能目录打成 tar.gz（与 Go 侧 PackDir 同口径：条目排序、gzip 收流）。
  * 这里只当**夹具**：被测的是客户端拿到归档之后做了什么，不是打包本身
- * （打包由 server/internal/wasmapp/skillseed 的 Go 用例钉住）。
+ * （打包由 server/internal/skillseed 的 Go 用例钉住）。
  */
 async function packSkillTarGz(sourceDir: string): Promise<Buffer> {
   const names: string[] = []
@@ -811,7 +813,7 @@ describe('R21-A2-04 内置技能清单：读失败 ≠ 没有内置技能（404 
   })
 
   it('接线：hook 用 builtinSkillsLoadOutcome 分流，并把非 404 失败写进 error 态（可 reload）', () => {
-    const source = readFileSync(fileURLToPath(new URL('../src/client/BuiltinSkillsStrip.tsx', import.meta.url)), 'utf8')
+    const source = readFileSync(fileURLToPath(new URL('../../capability-center/src/client/BuiltinSkillsStrip.tsx', import.meta.url)), 'utf8')
     expect(source, 'hook 必须用纯函数做三态判定').toContain('builtinSkillsLoadOutcome(res.status, res.ok)')
     // 只钉**语句**形态（注释里引用旧写法不算）：整行以 `if (!res.ok) return` 开头即旧形态。
     expect(source, '旧形态（把所有 !res.ok 当成"没有"）必须消失').not.toMatch(/^\s*if \(!res\.ok\) return/mu)

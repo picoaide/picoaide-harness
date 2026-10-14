@@ -31,29 +31,27 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/picoaide/picoaide/internal/agentshare"
 	"github.com/picoaide/picoaide/internal/appstore"
 	"github.com/picoaide/picoaide/internal/bootstrap"
-	"github.com/picoaide/picoaide/internal/capabilities"
 	"github.com/picoaide/picoaide/internal/channel"
 	"github.com/picoaide/picoaide/internal/clientrelease"
-	"github.com/picoaide/picoaide/internal/connectors"
 	"github.com/picoaide/picoaide/internal/llmgateway"
-	"github.com/picoaide/picoaide/internal/marketplace"
 	"github.com/picoaide/picoaide/internal/portal"
 	"github.com/picoaide/picoaide/internal/reports"
 	"github.com/picoaide/picoaide/internal/router"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
-	"github.com/picoaide/picoaide/internal/sharedskills"
 	"github.com/picoaide/picoaide/internal/telemetry"
-	"github.com/picoaide/picoaide/internal/wasmapp/skillseed"
 )
 
 const r3Secret = "SUPER-SECRET-BOT-KEY"
 
 // r3ProdRouter 组装**生产路由表**:与 cmd/server/main.go 同样调用
 // router.Register(这里是集中声明权限的唯一真源),只把 DB 换成临时测试库。
+// ⚠️ 只装配**基础面**（P1 第二片，2026-10-14）：本文件判的是报表订阅凭据的读取面
+// 与权限，与三个可选模块无关 —— 把可选 handler 拖进来只会让一个基础面判据在降配
+// 变体里编不过（可选 handler 的类型在关闭态是空类型），从而在 `make check-tags` 的
+// `go vet ./...` 上把整条判据丢掉。断言一条都没有删。
 func r3ProdRouter(t *testing.T) (*gin.Engine, *sql.DB) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
@@ -71,12 +69,6 @@ func r3ProdRouter(t *testing.T) (*gin.Engine, *sql.DB) {
 		Channel:       channel.NewHandlers(),
 		PortalAdmin:   portal.NewAdminHandlers(db),
 		ClientRelease: clientrelease.NewHandlers(func() string { return "2.7.2" }, "official"),
-		SkillSeed:     skillseed.NewHandlers(skillseed.New(t.TempDir())),
-		Market:        marketplace.NewHandlers(db, t.TempDir()),
-		Agentshare:    agentshare.NewHandlers(db, t.TempDir()),
-		Shared:        sharedskills.NewHandlers(db, t.TempDir()),
-		Capability:    capabilities.NewHandlers(db, t.TempDir()),
-		Connector:     connectors.NewHandlers(db),
 		Telemetry:     telemetry.NewHandlers(db),
 		Gateway:       llmgateway.NewHandlers(db),
 		Reports:       reports.NewHandlers(db),

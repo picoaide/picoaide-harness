@@ -68,6 +68,7 @@ import { FORBIDDEN_MACOS_NATIVE_ENTRIES } from '../scripts/mac-runtime.ts'
 import { writeValidMacBundle } from './helpers/mac-bundle-fixture.ts'
 import { TEST_BUDGETS } from './wait-budgets.ts'
 import { packagedAppId } from '../scripts/channel-build.ts'
+import { FEATURE_MODULE_SURFACES } from '../src/channel-features.ts'
 import { ensureDesktopProfile } from '../src/profile.ts'
 
 // 上下文里的 `appInfo.id` 一律取自 `packagedAppId()`（= 本次构建声明的身份）：afterPack
@@ -93,6 +94,17 @@ function context(
  * `scripts/verify-renderer-error-capture.mjs`）；缺二进制就 fail-loud ——
  * `yarn check` 本来就要跑图形门禁，二进制是既有前置条件。
  */
+/**
+ * 六个功能模块包的目录（`node_modules/@picoaide/...`）。
+ *
+ * 物理布局的"完整树"夹具必须带上它们：`assertFeatureModuleDirs()` 在物理分支上判
+ * "没被任何变体关闭的模块都必须随包"（量具自检）。少了它们，夹具就不再是"完整的
+ * 物理树"，而用例的语义正是"完整的树必须通过" —— 修夹具、不修判据。
+ */
+const FEATURE_MODULE_DIRS: readonly string[] = FEATURE_MODULE_SURFACES
+  .flatMap(surface => [...surface.packages])
+  .map(pkg => `node_modules/${pkg}`)
+
 function resolveElectronBinary(): string {
   const require = createRequire(import.meta.url)
   const binary = require('electron') as unknown
@@ -130,9 +142,8 @@ const REQUIRED_ASAR_EXPORT_PATHS = [
   'node_modules/@picoaide/dsh-enterprise/lib/bootstrap.js',
   'node_modules/@picoaide/dsh-enterprise/lib/client.js',
   // P1-1(2026-09-16):error-reporting 静态 import @sentry/node,掉出 asar 时整个插件
-  // 模块加载失败且零日志;同批补漏的 skill-telemetry / channel-sync / invariant。
+  // 模块加载失败且零日志;同批补漏的 channel-sync / invariant。
   'node_modules/@picoaide/dsh-enterprise/lib/error-reporting.js',
-  'node_modules/@picoaide/dsh-enterprise/lib/skill-telemetry.js',
   'node_modules/@picoaide/dsh-enterprise/lib/channel-sync.js',
   'node_modules/@picoaide/dsh-enterprise/lib/invariant.js',
   // 2026-09-23（第三轮审计反向 oracle）：这 7 条此前不在任何一张表里，而产物里
@@ -1706,6 +1717,7 @@ describe('打包布局判定：损坏的 app.asar 不得被当成物理布局（
         || REQUIRED_PACKAGED_RUNTIME_ENTRIES.some(entry => rel === join(appRoot, entry).replaceAll('\\', '/'))
         || REQUIRED_ASAR_EXPORT_PATHS.some(entry => rel === join(appRoot, entry).replaceAll('\\', '/'))
         || REQUIRED_PROFILE_PATCH_ANCHORS.some(entry => rel === join(appRoot, entry).replaceAll('\\', '/'))
+        || FEATURE_MODULE_DIRS.some(entry => rel === join(appRoot, entry).replaceAll('\\', '/'))
     }
     vi.stubEnv('PACKAGED_RUNTIME_LAYOUT', 'physical')
     expect(() => verifyWithBrandStub(context('/build', 'linux'), missing, existsComplete)).not.toThrow()
@@ -1743,6 +1755,7 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
         || REQUIRED_PACKAGED_RUNTIME_ENTRIES.some(entry => rel === join(appRoot, entry).replaceAll('\\', '/'))
         || REQUIRED_ASAR_EXPORT_PATHS.some(entry => rel === join(appRoot, entry).replaceAll('\\', '/'))
         || REQUIRED_PROFILE_PATCH_ANCHORS.some(entry => rel === join(appRoot, entry).replaceAll('\\', '/'))
+        || FEATURE_MODULE_DIRS.some(entry => rel === join(appRoot, entry).replaceAll('\\', '/'))
     })
     expect(() => verifyWithBrandStub(runtimeContext, noArchive, existsComplete)).not.toThrow()
 
@@ -2520,9 +2533,9 @@ describe('packaged ASAR bigint semantics smoke (issue #130)', () => {
 })
 
   it('profile 锚点表与真实的 bundle 层解析结果逐条对拍（防新增插件漏登记）', () => {
-    // 判据来源（2026-09-28 改口径）：十个自有组装补丁层**不再**由 `src/profile.ts` 逐个
+    // 判据来源（2026-09-28 改口径）：十一个自有组装补丁层**不再**由 `src/profile.ts` 逐个
     // `resolve('<pkg>/package.json')` 手工解析 —— 它们现在是 profile 的 **bundle 层**
-    // （`REQUIRED_BUNDLES` 列出九个自有包，各自 `dsh.bundle.patch` 指向自己的
+    // （`REQUIRED_BUNDLES` 列出十个自有包，各自 `dsh.bundle.patch` 指向自己的
     // `cordis.patch.yml`；桌面自己那一层由 `@picoaide/dsh-enterprise` 用相对路径携带）。
     // 所以"哪些包目录必须在产物里"这条推导改为**读真实的 bundle 清单与各自的 patch 列表**：
     // 每个自有 bundle 的 `package.json` 与它声明的每个补丁文件都必须在锚点表里

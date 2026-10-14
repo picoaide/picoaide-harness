@@ -145,7 +145,7 @@ if (scopeIndex >= 0 && scope.length === 0) {
 const OPT_IN_SKIPS = [
   {
     test: 'TestExportArchiveForE2E',
-    owner: 'internal/wasmapp/skillseed',
+    owner: 'internal/skillseed',
     reason: 'skillseed 的跨语言 E2E 取证出口（未设 SKILLSEED_E2E_OUT 即 skip），不是回归断言；跑法见 temp/skillseed-e2e/README.md',
   },
 ]
@@ -695,7 +695,7 @@ const ST_PKG = {
   compile: 'picoaide/server/internal/wasmapp/compile',
   // 只差一个后缀的**兄弟包**：`includes('…/compile')` 会把它当成 compile（R8-C-11 / A2）。
   compileHelpers: 'picoaide/server/internal/wasmapp/compilehelpers',
-  skillseed: 'picoaide/server/internal/wasmapp/skillseed',
+  skillseed: 'picoaide/server/internal/skillseed',
   router: 'picoaide/server/internal/router',
   // 同上：`includes('internal/router')` 会把它当成 router（R8-C-11 / A3）。
   routerSpoof: 'picoaide/server/thirdparty/internal/routerx',
@@ -712,7 +712,14 @@ const ST_REQUIRED_CASES = ST_REQUIRED.map(test => ({
   why: '自检合成样本（真实名单见 REQUIRED_CASES）',
 }))
 /** 自检共用的 `--scope`（覆盖上面全部包）。 */
-const ST_SCOPE = ['internal/wasmapp', 'internal/router']
+// 自检用的 `--scope`：必须覆盖合成报告里出现的**全部** owner 包 —— 覆盖不到时那些
+// 登记项会落进"未判定"档（既不算通过也不算失败），样本 `s3` 的"零 skip + 登记项被删
+// 必须判红"就会静默变绿。
+//
+// 2026-10-14（P1 第二片）：`skillseed` 从 `internal/wasmapp/skillseed` 搬到
+// `internal/skillseed`（它服务的是 skills 模块），owner 注册跟着搬 ⇒ 这里必须同批加上
+// 新的包前缀，否则上面那条静默变绿的形态会立刻出现（实测：本文件的自检当场 exit 2）。
+const ST_SCOPE = ['internal/wasmapp', 'internal/router', 'internal/skillseed']
 
 /**
  * 造一份"完全健康"的合成报告：登记项都在、companion 在同包 pass、关键用例 pass。
