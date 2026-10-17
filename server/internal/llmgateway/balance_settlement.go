@@ -177,9 +177,15 @@ const settlementBackfillBackoff = 40 * time.Millisecond
 // 欠款如实落账后由 BalanceBlocked 拦下后续请求。非流式插入结算
 // (RecordUsage*)仍保持余额下限。
 func updateUsageTokensSettled(db *sql.DB, id, promptTokens, completionTokens, cacheTokens int64, estimated bool) error {
+	return updateUsageTokensSettledWithSearch(db, id, promptTokens, completionTokens, cacheTokens, 0, estimated)
+}
+
+// updateUsageTokensSettledWithSearch 是 updateUsageTokensSettled 的带 web_search
+// 次数版本（0085）。按次费用与 token 在同一次回填里结算，走同一条差额收敛路径。
+func updateUsageTokensSettledWithSearch(db *sql.DB, id, promptTokens, completionTokens, cacheTokens, searchRequests int64, estimated bool) error {
 	var err error
 	for attempt := 1; attempt <= settlementBackfillAttempts; attempt++ {
-		err = serverstore.UpdateUsageTokensCachedEstimatedOverdraft(db, id, promptTokens, completionTokens, cacheTokens, estimated)
+		err = serverstore.UpdateUsageTokensCachedEstimatedOverdraftWithSearch(db, id, promptTokens, completionTokens, cacheTokens, searchRequests, estimated)
 		if err == nil {
 			return nil
 		}
@@ -1428,8 +1434,12 @@ type streamSettlement struct {
 	promptTokens     int64
 	completionTokens int64
 	cacheTokens      int64
-	promptSeen       bool
-	completionSeen   bool
+	// searchRequests 是本次流里成功的 web_search 次数（0085）。它本身就是
+	// "这条流产生了可计费工作"的证据：只有搜索结果、没有正文/usage 的流
+	// 不能按零计费删除（上游确实执行并计费了搜索）。
+	searchRequests int64
+	promptSeen     bool
+	completionSeen bool
 }
 
 // settleStreamFallback 是流式收尾兜底结算的**唯一实现**(G12,审计 2026-09-13)。
@@ -1465,7 +1475,7 @@ func settleStreamFallback(db *sql.DB, in streamSettlement) (bool, error) {
 	// 两者都不成立(纯 error-only / [DONE]-only / 空流,且上游一个用量都没报)
 	// 时不计费,由下面按全 0 删除 pending 行。
 	billableWorkSeen := in.contentChunks > 0 || in.contentBytes > 0 ||
-		in.completionTokens > 0 || in.cacheTokens > 0
+		in.completionTokens > 0 || in.cacheTokens > 0 || in.searchRequests > 0
 	var promptEstimated bool
 	if billableWorkSeen {
 		in.promptTokens, promptEstimated = estimatePromptFallback(in.promptTokens, in.promptSeen, in.requestBody, in.promptTokenCap)
@@ -1474,7 +1484,7 @@ func settleStreamFallback(db *sql.DB, in streamSettlement) (bool, error) {
 	// 都不是模型产出(r7 r7f1-2 的"估算放大器"面)。
 	completionTokens, completionEstimated := estimateCompletionFallback(in.promptTokens, in.completionTokens, in.contentBytes)
 	estimated := promptEstimated || completionEstimated
-	if in.promptTokens <= 0 && completionTokens <= 0 && in.cacheTokens <= 0 {
+	if in.promptTokens <= 0 && completionTokens <= 0 && in.cacheTokens <= 0 && in.searchRequests <= 0 {
 		// 正文一个字节都没交付(连接失败/空流/error-only):删除 pending 行,不留痕迹。
 		return false, serverstore.DeleteUsage(db, in.usageID)
 	}
@@ -1484,7 +1494,7 @@ func settleStreamFallback(db *sql.DB, in streamSettlement) (bool, error) {
 	} else {
 		promptEstimationMonitor.observeReportedUsage()
 	}
-	if err := updateUsageTokensSettled(db, in.usageID, in.promptTokens, completionTokens, in.cacheTokens, estimated); err != nil {
+	if err := updateUsageTokensSettledWithSearch(db, in.usageID, in.promptTokens, completionTokens, in.cacheTokens, in.searchRequests, estimated); err != nil {
 		return false, err
 	}
 	return true, nil

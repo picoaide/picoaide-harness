@@ -460,6 +460,12 @@
       "file": "0084_sales_easy_endpoint_discovery.sql",
       "bytes": 3081,
       "sha256": "245eb7e944b583cb5aad8148bd78f04617db17e2b7a1432ec6ee85e7996ef147"
+    },
+    {
+      "version": "0085",
+      "file": "0085_usage_search_billing.sql",
+      "bytes": 1624,
+      "sha256": "acd119f55ca9fa75fa829bc63307c2b73ad1c02c0c80992eef85d57349352cd0"
     }
   ]
 }

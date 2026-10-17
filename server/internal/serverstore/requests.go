@@ -13,16 +13,20 @@ import (
 
 // UsageRequestRow 一条请求级调用记录(不含对话内容,只含计量字段)。
 type UsageRequestRow struct {
-	ID               int64   `json:"id"`
-	Time             string  `json:"time"` // RFC3339
-	UserID           int64   `json:"user_id"`
-	Username         string  `json:"username"`
-	Model            string  `json:"model"`
-	Kind             string  `json:"kind"` // chat | completions | responses | embedding | search
-	PromptTokens     int64   `json:"prompt_tokens"`
-	CompletionTokens int64   `json:"completion_tokens"`
-	CacheTokens      int64   `json:"cache_tokens"`
-	Cost             float64 `json:"cost"`
+	ID               int64  `json:"id"`
+	Time             string `json:"time"` // RFC3339
+	UserID           int64  `json:"user_id"`
+	Username         string `json:"username"`
+	Model            string `json:"model"`
+	Kind             string `json:"kind"` // chat | completions | responses | embedding | search
+	PromptTokens     int64  `json:"prompt_tokens"`
+	CompletionTokens int64  `json:"completion_tokens"`
+	CacheTokens      int64  `json:"cache_tokens"`
+	// SearchRequests(0085)= 本次请求成功返回网页结果的 web_search 次数。
+	// 按 settings `usage.search_price_per_1k` 计费(不参与峰谷折扣),对账时
+	// 用来把"按次费用"从 token 费用里拆出来。
+	SearchRequests int64   `json:"search_requests"`
+	Cost           float64 `json:"cost"`
 	// Estimated(0063)= 该行至少有一侧 token 是服务端按字节估算的(上游没报
 	// 用量时的兜底),不是上游上报值 —— 对账/排障必须能一眼区分(P2,审计 r5 §1)。
 	Estimated bool `json:"estimated"`
@@ -105,7 +109,7 @@ func ListUsageRequests(db *sql.DB, from, to time.Time, username, model, kind str
 	qargs = append(qargs, args...)
 	qargs = append(qargs, size, (page-1)*size)
 	rows, err := rd.Query(`SELECT u.id, u.created_at, u.user_id, u.model, u.kind,
-		u.prompt_tokens, u.completion_tokens, u.cache_prompt_tokens, u.cost, u.estimated,
+		u.prompt_tokens, u.completion_tokens, u.cache_prompt_tokens, u.search_requests, u.cost, u.estimated,
 		COALESCE(us.username, '')
 		FROM usage u LEFT JOIN users us ON us.id = u.user_id`+cond+`
 		ORDER BY u.id DESC LIMIT ? OFFSET ?`, qargs...)
@@ -117,7 +121,7 @@ func ListUsageRequests(db *sql.DB, from, to time.Time, username, model, kind str
 	for rows.Next() {
 		var r UsageRequestRow
 		if err := rows.Scan(&r.ID, &r.Time, &r.UserID, &r.Model, &r.Kind,
-			&r.PromptTokens, &r.CompletionTokens, &r.CacheTokens, &r.Cost, &r.Estimated, &r.Username); err != nil {
+			&r.PromptTokens, &r.CompletionTokens, &r.CacheTokens, &r.SearchRequests, &r.Cost, &r.Estimated, &r.Username); err != nil {
 			return nil, 0, err
 		}
 		out = append(out, r)

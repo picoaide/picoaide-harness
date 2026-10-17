@@ -79,7 +79,7 @@ edited, so the anchor must be taken *before* the new image is imported.
 
 **The migration set** is what classifies a rollback: the same set of migrations visible to both binaries
 means a **same-generation rollback** (image only); a database newer than the binary means a
-**cross-generation rollback** (database included). The current migration range is `0001–0084`.
+**cross-generation rollback** (database included). The current migration range is `0001–0085`.
 
 ## Procedure
 

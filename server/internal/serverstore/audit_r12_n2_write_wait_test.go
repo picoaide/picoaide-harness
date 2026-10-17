@@ -196,7 +196,7 @@ func TestAuditR12N2WriteDDLWaitIsBoundedAndObservable(t *testing.T) {
 	resetUsageRetentionStatusForTest()
 	release2 := n2HoldUsageAccessShare(t, db, 3*time.Second)
 	t1 := time.Now()
-	_, werr2 := recordUsageKindAtCached(db, uid, 0, "r12n2-p201-b", 100, 50, 0, "chat", false, BeijingDayAt(next, 5))
+	_, werr2 := recordUsageKindAtCached(db, uid, 0, "r12n2-p201-b", 100, 50, 0, 0, "chat", false, BeijingDayAt(next, 5))
 	boundedDur := time.Since(t1)
 	release2()
 	st2 := CurrentUsageRetentionStatus()
@@ -239,7 +239,7 @@ func TestAuditR12N2WriteDDLWaitIsBoundedAndObservable(t *testing.T) {
 	done := n2StartContendedCleanup(t, db)
 	time.Sleep(1200 * time.Millisecond)
 	t2 := time.Now()
-	_, werrD := recordUsageKindAtCached(db, uid, 0, "r12n2-p201-d", 100, 50, 0, "chat", false, BeijingDayAt(next.AddDate(0, 1, 0), 5))
+	_, werrD := recordUsageKindAtCached(db, uid, 0, "r12n2-p201-d", 100, 50, 0, 0, "chat", false, BeijingDayAt(next.AddDate(0, 1, 0), 5))
 	durD := time.Since(t2)
 	run := <-done
 	stD := CurrentUsageRetentionStatus()

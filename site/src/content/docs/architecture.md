@@ -200,7 +200,7 @@ PicoAide Harness 是一个三层系统：**桌面客户端 / 本地 Harness 服�
 | 项目 | 事实 |
 |---|---|
 | 数据库 | 只支持 PostgreSQL。容器化交付内置 PG 18；服务端二进制也接受外部实例（`-pg-dsn` 为必填参数） |
-| 迁移 | `server/internal/serverstore/migrations-pg/`，文件名形状 `NNNN_<描述>.sql`（四位编号 + 下划线），服务端启动时自动执行；编号区间 `0001–0084`（历史上删减过部分编号，因此有连续空档）。**迁移是单向的**：回滚镜像不能把库降回旧结构，升级前必须先备份 |
+| 迁移 | `server/internal/serverstore/migrations-pg/`，文件名形状 `NNNN_<描述>.sql`（四位编号 + 下划线），服务端启动时自动执行；编号区间 `0001–0085`（历史上删减过部分编号，因此有连续空档）。**迁移是单向的**：回滚镜像不能把库降回旧结构，升级前必须先备份 |
 | usage 明细 | 按 `created_at` 做**原生月分区**（`usage_YYYYMM`），保留 N 个月可配（默认 6），过期用 `DROP PARTITION` 秒删；删除明细不影响账本 |
 | usage 账本 | `usage_daily`（按年分区）/ `usage_monthly` **永久保留**，由账本任务从明细幂等重算，因此历史统计不会因为明细过期而丢 |
 | 审计 | `audit_logs` 带**哈希链**：每行的 `hash = sha256(prev_hash \| username \| action \| detail \| created_at)`，`prev_hash` 指向前一行；写入用 advisory lock 串行化，避免并发插入读到同一个 `prev_hash` 形成分叉。保留策略可配，裁剪时保留被删批次的最新一条作为锚，链仍可自证 |

@@ -219,7 +219,7 @@ func TestAuditR12N2ShadowSettlementAndCleanupHitPublic(t *testing.T) {
 	next := BeijingMonth(time.Now()).AddDate(0, 1, 0)
 	rel := "usage_" + monthKey(next)
 	_, _ = db.Exec("DROP TABLE IF EXISTS public." + quoteRelationIdent(rel))
-	if _, err := recordUsageKindAtCached(side, uid, 0, "r12n2-p5", 100, 50, 0, "chat", false, BeijingDayAt(next, 1)); err != nil {
+	if _, err := recordUsageKindAtCached(side, uid, 0, "r12n2-p5", 100, 50, 0, 0, "chat", false, BeijingDayAt(next, 1)); err != nil {
 		t.Fatalf("计量写入（shadow 池，需建新分区）: %v", err)
 	}
 	if !r9aRelationExists(t, db, rel) {

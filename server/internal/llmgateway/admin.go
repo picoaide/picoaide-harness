@@ -1344,10 +1344,17 @@ func getGatewayConfig(c *gin.Context, db *sql.DB) {
 	// R17A-06：与运行期**同一份**读取实现（含非法取值的 fail-closed 回落），
 	// 不在这里另写一份判定。
 	unpricedPolicy := serverstore.UnpricedModelPolicy(db)
+	// 0085：Search 按次单价（元/千次）。缺省返回 "0"（不计费）——管理端永远看到
+	// 一个具体数字，不需要理解"空 = 不计费"。
+	searchPrice := settings[serverstore.SearchPriceSetting]
+	if searchPrice == "" {
+		searchPrice = "0"
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"default_model":             settings["gateway.default_model"],
 		"rate_limit":                rateLimit,
 		"peak_windows":              settings[serverstore.PeakWindowsSetting], // 高峰时段 JSON;空 = 无峰谷价
+		"search_price_per_1k":       searchPrice,                              // 0085:web_search 按次单价(元/千次,0=不计费)
 		"retention_months":          retention,                                // usage 明细保留月数(0=永久,默认 6)
 		"error_reporting_dsn":       settings["web.error_reporting_dsn"],
 		"error_reporting_enabled":   settings["web.error_reporting_enabled"] == "true",
@@ -1420,6 +1427,8 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 		MaxFileRefs             *FlexibleString `json:"max_file_refs"`
 		BodyParseBudgetMB       *FlexibleString `json:"body_parse_budget_mb"`
 		FileExpiryDays          *FlexibleString `json:"file_expiry_days"`
+		// 0085：web_search 按次单价（元/千次成功请求，0 = 不计费）。
+		SearchPricePer1K *FlexibleString `json:"search_price_per_1k"`
 		// R17A-06：未定价模型的准入策略（reject | allow）。缺省（未提供）= 不覆盖。
 		UnpricedModelPolicy *string `json:"unpriced_model_policy"`
 	}
@@ -1448,6 +1457,15 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 		// 0 = 不限制(缺省,与官方口径一致);上限 100000 防误填天文数字。
 		if n, err := strconv.Atoi(string(*req.RateLimit)); err != nil || n < 0 || n > 100000 {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "rate_limit 必须是 0~100000 的整数(0=不限制)")
+			return
+		}
+	}
+	// 0085：Search 按次单价。空串 = 0（不计费）；负数/非数字/超上限一律 400。
+	// 校验必须在任何写库之前（与同函数其它白名单同一条纪律）。
+	if req.SearchPricePer1K != nil {
+		if _, ok := serverstore.ParseSearchPricePer1K(string(*req.SearchPricePer1K)); !ok {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION",
+				fmt.Sprintf("search_price_per_1k 必须是 0~%d 的数值(元/千次成功搜索,0=不计费)", serverstore.MaxSearchPricePer1K))
 			return
 		}
 	}
@@ -1670,6 +1688,14 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 	}
 	if req.PeakWindows != nil {
 		if err := auditSetSettingTx(tx, db, serverstore.PeakWindowsSetting, "高峰时段", *req.PeakWindows, &changes); err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+			return
+		}
+	}
+	// 0085：web_search 按次单价（元/千次）。显式 "0" = 关闭按次计费；与其它
+	// 价格设置一样"改价只影响之后产生的 usage 行"（cost 记录时固化）。
+	if req.SearchPricePer1K != nil {
+		if err := auditSetSettingTx(tx, db, serverstore.SearchPriceSetting, "Search 按次计费", string(*req.SearchPricePer1K), &changes); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}

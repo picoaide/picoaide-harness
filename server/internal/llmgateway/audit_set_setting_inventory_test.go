@@ -81,6 +81,9 @@ var auditSettingInventory = map[string]auditSettingWrite{
 	"usage.peak_windows": {
 		why: "JSON（峰谷窗口：小时区间与折扣倍数），不是 URL/凭据。",
 	},
+	"usage.search_price_per_1k": {
+		why: "数值（web_search 按次单价，元/千次成功请求），不是 URL/凭据。",
+	},
 	"usage.retention_months": {
 		why: "整数（明细保留月数），不是 URL/凭据。",
 	},
@@ -711,6 +714,8 @@ func constantSettingKey(name string) string {
 		return "gateway.unpriced_model_policy"
 	case "PeakWindowsSetting":
 		return "usage.peak_windows"
+	case "SearchPriceSetting":
+		return "usage.search_price_per_1k"
 	case "RetentionMonthsSetting":
 		return "usage.retention_months"
 	default:
