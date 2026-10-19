@@ -100,7 +100,7 @@ describe('变体视图：全开构建逐元素等于裸表（官方/全开零影
 })
 
 describe('变体视图：按声明折叠（少一条就少一道门，所以逐条点名）', () => {
-  it('关闭 skills：扁平表 −5、锚点表 −2、导出表不变、总下限 138 → 133', () => {
+  it('关闭 skills：扁平表 −5、锚点表 −2、导出表不变、总下限 155 → 150', () => {
     const view = packagedRuntimeVariantView(skillsClosed)
     expect(view.flat).toEqual(REQUIRED_PACKAGED_RUNTIME_ENTRIES.filter(entry => !entry.includes(SKILLS_PACKAGE)))
     expect(view.flat.length).toBe(REQUIRED_PACKAGED_RUNTIME_ENTRIES.length - 5)
@@ -111,22 +111,22 @@ describe('变体视图：按声明折叠（少一条就少一道门，所以逐�
     expect(effectiveVariantEntries(view).length).toBe(view.manifestFloor)
   })
 
-  it('关闭 connectors：扁平表不变、导出表 −6、锚点表 −2、总下限 138 → 131', () => {
+  it('关闭 connectors：扁平表不变、导出表 −5、锚点表 −2、总下限 155 → 149', () => {
     const view = packagedRuntimeVariantView(connectorsClosed)
     // connectors 的扁平条目**本来**就是 0 条（全部在导出映射表里）—— 这一条专门钉住
-    // "按并集削减"：按单张表削减会把 connectors 的削减量算成 0，于是总下限维持 138
-    // 而生效清单只有 131 条 ⇒ 变体构建**假红**。
+    // "按并集削减"：按单张表削减会把 connectors 的削减量算成 0，于是总下限维持 155
+    // 而生效清单只有 149 条 ⇒ 变体构建**假红**。
     expect(view.flat).toEqual(REQUIRED_PACKAGED_RUNTIME_ENTRIES)
-    expect(view.asarExports.length).toBe(REQUIRED_ASAR_EXPORTS.length - 6)
+    expect(view.asarExports.length).toBe(REQUIRED_ASAR_EXPORTS.length - 5)
     expect(view.anchors.length).toBe(REQUIRED_PROFILE_PATCH_ANCHORS.length - 2)
     expect(view.floors.map(floor => floor.package)).not.toContain('dsh-connectors')
-    expect(view.manifestFloor).toBe(REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR - 7)
+    expect(view.manifestFloor).toBe(REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR - 6)
     expect(effectiveVariantEntries(view).length).toBe(view.manifestFloor)
   })
 
-  it('两个模块同时关闭：总下限 138 → 126（削减量按三张表的并集算，重复只算一次）', () => {
+  it('两个模块同时关闭：总下限 155 → 144（削减量按三张表的并集算，重复只算一次）', () => {
     const view = packagedRuntimeVariantView(bothClosed)
-    expect(view.manifestFloor).toBe(REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR - 12)
+    expect(view.manifestFloor).toBe(REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR - 11)
     expect(effectiveVariantEntries(view).length).toBe(view.manifestFloor)
     expect(view.prunedPackages).toEqual([SKILLS_PACKAGE, CONNECTORS_PACKAGE])
   })
