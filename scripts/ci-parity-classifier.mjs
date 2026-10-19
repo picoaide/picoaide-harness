@@ -12,8 +12,10 @@
  *
  *   1. 从 ci.yml 的 `changes` job 里**逐字抽出**那段 `run:` 块（GitHub 表达式换成 env 变量）
  *      —— 抽出的副本由 `scripts/check-ci-parity.mjs` 写在 `temp/ci-parity/extracted/`；
- *   2. 在一个**合成 git 仓库**里真跑 12 格：8 格 push 形态的路径分类 + 4 格 tag / fail-safe
- *      形态（tag 恒 code=true、`before` 全零恒 true、空 diff 恒 true、预发 tag 恒 true）。
+ *   2. 在一个**合成 git 仓库**里真跑 15 格：8 格 push 形态的路径分类 + 4 格 tag / fail-safe
+ *      形态（tag 恒 code=true、拿不到 `origin/master` 时 `before` 全零恒 true、空 diff 恒
+ *      true、预发 tag 恒 true）+ 3 格**分支首推**（`before` 全零但 `origin/master` 可得 ⇒
+ *      按 merge-base 判：只改 docs/site = false，带代码改动 = true）。
  *
  * 手抄一份分类逻辑 = 下一次 CI 改了它就分叉，而"分叉的本地判据"比没有判据更坏
  * （它会以本地绿给出错误的安心感）。
@@ -24,7 +26,7 @@
  * node scripts/ci-parity-classifier.mjs                     # 用默认抽出路径
  * node scripts/ci-parity-classifier.mjs --classifier <path> # 指定抽出的分类器
  * ```
- * 退出码：0 = 12 格全部符合期望；1 = 有格子不符（逐格打印 `BAD`）。
+ * 退出码：0 = 15 格全部符合期望；1 = 有格子不符（逐格打印 `BAD`）。
  */
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -69,8 +71,21 @@ const PUSH_CASES = [
 const SAFE_CASES = [
   ['tag（正式）→ 一律按有代码改动处理', 'true', { GITHUB_REF: 'refs/tags/v0.0.0' }],
   ['tag（预发）→ 同上', 'true', { GITHUB_REF: 'refs/tags/v0.0.0-beta.1' }],
-  ['before 全零（强推/新建分支）→ fail-safe true', 'true', { BEFORE_SHA: '0'.repeat(40) }],
+  ['before 全零且取不到 origin/master → fail-safe true', 'true', { BEFORE_SHA: '0'.repeat(40) }],
   ['空 diff（无改动）→ fail-safe true', 'true', { SAME_HEAD: '1' }],
+]
+
+/**
+ * 分支**首推**（`before` 全零、`origin/master` 可得）的分类矩阵，`[标签, 期望 code, 改动文件…]`。
+ *
+ * 2026-10-10：首推不再一律 fail-safe 成 `true`，而是取 `merge-base(origin/master, HEAD)`
+ * 作基点 —— 判据面覆盖整条分支相对主线的改动（不是只看最后一个提交）。因此
+ * "只改官网/文档的分支首推"不再白跑三平台构建，而"带代码改动的首推"仍然是 `true`。
+ */
+const BRANCH_CASES = [
+  ['分支首推 + 只改 docs/**', 'false', ['docs/b.md']],
+  ['分支首推 + 只改 site/**', 'false', ['site/b.md']],
+  ['分支首推 + 改代码', 'true', ['scripts/y.mjs']],
 ]
 
 const workdir = mkdtempSync(join(ROOT, 'temp', 'ci-parity-classifier-'))
@@ -161,6 +176,30 @@ for (const [label, want, env] of SAFE_CASES) {
   const ok = code === want
   if (!ok) failures.push(label)
   console.log(`${ok ? 'OK  ' : 'BAD '} ${label.padEnd(44)} code=${code}`)
+}
+
+// 2026-10-10：分支**首推**（`before` 是全零）改用与默认分支的 merge-base 作基点 ——
+// 上面那格证明的是"拿不到 origin/master 时仍然 fail-safe 成 true"；下面这组证明
+// "拿得到时确实按整条分支相对主线的改动来判"（否则"只改官网的分支首推"会白跑三平台）。
+console.log('')
+console.log('### 分支首推（before 全零）—— 相对 origin/master 的 merge-base')
+git(['update-ref', 'refs/remotes/origin/master', baseSha])
+for (const [label, want, files] of BRANCH_CASES) {
+  git(['checkout', '-q', 'main'])
+  git(['reset', '-q', '--hard', baseSha])
+  git(['clean', '-qfd'])
+  for (const file of files) {
+    mkdirSync(join(repo, dirname(file)), { recursive: true })
+    writeFileSync(join(repo, file), 'x\n')
+  }
+  git(['add', '-A'])
+  git(['commit', '-qm', label])
+  const head = git(['rev-parse', 'HEAD'])
+  const code = classify({ BEFORE_SHA: '0'.repeat(40), GITHUB_SHA: head })
+  observed += 1
+  const ok = code === want
+  if (!ok) failures.push(label)
+  console.log(`${ok ? 'OK  ' : 'BAD '} ${label.padEnd(44)} files=${files.join(',').padEnd(38)} code=${code}`)
 }
 
 rmSync(workdir, { recursive: true, force: true })

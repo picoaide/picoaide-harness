@@ -3310,7 +3310,7 @@ const PINNED_STEP_POLICIES = [
     // 与 [SK-8]/[SK-9] 同一份识别口径:参数向量为空的全量根门禁（`yarn check` 或
     // `node scripts/check-workspaces.mjs` —— 见 `ROOT_GATE_DIRECT_INVOCATION`）。
     match: script => rootGateInvocations(script).some(hit => hit.mode === 'check' && hit.args.trim() === ''),
-    ifPolicy: 'fail-safe-docs-only',
+    ifPolicy: 'docs-only-and-not-tag',
   },
   {
     id: 'root-guard-runner',
@@ -3349,7 +3349,7 @@ const PINNED_STEP_POLICIES = [
     id: 'wasm-case-gate',
     label: `用例级判定(\`${WASM_CASE_GATE_SCRIPT}\`)`,
     match: script => script.includes(WASM_CASE_GATE_SCRIPT),
-    ifPolicy: 'never',
+    ifPolicy: 'docs-only-and-not-tag',
   },
   {
     // R12-D-04（P2，第十二轮红队）：这一步是"判据本体的内容摘要 ↔ 登记值"的承重判据，
@@ -3386,7 +3386,7 @@ const PINNED_STEP_POLICIES = [
     id: 'wasm-probe',
     label: 'WASM 协议探针(`verify-wasm-client-only.sh`)',
     match: script => script.includes('verify-wasm-client-only.sh'),
-    ifPolicy: 'fail-safe-docs-only',
+    ifPolicy: 'docs-only-and-not-tag',
   },
   {
     // [SK-20]（第十三轮红队 R13-D-02，P0）：**冻结启动器的行为探针**。
@@ -3417,7 +3417,7 @@ const PINNED_STEP_POLICIES = [
     // 同源；`[SK-23]` 的合成样本用的是别的 job 名 ⇒ 不会被这条策略连带判红）。
     match: (script, item) => item?.jobId === 'server'
       && executedCommands(script).some(entry => entry.command === 'gofmt'),
-    ifPolicy: 'never',
+    ifPolicy: 'docs-only-and-not-tag',
     // 载荷 = 扫描面必须覆盖 Go module 的全部目录（与 `server/Makefile` 的 `GO_DIRS` 同源；
     // `verify-ci-scripts.mjs` 另有一条同面判据 —— 两条独立守卫都咬这一格）。
     payload: script => {
@@ -3432,7 +3432,7 @@ const PINNED_STEP_POLICIES = [
     label: '`go vet ./...`（Go 静态分析步）',
     match: (script, item) => item?.jobId === 'server'
       && executedCommands(script).some(entry => entry.command === 'go' && (entry.argv[0] ?? '') === 'vet'),
-    ifPolicy: 'never',
+    ifPolicy: 'docs-only-and-not-tag',
     // 载荷 = 包面必须逐字 `./...`：`go vet ./cmd` 仍然"运行期通过"，但把 `internal/**`、
     // `demoapps/**`、`webadmin/**`、`scripts/**` 整片静态分析面静默丢掉（E-03 实测两守卫 EXIT=0）。
     //
@@ -3465,7 +3465,7 @@ const PINNED_STEP_POLICIES = [
     label: '`npm test`（webadmin 测试步）',
     match: (script, item) => item?.jobId === 'server'
       && executedCommands(script).some(entry => entry.command === 'npm' && (entry.argv[0] ?? '') === 'test'),
-    ifPolicy: 'never',
+    ifPolicy: 'docs-only-and-not-tag',
     // 载荷 = 必须在 `server/webadmin` 里跑（`webadmin` 的 600+ 用例不在根 `yarn check` 的
     // workspace 枚举里；换目录 = 这一步跑的不是同一批用例 —— 与 [SK-18] 的 cwd 判据同一取向）。
     payload: (script, item) => (item?.step?.['working-directory'] === 'server/webadmin' ? null
@@ -3581,6 +3581,36 @@ const PINNED_STEP_IF_POLICIES = {
   'fail-safe-docs-only': {
     check: value => /needs\.changes\.outputs\.code\s*!=\s*'false'/u.test(value),
     describe: "只允许 `if: needs.changes.outputs.code != 'false'`(docs-only 的 fail-safe 形态)",
+  },
+  // 2026-10-10 登记：**tag 流水线只编译 + 打包 + 发布**（用户拍板）。
+  //
+  // 依据：tag 永远打在"已经跑过全量 CI 的线上提交"上（发布 PR 与 master push 已把
+  // `yarn check` + 全部根守卫 + Go 全量测试 + webadmin 测试跑完并通过），tag 上再跑
+  // 一遍不增加任何判据面，只是把发布时间再拉长 ~20 分钟。
+  //
+  // 允许两种**逐字**形态（不做子串匹配，与 `needs-result` 同一纪律）：
+  //   · `github.ref_type != 'tag'`                                —— server job 的四步
+  //   · `needs.changes.outputs.code != 'false' && github.ref_type != 'tag'` —— gate job 的两步
+  // 任何其它写法（`== 'tag'` / 加第三个合取项 / 取反）一律拒 —— 那正是"判据步骤被静默"
+  // 的老路。tag 上仍然保留的判据：release-policy / 发布说明 / 迁移锚点 / 拓扑 / 渠道 pin
+  // 五步（它们在 `needs.changes.outputs.code` 之外，属发布正确性，不是重复测试）。
+  'docs-only-and-not-tag': {
+    check: value => {
+      const text = String(value).trim()
+      // ① 纯 docs-only 形态：保留（合成样本、以及"这一步本来就没打算在 tag 上跳过"时
+      //    应当照旧可写；把这条一并接受的代价 = 忘了加 tag 条件时不会红，但那种写法
+      //    与改动前等价，不是"被条件静默"）。
+      if (/^needs\.changes\.outputs\.code\s*!=\s*'false'$/u.test(text)) return true
+      // ② server job 的四步：无条件收窄成"非 tag"。
+      if (/^github\.ref_type\s*!=\s*'tag'$/u.test(text)) return true
+      // ③ gate job 的两步：docs-only 的 fail-safe 形态 + tag 例外（合取顺序固定）。
+      return /^needs\.changes\.outputs\.code\s*!=\s*'false'\s*&&\s*github\.ref_type\s*!=\s*'tag'$/u.test(text)
+    },
+    describe: '只允许 `if: needs.changes.outputs.code != \'false\'`（原形态）、'
+      + '`if: github.ref_type != \'tag\'`、'
+      + "或 `if: needs.changes.outputs.code != 'false' && github.ref_type != 'tag'`"
+      + '（tag 上不重跑测试:同一 commit 已在 PR / master push 上跑过全量门禁；'
+      + '要新增形态请登记进 PINNED_STEP_IF_POLICIES 并写明理由）',
   },
   'needs-result': {
     check: (value, policy) => (policy?.ifValues ?? []).includes(String(value).trim()),

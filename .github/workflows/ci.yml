@@ -84,7 +84,21 @@ jobs:
             HEAD="${GITHUB_SHA}"
           fi
           if [[ -z "${BASE}" || "${BASE}" =~ ^0+$ ]] || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
-            echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
+            # 分支**首推**(`before` 是全零或对象取不到)不再直接升格为"有代码改动":
+            # 改用**与默认分支的 merge-base** 作比较基点 —— 这条分支相对主线的**全部**
+            # 改动仍然在判据面内(不是只看最后一个提交),所以"只改官网/文档的分支首推"
+            # 也能走轻量路径,而不必白跑一遍三平台构建。
+            #
+            # 之所以此前一律 fail-safe 成 true:首推时确实**没有**可信的 before 可比 ——
+            # 拿 HEAD^ 兜底会漏掉分支上更早的提交(把带代码改动的分支判成 docs-only),
+            # 那是把门禁跳过的方向,不能做。本 job 的 checkout 是 `fetch-depth: 0`,
+            # 所以 origin/master 与 merge-base 都可得;取不到就仍然 fail-safe 成 true。
+            MERGE_BASE="$(git merge-base origin/master "${HEAD}" 2>/dev/null)" || MERGE_BASE=''
+            if [[ -n "${MERGE_BASE}" ]] && git cat-file -e "${MERGE_BASE}^{commit}" 2>/dev/null; then
+              BASE="${MERGE_BASE}"
+            else
+              echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
+            fi
           fi
           CHANGED="$(git diff --name-only "${BASE}" "${HEAD}" || true)"
           if [[ -z "${CHANGED}" ]]; then
@@ -800,8 +814,16 @@ jobs:
       # ③ 缺省口径不是静默的 —— 脏树会以 `WARN 工作树不干净(跑前 N → 跑后 M 个改动)`
       #    写进结论行与绑定文件(`dirty-policy` 行),不会被误读成"跑在干净 HEAD 上"。
       # 若将来要接:需要在**干净检出**上先实测它稳定为绿(副本仓已验证可行),再接。
+      # ── tag 流水线只编译 + 打包 + 发布（2026-10-10 拍板）────────────────────────
+      # 理由：tag 永远打在已经跑过全量 CI 的线上提交上（发布 PR → master push 已把
+      # `yarn check`、全部根守卫、Go 全量测试、webadmin 测试跑完并通过），tag 上再跑
+      # 一遍只是把发布时间再拉长 ~20 分钟，不增加任何判据面。
+      # 判据形态**登记**在 `scripts/check-workflows.mjs` 的 `PINNED_STEP_IF_POLICIES`
+      # （`docs-only-and-not-tag`）——被钉步骤的条件不是"随手加"，必须走登记。
+      # tag 上仍然保留的：release-policy / 发布说明 / 迁移锚点 / 拓扑 / 渠道 pin 五步
+      # （它们在 `needs.changes.outputs.code` 之外，与代码测试无关，是发布正确性判据）。
       - name: Full gate (packages + all root guards)
-        if: needs.changes.outputs.code != 'false'
+        if: needs.changes.outputs.code != 'false' && github.ref_type != 'tag'
         env:
           WASM_GATE_EXPECT_HEAD: ${{ github.sha }}
         run: |
@@ -863,7 +885,8 @@ jobs:
       # 不设置它就会留下一份"没绑任何权威 HEAD"的探针结论(与被审计的 W-8 形态相同);
       # 两处入口由 check-workflows.mjs 的 [SK-12]③ 一起钉住。
       - name: WASM protocol probes (group 6; Linux)
-        if: needs.changes.outputs.code != 'false'
+        # 同 Full gate：tag 上不重跑探针（同一 commit 已在 PR / master push 上跑过）。
+        if: needs.changes.outputs.code != 'false' && github.ref_type != 'tag'
         env:
           WASM_GATE_REQUIRE_COVERED_PLATFORM: '1'
           WASM_GATE_EXPECT_HEAD: ${{ github.sha }}
@@ -979,6 +1002,8 @@ jobs:
       # Go module 里的包,`go vet ./...` / `go test ./...` 覆盖它们,而本地 `make check`
       # 此前不覆盖(写坏 = 本地绿、CI 红);gofmt 面则是两边都没查。
       - name: gofmt check
+        # tag 上不重跑（见 Full gate 的说明）：tag 只编译+打包+发布。
+        if: github.ref_type != 'tag'
         run: |
           set -euo pipefail
           FILES="$(gofmt -l cmd internal demoapps webadmin scripts)"
@@ -1004,6 +1029,8 @@ jobs:
       # @generated:module-contract (scripts/gen-module-contract.mjs) — 手改会被 --check 判红
       - run: go vet -tags=skills,apps,connectors ./...
       # @end:module-contract
+        # tag 上不重跑（见 Full gate 的说明）：tag 只编译+打包+发布。
+        if: github.ref_type != 'tag'
       # 变体矩阵判据（2026-10-14 P1 第三片接入；判据本体见
       # `docs/decisions/2026-10-14-server-build-tags.md` §4）。
       #
@@ -1053,6 +1080,8 @@ jobs:
       # runner 上必然 `t.Skip("本机时区无夏令时")`)—— 把"零用例级 skip"套到全仓等于每次
       # 必红的假红,而假红的常见下场是整条判据被关掉。范围外事件不参与判定(脚本打印计数)。
       - name: Go tests (repo-wide) + WASM case-level report
+        # tag 上不重跑（见 Full gate 的说明）；PR / master push 上是唯一执行点。
+        if: github.ref_type != 'tag'
         run: |
           set -euo pipefail
           # 报告**不进 CI 日志**:上千个用例的 JSON 会把 job log 刷爆,而 GitHub 会截断
@@ -1083,6 +1112,8 @@ jobs:
           path: server/go-test.json
           if-no-files-found: ignore
       - run: npm test
+        # tag 上不重跑（见 Full gate 的说明）。
+        if: github.ref_type != 'tag'
         working-directory: server/webadmin
       # 2026-10-14 独立审计 P1:上面那步是**缺省（全开）变体**的 webadmin 单测,而
       # `nav.test.ts` / `routes.test.ts` 是按变体给期望的 —— 关闭变体的回归（实测:删掉

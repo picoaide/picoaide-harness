@@ -18,7 +18,7 @@
  *    两个实例并发会双红 —— 已在 FIX-48③ 里 run-id 化）。收尾清单**自己**不再制造并发。
  * 2. **命令从真源抽，不手抄**。`tar -czf` 的路径集合从 `ci.yml` 的 `Package workspace build
  *    products` 步骤逐字抽；docs-only 分类器从 `changes` job 的 `run:` 块逐字抽
- *    （GitHub 表达式换成 env 变量），再对合成历史真跑 12 格矩阵。手抄一份 = 下一次
+ *    （GitHub 表达式换成 env 变量），再对合成历史真跑 15 格矩阵。手抄一份 = 下一次
  *    CI 改了它就分叉，而分叉的本地判据比没有判据更坏。
  * 3. **不粉饰**：结构性只能 CI 的 ≈55%（Windows/macOS runner、Apple 签名+公证、R2/AWS/gh
  *    凭据、私有渠道仓、tag-only 事件、PR 上下文、job 间 `needs`、制品上传下载面）**不进**
@@ -122,7 +122,7 @@ function buildSteps() {
 
   steps.push({
     id: 'docs-only-classifier',
-    label: `CI docs-only 分类器（逐字抽出「${classifier.name}」+ 12 格矩阵）`,
+    label: `CI docs-only 分类器（逐字抽出「${classifier.name}」+ 15 格矩阵）`,
     tag: 'CI gate',
     local: () => `node ${JSON.stringify(join(ROOT, 'scripts', 'ci-parity-classifier.mjs'))}`,
   })

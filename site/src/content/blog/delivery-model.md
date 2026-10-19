@@ -44,7 +44,7 @@ docker run --rm -v /opt/picoaide:/out -e PICOAI_UNPACK_STACK=/out \
 <渠道>/releases/<版本>/SHA256SUMS                                   ← 下载后校验
 ```
 
-- 更新服务器**只保留最近 3 个版本**，GitHub Release 作为公开渠道的长期归档；
+- 更新服务器**只保留最近 2 个版本**（最新版 + 上一个版本），GitHub Release 作为公开渠道的长期归档；
 - 品牌渠道的镜像**只经更新服务器自己的目录**分发，不进公开 Release；
 - 内网完全隔离时，在能出网的机器上下载镜像包与校验文件，带进内网 `docker load` 即可（见[离线部署](/deployment/offline/)）。
 
