@@ -86,7 +86,7 @@ export default class MyService extends Service {
 - 函数插件只命名导出 `name` / `inject` / `Config` / `apply`，**没有 default export**；服务类包默认导出服务类；
 - `Config` 用 Schemastery schema 校验行的 `config`；**行上没有的键就是 schema 缺省值**，写 schema 时要显式决定每个键的默认行为；
 - 所有副作用（工具、路由、监听、定时器、槽位）都包在 `ctx.effect` 内并返回清理函数：插件卸载与 generation 重建都靠它回滚；
-- 每个自研包自带 `./invariant` 子路径（包内不变量自检）与显式 `exports`。
+- 显式声明 `exports`；0.2.1 起上游已删除 invariants 服务，**不要再新增 `./invariant` 伴生入口**（加了也不会被加载）。
 
 补丁语义有三条必须记住（实现在上游 `deepseek-harness/vendor/include/src/index.ts`）：
 
@@ -142,7 +142,7 @@ ctx.effect(() => ctx.slots.inject('sidebar.footer.action', () => ctx.slots.regis
 
 这一行是硬契约：
 
-- **平台模块表（`PLATFORM_MODULES`）**：`react`、`react/jsx-runtime`、`react-dom`、`react-dom/client`、`@deepseek-ai/cordis`、`@deepseek-ai/dsh-client-store`、`@deepseek-ai/dsh-client-ui-slots`、`@deepseek-ai/dsh-client-ui-primitives`、`@deepseek-ai/dsh-client-ui-dockkit`，共 9 项；本仓唯一真源是 `scripts/platform-modules.mjs`，逐项镜像自固定上游的 `deepseek-harness/packages/client/web/src/platform.ts`。
+- **平台模块表（`PLATFORM_MODULES`）**：`react`、`react/jsx-runtime`、`react-dom`、`react-dom/client`、`@deepseek-ai/cordis`、`zod`、`@tanstack/react-virtual`、`@deepseek-ai/dsh-client-store`、`@deepseek-ai/dsh-client-ui-slots`、`@deepseek-ai/dsh-client-ui-primitives`、`@deepseek-ai/dsh-client-ui-dockkit`，共 11 项；本仓唯一真源是 `scripts/platform-modules.mjs`，逐项镜像自固定上游的 `deepseek-harness/packages/client/web/src/platform.ts`。
 
 对齐规则：
 

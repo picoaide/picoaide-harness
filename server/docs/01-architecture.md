@@ -36,7 +36,7 @@
 
 ## 4. 计量计费与配额(0021-0024)
 
-- **费用**:`usage.cost` = 输入×input_price/1e6 + 输出×output_price/1e6;高峰窗口(settings `usage.peak_windows`,北京时间)外 × 模型 `offpeak_discount`。改价/改窗口只影响之后产生的费用(记录时定价)。
+- **费用**:`usage.cost` = 未命中输入×input_price/1e6 + 命中输入×cache_price/1e6 + 输出×output_price/1e6;高峰窗口(settings `usage.peak_windows`,北京时间)外 × 模型 `offpeak_discount`。**web_search 按次费用另加**:`usage.search_requests × settings usage.search_price_per_1k / 1000`,**不参与峰谷折扣**(0085)。改价/改窗口只影响之后产生的费用(记录时定价)。
 - **额度闸门(唯一一条,2026-09-11 收敛)**:`settings balance.enabled=true` 且该员工**已开通余额账户**
   且分位口径余额 ≤ 0 ⇒ 网关 429 `BALANCE_EXHAUSTED`(admin 豁免;余额查询失败 fail-closed)。
   2026-09-25 起准入侧追加三层更严的判据(全部在**转发之前**,见 `internal/llmgateway/balance_gate.go`):学到的下限(结算失败 ⇒ 余额增长前拒绝)、未定价模型(输入价 NULL/≤0 ⇒ 429 `MODEL_NOT_PRICED`,缺省策略 `reject`)、最小计费额(prompt 估算 token × 输入价 > 余额 ⇒ 拒绝)。

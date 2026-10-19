@@ -189,6 +189,14 @@ func TestMigration0076AddsUsageAppDimension(t *testing.T) {
 		t.Fatal("usage.app_id 必须 NOT NULL（空串 = 无归因）")
 	}
 
+	// 0085 起写路径会写 usage.search_requests（当前 head 的列）。本用例库停在
+	// 0076，先把剩余迁移补齐到 head，再用**当前**写路径验证归因 —— 不改变上面
+	// 对 0076 本身的断言，也不让"用当前代码写旧 schema"变成假红。
+	testMigrationHook = nil
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatalf("补齐到 head: %v", err)
+	}
+
 	// 归因标签的收窄校验：非法值一律记空串（best-effort，绝不影响计费）。
 	cases := map[string]string{
 		"notes":     "notes",

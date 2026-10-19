@@ -105,7 +105,7 @@ describe('客户端半边：apply 注册面', () => {
     expect(f.provided.map(item => item.key)).toEqual(['picoFootMenu'])
     const service = f.provided[0]?.value as { add: (entry: unknown) => () => void, snapshot: () => unknown[] }
     expect(typeof service.add).toBe('function')
-    expect(service.snapshot()).toEqual([])
+    expect(service.snapshot().map(entry => (entry as { id: string }).id)).toEqual(['schedules'])
     // 行组件渲染时读的是同一个实例（`installFootMenu` 把两件事绑在一起）。
     expect(currentFootMenuService()).toBe(service)
   })
@@ -116,8 +116,8 @@ describe('客户端半边：apply 注册面', () => {
     const service = currentFootMenuService()
     expect(service).toBeDefined()
     service!.add({ id: 'cron', order: -10, title: () => '定时任务', activate: () => undefined })
-    expect(service!.snapshot().map(entry => entry.id)).toEqual(['cron'])
-    expect((f.provided[0]?.value as { snapshot: () => unknown[] }).snapshot()).toHaveLength(1)
+    expect(service!.snapshot().map(entry => entry.id)).toEqual(['schedules', 'cron'])
+    expect((f.provided[0]?.value as { snapshot: () => unknown[] }).snapshot()).toHaveLength(2)
   })
 
   it('注册唯一一个底部座位占用者：id/order 固定，组件是「更多」行', () => {

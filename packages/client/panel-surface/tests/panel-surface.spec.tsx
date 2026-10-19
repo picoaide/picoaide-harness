@@ -173,6 +173,24 @@ describe('中列整页装载器', () => {
     expect(document.querySelector('[data-testid="body-capability"]')).toBeNull()
   })
 
+  it('detail:null 激活事件关闭当前面板并清空激活态（foot-menu 切官方页用）', async () => {
+    const seen: boolean[] = []
+    const handle = mountPanelSurface({
+      id: 'capability',
+      render: () => <div data-testid="body-capability" />,
+      onVisibilityChange: value => { seen.push(value) },
+    })
+    handles.push(handle)
+    await act(async () => { handle.activate() })
+    expect(activePanelId(document)).toBe('capability')
+    await act(async () => {
+      document.dispatchEvent(new CustomEvent('dsh-panel-activate', { detail: null }))
+    })
+    expect(activePanelId(document)).toBeNull()
+    expect(seen).toEqual([true, false])
+    expect(document.querySelector('[data-testid="body-capability"]')).toBeNull()
+  })
+
   /**
    * 切换面板 = 旧面板的"关闭"，可见性回调必须走同一条出口（2026-09-21 真机审计）。
    *

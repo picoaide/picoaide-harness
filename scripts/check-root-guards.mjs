@@ -228,7 +228,7 @@ const REGISTERED_GUARD_ENTRIES = new Map([
   // （同一份 `sha256sum` 口径）。
   // 2026-10-14（渠道缺省 + 渠道清单工具）：install-integrity 再补登
   // `scripts/channel-modules.mjs` ⇒ 本摘要同步。
-  ['check:guard-parser-integrity', { script: 'node scripts/check-guard-parser-integrity.mjs', argvTail: [], digest: 'fcb67b5daad5e3d8d667ade68673b2212cb34292541b3fb538f5c7d847be718f' }],
+  ['check:guard-parser-integrity', { script: 'node scripts/check-guard-parser-integrity.mjs', argvTail: [], digest: 'ec7936ec286f779f9acd396db1548daa9fd69b6b6d4c27ef3af0941f4790b6dd' }],
 ])
 
 /**

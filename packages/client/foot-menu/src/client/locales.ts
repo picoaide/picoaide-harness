@@ -18,6 +18,7 @@ export const zh = {
   'footMenu.labelAttention': '更多功能（有等待处理的事项）',
   'footMenu.attention': 'AI 正在等待你的操作',
   'footMenu.more': '更多',
+  'footMenu.schedule': '自动化任务',
 }
 
 export const en: Record<keyof typeof zh, string> = {
@@ -25,6 +26,7 @@ export const en: Record<keyof typeof zh, string> = {
   'footMenu.labelAttention': 'More (something is waiting)',
   'footMenu.attention': 'The AI is waiting for you',
   'footMenu.more': 'More',
+  'footMenu.schedule': 'Automation tasks',
 }
 
 /** Keys of the foot-menu dictionary. */

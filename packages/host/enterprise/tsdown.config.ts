@@ -16,7 +16,6 @@ export default defineConfig([
     name: PACKAGE_NAME,
     entry: {
       index: 'src/index.ts',
-      invariant: 'src/invariant.ts',
       'auth-gate': 'src/auth-gate.ts',
       'channel-sync': 'src/channel-sync.ts',
       'gateway-model': 'src/gateway-model.ts',

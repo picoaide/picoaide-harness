@@ -82,7 +82,7 @@ declare module '@deepseek-ai/cordis' {
 
 /** Services required before the shell can register its renderer generation. */
 /** Services required by the desktop shell; `desktopRuntime` is probed, not required. */
-export const inject = ['webServer', 'webRuntime', 'appExit', 'settings', 'connection']
+export const inject = ['webServer', 'appExit', 'settings', 'connection']
 
 /**
  * Retired settings namespace.
@@ -262,6 +262,11 @@ export function apply(ctx: Context, config: Config): void {
   if (ctx.webServer.host !== '127.0.0.1') {
     throw new Error('dsh-plugin-desktop: desktop shell requires a loopback Web server')
   }
+  // Headless profile boots may compose the shell before the Web carrier is
+  // listening (`port` became optional upstream in 0.2.1). The real desktop
+  // profile always has a bound port; the `0` fallback only keeps the shell
+  // registration/scheduling path total in those boots.
+  const webServerPort = ctx.webServer.port ?? 0
   const iconFilename = runtime.platform === 'darwin'
     ? 'app-icon-mac.png'
     : 'app-icon.png'
@@ -274,7 +279,7 @@ export function apply(ctx: Context, config: Config): void {
   // volatile `port`/`logLevel` fields above are the form, and persistence goes
   // through the profile patch. Nothing is registered here any more; reads below
   // go through `readSettingsNamespace`.
-  const rendererOrigin = `http://127.0.0.1:${String(ctx.webServer.port)}`
+  const rendererOrigin = `http://127.0.0.1:${String(webServerPort)}`
   let desktopUpdateState: DesktopUpdateStateResponse = {
     ...emptyDesktopUpdateState(),
     // Headless loader smokes provide a stub desktopRuntime without an update
@@ -545,7 +550,7 @@ export function apply(ctx: Context, config: Config): void {
       // renderer gets index bytes instead of a 401. The connection service is
       // optional here (minimal boot smokes omit the Web carrier); the full
       // desktop profile always composes it.
-      url: desktopRendererUrlWithToken(ctx, ctx.webServer.port, runtime.platform),
+      url: desktopRendererUrlWithToken(ctx, webServerPort, runtime.platform),
       productName: config.productName,
       windowTitle: config.windowTitle,
       iconPath,

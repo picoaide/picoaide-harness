@@ -3,7 +3,7 @@
 ## 1. 服务端(PostgreSQL,PG-only 2026-08)
 
 > 2026-08 起 SQLite 已全面下线:服务端数据库为 PostgreSQL(内置容器或外部实例)。
-> 迁移在 `internal/serverstore/migrations-pg/`(0001–0084;0007 已废弃;0028 下线
+> 迁移在 `internal/serverstore/migrations-pg/`(0001–0085;0007 已废弃;0028 下线
 > 知识库/MCP 表并独立审计表 audit_logs;0039 usage 按月原生分区 + 日/月账本;
 > 0040/0041 归档直存 DB;0042 connectors;0043/0044 provider protocol;
 > 0045 glitchtip 下架;0046 rbac 角色;0047 brand 快照;0048 审计哈希链;
@@ -318,7 +318,7 @@ SELECT s.name AS app_id, 'skill' AS kind, count(*) AS org_rows
 - 0024 新增 `budget_money REAL`(部门月度金额预算,元):约束该部门树(含全部子部门)成员当月费用合计;员工生效预算 = 归属部门 + 祖先链(链上全部预算都约束,父部门 = 子树封顶);任一超限网关 429。费用聚合 `DeptMonthlyCost`/`DeptMonthlyCostBatch`(部门树 SUM(cost))。
 
 ### settings(0001)
-`settings(key PK, value)`。键: `auth.mode` / `ldap.*` / `oidc.*` / `openid.*` / `auth.enabled` / `gateway.default_model` / `gateway.rate_limit` / `gateway.max_file_refs`(单请求 file_id 引用上限,缺省 600=官方单请求最多 600 张图) / `gateway.body_parse_budget_mb`(在飞请求体字节预算 MiB,缺省 128) / `gateway.file_expiry_days`(网关强制执行的文件保留上限天数,缺省 7,范围 1~30) / `usage.monthly_quota`(员工默认月 token 配额,0=不限)/ `usage.monthly_quota_money`(员工默认月金额配额,元,0=不限)/ `usage.peak_windows`(高峰时段 JSON,北京时间,空=无峰谷价)/ `usage.retention_months`(明细保留月数,默认 6)/ `web.default_thinking_level` / `web.error_reporting_*` / `web.glitchtip_*` / `server.base_url` / `audit.retention_days`(默认 180)等(见 04-auth.md、03-api-reference.md)。
+`settings(key PK, value)`。键: `auth.mode` / `ldap.*` / `oidc.*` / `openid.*` / `auth.enabled` / `gateway.default_model` / `gateway.rate_limit` / `gateway.max_file_refs`(单请求 file_id 引用上限,缺省 600=官方单请求最多 600 张图) / `gateway.body_parse_budget_mb`(在飞请求体字节预算 MiB,缺省 128) / `gateway.file_expiry_days`(网关强制执行的文件保留上限天数,缺省 7,范围 1~30) / `usage.monthly_quota`(员工默认月 token 配额,0=不限)/ `usage.monthly_quota_money`(员工默认月金额配额,元,0=不限)/ `usage.peak_windows`(高峰时段 JSON,北京时间,空=无峰谷价)/ `usage.search_price_per_1k`(web_search 按次单价,元/千次成功搜索;空/0=不计费,0085)/ `usage.retention_months`(明细保留月数,默认 6)/ `web.default_thinking_level` / `web.error_reporting_*` / `web.glitchtip_*` / `server.base_url` / `audit.retention_days`(默认 180)等(见 04-auth.md、03-api-reference.md)。
 
 ### api_tokens(0002)
 `id, user_id→users, token_hash(唯一), name(默认 'desktop'), created_at, expires_at(NOT NULL), last_used_at, revoked(0/1)`;索引 `idx_tokens_user`。明文 token 不落库,只存哈希;90 天过期。
@@ -330,13 +330,14 @@ SELECT s.name AS app_id, 'skill' AS kind, count(*) AS org_rows
 - 0023 新增 `offpeak_discount REAL`(低谷折扣率):0<d<1 = 高峰窗口外费用 × d;nil/1 = 无峰谷价。
 - 0029 新增 `cache_input_price_per_1m`(缓存命中输入价):nil = 回退 input 价。
 - 0030 usage 新增 `cache_prompt_tokens`(缓存命中输入 token 计数,按 0029 价计费)。
+- 0085 usage 新增 `search_requests BIGINT DEFAULT 0`(成功返回网页结果的 web_search 次数):费用 = token 费用 + 次数 × settings `usage.search_price_per_1k` / 1000;**按次费用不参与峰谷折扣**(官方 Search 是独立价目)。
 
 ### usage(0004, 0039 起按月原生分区)
 
 `usage` 主表 `PARTITION BY RANGE (created_at)`(PK 含 created_at),按月份分区
 `usage_YYYYMM`(ensureUsagePartition 幂等创建);主表索引 PG16 自动传播。
 列: `id, user_id, model, prompt_tokens(BIGINT), completion_tokens(BIGINT),
-cache_prompt_tokens(BIGINT), kind, cost(DOUBLE), created_at`;索引
+cache_prompt_tokens(BIGINT), search_requests(BIGINT), kind, cost(DOUBLE), created_at`;索引
 `idx_usage_user_time / idx_usage_time / idx_usage_model_time / idx_usage_kind /
 idx_usage_user_cost`。写路径 `RecordUsage*` 先 ensure 当月分区。
 

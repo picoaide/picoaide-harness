@@ -7,16 +7,17 @@
 宽栏常驻            点「更多」→ 向上浮层（portal 到 body）
 ┌──────────────────┐   ┌────────────────────────┐
 │ ⋯ 更多 · 能力中心 │   │ ✓ ✦ 能力中心            │
-│ ⚙ 设置            │   │   ⏱ 定时任务            │
+│ ⚙ 设置            │   │   ⏱ 自动化任务          │
 │ U user · ¥89.65  │   │   ⧉ 连接器              │
 └──────────────────┘   └────────────────────────┘
 ```
 
 ## 它替代了什么
 
-五个面板类插件（`dsh-cron` / `dsh-enterprise` 能力中心 / `dsh-connectors` / `dsh-browser` /
-`dsh-wasm-apps` 应用中心）改造前各自往 `sidebar.footer.action` 注册**一整行**，底部固定占掉
-约 210px。现在它们各自只登记**一个条目**，底部只剩这一行。
+四个自有面板插件（`dsh-enterprise` 能力中心 / `dsh-connectors` / `dsh-browser` / `dsh-wasm-apps`
+应用中心）改造前各自往 `sidebar.footer.action` 注册**一整行**，底部固定占掉约 210px。现在
+它们各自只登记**一个条目**，底部只剩这一行；官方 Schedule 的「自动化任务」由本插件内置登记，
+并隐藏官方 `sidebar.panellist` 的重复行。
 
 ## 契约
 
@@ -83,6 +84,6 @@ ReactNode 不过界：条目只带数据，图标由本包的 glyph 表按 `id` 
 | `src/index.ts` | 宿主半边：no-op（本包无路由/数据面，只是客户端 bundle 载体） |
 | `src/client/contract.ts` | 服务契约 + `declare module '@deepseek-ai/cordis'` + 登记表实现 |
 | `src/client/FootMenuRow.tsx` | 「更多」行 + 向上浮层 |
-| `src/client/glyphs.tsx` | 五个面板图标（自被替换的 trigger 逐字搬来）+ 「更多」/✓/chevron/兜底 |
+| `src/client/glyphs.tsx` | 面板图标（自被替换的 trigger 逐字搬来）+ 「更多」/✓/chevron/兜底；官方 schedule 无图标时用兜底 |
 | `src/client/locales.ts` | zh（key 源）+ en 镜像 |
 | `src/client/index.ts` | 字典 + 提供 `picoFootMenu` + 注册唯一槽位占用者 |

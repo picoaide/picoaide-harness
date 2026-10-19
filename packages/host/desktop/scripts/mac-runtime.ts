@@ -10,7 +10,7 @@ export interface MacNativeEntry {
   readonly arch: MacArch
   readonly path: string
   /** Optional filename pattern. `@img/sharp-*` embeds the dependency version in
-   * the file name (`sharp-darwin-arm64-0.35.3.node`, `libvips-cpp.8.18.3.dylib`),
+   * the file name (`sharp-darwin-arm64-0.35.5.node`, `libvips-cpp.8.18.3.dylib`),
    * so a patch upgrade changes it; the resolver picks the installed file
    * instead of hardcoding the version (audit P2-24). */
   readonly match?: RegExp
@@ -20,7 +20,7 @@ export interface MacNativeEntry {
 export const MACOS_ARM64_NATIVE_ENTRIES: readonly MacNativeEntry[] = [
   {
     arch: 'arm64',
-    path: 'node_modules/@img/sharp-darwin-arm64/lib/sharp-darwin-arm64-0.35.3.node',
+    path: 'node_modules/@img/sharp-darwin-arm64/lib/sharp-darwin-arm64-0.35.5.node',
     match: /^sharp-darwin-arm64-.*\.node$/u,
   },
   {

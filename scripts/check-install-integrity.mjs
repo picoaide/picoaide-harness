@@ -325,8 +325,6 @@ export const EXECUTION_FACE_REGISTRY = [
   'packages/host/desktop/scripts/proxy-policy-probe-app.mjs',
   'packages/host/desktop/scripts/proxy-policy-probe.mjs',
   'packages/host/desktop/scripts/real-env-browser-no-approval.mjs',
-  'packages/host/desktop/scripts/real-env-cron-audit.mjs',
-  'packages/host/desktop/scripts/real-env-cron-flow.mjs',
   'packages/host/desktop/scripts/real-env-verify.mjs',
   'packages/host/desktop/scripts/release-mac.ts',
   'packages/host/desktop/scripts/release-preflight.ts',

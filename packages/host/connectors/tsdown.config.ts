@@ -9,7 +9,6 @@ export default defineConfig([
     entry: {
       index: 'src/index.ts',
       store: 'src/store.ts',
-      invariant: 'src/invariant.ts',
       'user-scope': 'src/user-scope.ts',
     },
     outDir: 'lib',

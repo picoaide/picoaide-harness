@@ -233,7 +233,7 @@ docker compose up -d
 docker compose ps        # 期望 picoaide-caddy / picoaide-server / picoaide-postgres 均 Up
 ```
 
-首次启动会跑全部数据库迁移（当前区间 `0001–0084`）并建用量分区，**可能需要 1–2 分钟**；
+首次启动会跑全部数据库迁移（当前区间 `0001–0085`）并建用量分区，**可能需要 1–2 分钟**；
 `up -d` 返回不等于服务就绪 —— 必须做健康检查：
 
 ```bash

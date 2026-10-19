@@ -85,14 +85,13 @@ describe('desktop required startup rows', () => {
       { options: { id: 'desktop-diagnostics' }, disabled: true, fiber: { state: FIBER_ACTIVE } },
       { options: { id: 'desktop-updates' } },
       { options: { id: 'desktop-loop-notify' }, fiber: { state: 3 } },
-    ], ['desktop-shell', 'desktop-diagnostics', 'desktop-updates', 'desktop-loop-notify', 'pico-cron'])
+    ], ['desktop-shell', 'desktop-diagnostics', 'desktop-updates', 'desktop-loop-notify'])
     expect(problems.map(p => p.id)).toEqual([
-      'desktop-diagnostics', 'desktop-updates', 'desktop-loop-notify', 'pico-cron',
+      'desktop-diagnostics', 'desktop-updates', 'desktop-loop-notify',
     ])
     expect(problems[0]?.reason).toContain('disabled')
     expect(problems[1]?.reason).toContain('no fiber')
     expect(problems[2]?.reason).toContain('fiber state 3')
-    expect(problems[3]?.reason).toContain('absent')
   })
 
   it('throws with the offending rows and stays quiet when all are active', () => {

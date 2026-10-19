@@ -285,29 +285,26 @@ try {
   await screenshot('r07-account')
   await clickLabel('关闭', 1000).catch(() => {})
 
-  // 7. Cron panel (real data)。2026-09-12（P1-1）：只断言"元素存在"是假绿 ——
-  // 容器未激活时也在 DOM 里（样式表 display:none）。改为断言**可见且占满中列、
-  // 会话区已让位**（打包版真机复现过"面板与会话 407/407 分屏"的回归）。
-  // 入口同样在「更多」浮层里（2026-09-21 并道），点击后先验激活态属性。
-  const cronOpen = await openPanelFromFootMenu('定时任务', 'cron', 3000)
-  reportStep('从「更多」浮层打开定时任务中心（真实）', cronOpen === 'CLICKED', `open=${cronOpen}`)
-  const cronOk = await waitFor(`(() => {
-    // 2026-09-20：容器标记统一成共享协议的 data-dsh-panel-surface，激活态由
-    // html[data-dsh-panel-active] 唯一表达（四个整页面板共用一套语义）。
-    if (document.documentElement.getAttribute('data-dsh-panel-active') !== 'cron') return false
-    const view = document.querySelector('[data-dsh-panel-surface="cron"]')
-    const surface = document.querySelector('.dshDesktopConversationSurface')
-    if (view === null || surface === null) return false
-    const v = view.getBoundingClientRect(); const s = surface.getBoundingClientRect()
-    if (v.height <= 0 || getComputedStyle(view).display === 'none') return false
-    if (v.height < s.height * 0.9) return false
-    return [...surface.children]
-      .filter(el => !el.hasAttribute('data-dsh-panel-surface'))
-      .every(el => getComputedStyle(el).display === 'none' || el.getBoundingClientRect().height === 0)
+  // 7. Official Schedule (real data)。入口在「更多」浮层第一项，点击后由官方
+  // `schedules` 面板接管 main；不再有 data-dsh-panel-active（那是自研面板协议）。
+  const scheduleOpened = await openFootMenu()
+  const scheduleClicked = await ev(`(() => {
+    const items = [...document.querySelectorAll('.pico-foot-menu-item')].filter(b => b.offsetParent)
+    const hit = items.find(b => (b.textContent ?? '').trim() === '自动化任务')
+    if (hit === undefined) return 'NOT_FOUND'
+    hit.click()
+    return 'CLICKED'
+  })()`)
+  reportStep('从「更多」浮层打开自动化任务（真实）', scheduleOpened === 'OPENED' && scheduleClicked === 'CLICKED',
+    `open=${scheduleOpened} click=${scheduleClicked}`)
+  const scheduleOk = await waitFor(`(() => {
+    const heading = [...document.querySelectorAll('h1')].find(el => (el.textContent || '').includes('自动化任务') && el.offsetParent)
+    const text = document.body.innerText || ''
+    return heading !== undefined && (text.includes('还没有自动化任务') || document.querySelector('ul[aria-label="任务列表"]') !== null)
   })()`, 15000)
-  reportStep('定时任务中心面板占满中列（真实数据，会话区已让位）', cronOk === true && cronOpen === 'CLICKED',
-    `open=${cronOpen}`)
-  await screenshot('r08-cron')
+  reportStep('自动化任务面板打开且目录就绪（真实数据）', scheduleOk === true, `schedule=${String(scheduleOk)}`)
+  await screenshot('r08-schedule')
+  await clickLabel('新会话', 1500).catch(() => {})
   await ev(`(() => { const b=[...document.querySelectorAll('button')].find(x=>(x.textContent||'').includes('返回聊天') && x.offsetParent); if (b) b.click(); return !!b })()`).catch(() => {})
   await wait(1200)
 

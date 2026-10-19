@@ -35,9 +35,9 @@ PicoAide Harness 把 DeepSeek Harness 的本地智能体、Host 服务、插件�
 | --- | --- | --- |
 | <img src="assets/screenshots/desktop-main.png" alt="桌面主界面" width="100%"> | <img src="assets/screenshots/desktop-capability-market.png" alt="能力中心" width="100%"> | <img src="assets/screenshots/desktop-connectors.png" alt="连接器中心" width="100%"> |
 
-| 定时任务 | 设置 |
+| 自动化任务 | 设置 |
 | --- | --- |
-| <img src="assets/screenshots/desktop-cron.png" alt="定时任务" width="100%"> | <img src="assets/screenshots/desktop-settings.png" alt="设置" width="100%"> |
+| <img src="assets/screenshots/desktop-schedule.png" alt="自动化任务（官方 Schedule）" width="100%"> | <img src="assets/screenshots/desktop-settings.png" alt="设置" width="100%"> |
 
 ### 管理后台
 
@@ -89,14 +89,14 @@ ls -1 ./picoaide-stack/client                       # 三平台安装包 + CLIEN
 ### 企业级一体化
 
 - **桌面 + 服务 + 后台**：客户端负责交互，本地服务负责智能体运行，管理后台负责账号、配额与审计，三层协同；
-- **多用户隔离**：连接器凭据、浏览器会话、定时任务按账号隔离，退出登录即解除所有会话；
+- **多用户隔离**：连接器凭据、浏览器会话、自动化任务按账号隔离，退出登录即解除所有会话；
 - **用量与配额**：按用户按模型计费、限额与豁免，高峰时段自动分级计价。
 
 ### 开箱即用的生产力工具
 
 - **能力中心**：我的 / 市场两分区，技能与智能体类型筛选，来源（市场/组织/本地）与质量（官方/精选）徽章，多版本归并与历史，一键安装/更新/卸载；
 - **连接器中心**：内置销售易（NeoCRM）等 MCP 连接器，OAuth 授权 + PKCE，凭据本地加密存储，动态注册 MCP；
-- **定时任务**：cron 定时执行，指定智能体与提示词、工作区与权限，执行详情（会话/结果/错误）随时可查，支持会话跳转，由 Host 统一调度；
+- **自动化任务**：上游 Schedule 的定时提醒（单次 / 间隔 / 每日 / 每周 / cron），到点把提示词发回原会话；按账号隔离，执行记录由 Host 保留；
 - **内嵌浏览器**：Agent 可接管浏览器执行操作，多标签、地址栏、权限审批与下载管控；
 - **语音输入**：输入框麦克风把说话转成草稿文字，识别在本机跑（音频不出机器、离线可用），识别模型**随客户端分发**（装上即用、零下载；权重本身约 230MiB，安装包增幅视平台打包格式的压缩率而定，约 +140～250 MiB）；只有渠道包显式写 `desktop.speech_bundle_model: false` 时才回到首次使用下载；
 - **五轨记忆**：用户档案、全局事实、项目关键记忆、项目日志与每日日志，按目录与 git 分支隔离，确认制写入。
@@ -111,7 +111,7 @@ ls -1 ./picoaide-stack/client                       # 三平台安装包 + CLIEN
 
 ### 插件优先的架构
 
-- 一切皆插件：核心智能体、Web UI、桌面外壳、连接器、定时任务、浏览器、记忆全部通过官方 Cordis 插件机制组合；
+- 一切皆插件：核心智能体、Web UI、桌面外壳、连接器、自动化任务、浏览器、记忆全部通过官方 Cordis 插件机制组合；
 - 桌面壳自身就是合法的 DSH 插件，第三方插件与桌面能力走同一条组合路径；
 - 上游固定 pin，后续同步只跟随版本号，不破坏本地扩展。
 
@@ -170,7 +170,7 @@ PicoAide Harness 没有魔改上游源码，也不是一个固定写死的外壳
 感谢以下社区插件为产品体验做出的贡献：
 
 - dsh-memory-evolve（分层记忆与自我进化）：为 DSH 带来全局、用户、项目、分支与每日分层记忆，以及技能与待办管理
-- DeepSeek Harness 插件生态中的连接器、任务、定时任务与浏览器等能力提供者
+- DeepSeek Harness 插件生态中的连接器、任务、自动化任务与浏览器等能力提供者
 
 以及每一个使用、支持和参与共建的你。
 

@@ -7,7 +7,7 @@ PicoAide Harness's plugin ecosystem is not a marketplace — it is **a set of co
 
 ## How the upstream ecosystem relates to this product
 
-Upstream is DeepSeek Harness (`deepseek-ai/deepseek-harness`), and this product runs it **unchanged at a fixed version**: the current pin is `dsh-v0.2.0-rc.2`, with `upstream.json` at the repository root as the source of truth. The split is clear:
+Upstream is DeepSeek Harness (`deepseek-ai/deepseek-harness`), and this product runs it **unchanged at a fixed version**: the current pin is `dsh-v0.2.1-rc.2`, with `upstream.json` at the repository root as the source of truth. The split is clear:
 
 | | Upstream | This product |
 |---|---|---|
@@ -40,7 +40,7 @@ Every plugin the desktop client assembles is listed below. The **Face** column s
 | `dsh-plugin-desktop` | The desktop shell: window and navigation policy, tray, update checks and install handoff, diagnostics export, completion/question/approval notifications, the asar filesystem and its read guidance, and the advanced presentation's layout and theme projection | both | `desktop-shell`, `desktop-diagnostics`, `desktop-updates`, `desktop-loop-notify`, `desktop-asar-fs` |
 | `@picoaide/dsh-enterprise` | The enterprise login gate (pre-auth page, server URL, login methods), sessions and tokens, gateway model catalogue wiring, bootstrapping, error reporting, skill telemetry, channel content sync, and the capability hub entry | both | `picoaide-auth-gate`, `picoaide-session`, `picoaide-gateway-llm`, `picoaide-bootstrap`, `picoaide-channel-sync` |
 | `@picoaide/dsh-connectors` | The connector framework (MCP registration, authentication, credential storage and renewal), the connector centre panel, and one slash command per connected connector | both | `pico-connectors` |
-| `@picoaide/dsh-cron` | Scheduled jobs: the job ledger, five model tools (`cron_create` / `cron_list` / `cron_set_enabled` / `cron_run` / `cron_remove`), execution history, and the panel | both | `pico-cron` |
+| `@deepseek-ai/dsh-schedule` (upstream, enabled in 0.2.1) | Automation tasks: task catalog, delivery, and four model tools (`schedule_create` / `schedule_list` / `schedule_update` / `schedule_delete`); enabled by the desktop profile and account-scoped | host + client | `schedule` / `ui-schedule` |
 | `@picoaide/dsh-browser` | The built-in browser: a separate window (`WebContentsView` + CDP), the control-handover model, the op log, the `browser_*` tool group, and the sidebar entry with its status hints | both | `pico-browser` |
 | `@picoaide/dsh-wasm-apps-host` | The host side of app windows: the custom protocol handler, request forwarding to the platform, and window lifecycle and partitioning | host | `pico-wasm-apps-host` |
 | `@picoaide/dsh-wasm-apps` | The app centre panel: the catalogue, opening an app, and the publish entry | client | `picoaide-wasm-apps` |

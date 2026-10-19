@@ -111,7 +111,7 @@ describe('gateway-model', () => {
     await vi.waitFor(() => expect(f.ctx.logger.error).toHaveBeenCalled(), { timeout: 10_000 })
   })
 
-  // 2026-09-28（DSH 0.1.7-rc.2 引入、**0.2.0-rc.2 复核仍成立**）：0.1.6 那条
+  // 2026-09-28（DSH 0.1.7-rc.2 引入、**0.2.1-rc.2 复核仍成立**）：0.1.6 那条
   // 「组装期钉死 protocol: chat-completions」的
   // 修法整体作废 —— 上游把这个键**删掉了**，配了直接抛错；鉴权搬到 provider 注册面
   // （`gateway-llm.ts` 的 `resolveAuth` 发 `Authorization: Bearer`）。

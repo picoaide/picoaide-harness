@@ -64,25 +64,25 @@ export const DESKTOP_PROFILE_ROOT = 'cordis.yml'
 
 const BIN_NAME = DESKTOP_PACKAGE_NAME
 // 桌面自己的包同时是 profile 的**最后一个 bundle 层**（`dsh.bundle.patch` 列出
-// `./cordis.patch.yml` 与十个自有包的组装补丁）。它必须排在 `@deepseek-ai/dsh-web-app`
-// 之后，因为那十一层是"晚于上游 bundle、早于 profile 自有层与 home 层"的层。
+// `./cordis.patch.yml` 与九个自有包的组装补丁）。它必须排在 `@deepseek-ai/dsh-web-app`
+// 之后，因为那十层是"晚于上游 bundle、早于 profile 自有层与 home 层"的层。
 //
 // 为什么必须是**真的 bundle 层**（2026-09-28 的 `verify:profile` P0）：
 // 上游 `readProfilePatches`（= `config-editor.edit()` 每次设置写入前的复算来源、
 // `plugin-manager` 读面、`ProfileContext` 自述）只读 `profile.layers` + `patchPath`
-// + home 补丁 + `context.overlays`。把这十一层塞进 `context.overlays` 也不行：`overlays`
+// + home 补丁 + `context.overlays`。把这十层塞进 `context.overlays` 也不行：`overlays`
 // 追加在**最后**，于是 `- insert:` 的行会晚于设置文档建立，`config-editor.edit()` 收尾的
 // 断言 `Configuration for "<id>" is overridden by a home patch or command-line overlay`
 // 会直接抛错（模型网关行 `picoaide-gateway-llm` 每次登录都要写 baseURL ⇒ 模型面全灭）。
 // 放进 `profile.layers` 是唯一同时满足"复算得到"与"早于设置文档"的位置。
 const REQUIRED_BUNDLES = [
   ...requiredWebBundles(),
-  // 十一个自有组装补丁层（本包的 `cordis.patch.yml` + 下列十个包各自的
+  // 十个自有组装补丁层（本包的 `cordis.patch.yml` + 下列九个包各自的
   // `cordis.patch.yml`）以 **bundle 层**身份进入组合，顺序 = 这里列出的顺序。
   // 本包自己的那一层由 `@picoaide/dsh-enterprise` 的 `dsh.bundle.patch` 首项
   // `../../../cordis.patch.yml` 携带 —— `resolveBundleDir` 用 `resolve.paths()` 找包，
   // **不含包自身目录**，所以 `dsh-plugin-desktop` 无法把自己解析成 bundle；企业包是
-  // 这一层里第一个、且它的层本来就依赖桌面层先落地（它 patch `desktop-shell` 行）。
+  // 这十层里第一个、且它的层本来就依赖桌面层先落地（它 patch `desktop-shell` 行）。
   '@picoaide/dsh-enterprise',
   // 能力中心（技能商店）的 **host + client 双面**（2026-10-13 从企业包整块搬出；
   // 同日 P0-b 把四条本机路由与技能遥测行也搬了进来）。它排在企业包之后、其余层之前：
@@ -99,7 +99,6 @@ const REQUIRED_BUNDLES = [
   '@picoaide/dsh-connectors',
   '@picoaide/dsh-browser',
   'dsh-memory-evolve',
-  '@picoaide/dsh-cron',
   // 语音输入（2026-09-29 产品决策：**默认开启**）。上游从 0.1.7 起把
   // `@deepseek-ai/dsh-experimental-voice-input-bundle` 作为 `@deepseek-ai/dsh`
   // 的依赖随包分发，但默认不装配；这里把它列进桌面 profile 的 bundle 层，
@@ -118,6 +117,17 @@ const REQUIRED_BUNDLES = [
   //      槽位（属 ui-plugin-manager），我们提供自己的等价面，
   //      经 `pluginNavigation.openBundle(...)` 打开。
   '@deepseek-ai/dsh-experimental-voice-input-bundle',
+  // 官方实验性 bundle（2026-10-18 产品决策：**默认全部启用**，随桌面构建分发）。
+  // 顺序有意义：agent-team-profile 会禁用上游的 subagent 工具行并换成 Agent Teams
+  // 工具；session-titles 会禁用旧的 session-title-llm 行；其余只插入行。
+  '@deepseek-ai/dsh-experimental-agent-team-profile',
+  '@deepseek-ai/dsh-experimental-auto-review',
+  '@deepseek-ai/dsh-experimental-cot-translation-bundle',
+  '@deepseek-ai/dsh-experimental-terminal-bundle',
+  '@deepseek-ai/dsh-experimental-session-search',
+  '@deepseek-ai/dsh-experimental-session-titles-bundle',
+  '@deepseek-ai/dsh-experimental-ralph-bundle',
+  '@deepseek-ai/dsh-experimental-badge-skill-bundle',
 ]
 /** 携带桌面自身组装补丁层的 bundle（见 `REQUIRED_BUNDLES` 的说明）。 */
 const DESKTOP_LAYER_CARRIER_BUNDLE = '@picoaide/dsh-enterprise'
@@ -174,9 +184,9 @@ export function closedDesktopFeatureModules(features?: FeatureSwitches): string[
 /** 上游退役的 bundle（识别出来后从第三方清单里剔掉，不做 "保留"）。 */
 const OBSOLETE_DESKTOP_BUNDLE_SET = new Set(['@deepseek-ai/dsh-desktop-app'])
 const INSTALL_ANCHOR = fileURLToPath(new URL('../package.json', import.meta.url))
-// 十一个自有组装补丁层（本包的 `cordis.patch.yml` + enterprise / capability-center /
+// 十个自有组装补丁层（本包的 `cordis.patch.yml` + enterprise / capability-center /
 // account-card / wasm-apps / foot-menu / wasm-apps-host / connectors / browser /
-// memory-evolve / cron）**不再在这里
+// memory-evolve）**不再在这里
 // 逐个解析路径**：它们是 `dsh-plugin-desktop` 这个 profile bundle 层自己的
 // `dsh.bundle.patch` 列表（见 `package.json` 的 `dsh.bundle`），由上游 `loadProfileDirectory`
 // 逐层读进来。理由见 `REQUIRED_BUNDLES` 上方的长注释。
@@ -184,7 +194,7 @@ const INSTALL_ANCHOR = fileURLToPath(new URL('../package.json', import.meta.url)
 // ⚠️ **禁用危害（2026-09-21 对抗审计，仍然有效）**：`picoaide-foot-menu` 那一行是
 // **五个面板入口的唯一承载行**。渠道覆盖层或 `$DSH_HOME/cordis.patch.yml` 把它
 // `disabled: true` 时不会有任何报错 —— 消费者等的服务永远不出现，于是底部功能区
-// **安静地**少掉定时任务 / 能力中心 / 连接器 / 浏览器 / 应用中心。因此它进了
+// **安静地**少掉自动化任务 / 能力中心 / 连接器 / 浏览器 / 应用中心。因此它进了
 // `REQUIRED_DESKTOP_ROWS`（boot 后断言 ACTIVE，缺席即抛错并走桌面的致命路径）。
 /** 宿主行 id：scheme / 产品名注入点（见 prepareDesktopProfile 末尾）。 */
 const WASM_APPS_HOST_ROW_ID = 'pico-wasm-apps-host'
@@ -1028,7 +1038,7 @@ export async function prepareDesktopProfile(
   let desktopLayerSeen = false
   for (const layer of activeDesktopProfileLayers(profile, disabledBundles)) {
     bundlePatches.push(...layer.patches)
-    // 十一层自有组装补丁来自 `dsh-plugin-desktop` 这个 **bundle 层自己的**
+    // 十层自有组装补丁来自 `dsh-plugin-desktop` 这个 **bundle 层自己的**
     // `dsh.bundle.patch` 列表（见 `package.json` 的 `dsh.bundle` 与 `REQUIRED_BUNDLES`），
     // 不再由本文件手工 push —— 手工 push 的层在 `readProfilePatches` 里复算不到，
     // 而每次设置写入都会用复算结果替换整棵树（`config-editor.edit()`）。
@@ -1045,7 +1055,7 @@ export async function prepareDesktopProfile(
     )
   }
   // 被跳过的**必须层**是静默的（`loadProfileDirectory` 只把它们列进 `skippedBundles`）——
-  // 十一个自有层里任何一个解析不到/`dsh.bundle` 缺失，都会让那一层从组合里消失，而
+  // 十个自有层里任何一个解析不到/`dsh.bundle` 缺失，都会让那一层从组合里消失，而
   // `readProfilePatches` 也就复算不出来（= 设置写入把那些行从运行树上摘掉，2026-09-28 的 P0）。
   // 所以必须层一律 fail-loud。
   //

@@ -1,0 +1,72 @@
+diff --git a/presets/standard.patch.yml b/presets/standard.patch.yml
+--- a/presets/standard.patch.yml
++++ b/presets/standard.patch.yml
+@@ -88,16 +88,20 @@
+             config:
+               - id: tool-subagent-control
+                 name: '@deepseek-ai/dsh-tool-subagent-control'
++                disabled: true
+               - id: tool-subagent-list-agents
+                 name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
++                disabled: true
+               - id: tool-subagent
+                 name: '@deepseek-ai/dsh-tool-subagent'
++                disabled: true
+                 config:
+                   provider: spawn
+                   toolName: subagent
+                   modelSelectionSettings: true
+               - id: tool-subagent-fork
+                 name: '@deepseek-ai/dsh-tool-subagent'
++                disabled: true
+                 config:
+                   provider: fork
+                   toolName: subagent_fork
+diff --git a/presets/ptc.patch.yml b/presets/ptc.patch.yml
+--- a/presets/ptc.patch.yml
++++ b/presets/ptc.patch.yml
+@@ -88,16 +88,20 @@
+             config:
+               - id: tool-subagent-control
+                 name: '@deepseek-ai/dsh-tool-subagent-control'
++                disabled: true
+               - id: tool-subagent-list-agents
+                 name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
++                disabled: true
+               - id: tool-subagent
+                 name: '@deepseek-ai/dsh-tool-subagent'
++                disabled: true
+                 config:
+                   provider: spawn
+                   toolName: subagent
+                   modelSelectionSettings: true
+               - id: tool-subagent-fork
+                 name: '@deepseek-ai/dsh-tool-subagent'
++                disabled: true
+                 config:
+                   provider: fork
+                   toolName: subagent_fork
+diff --git a/presets/cordis.patch.yml b/presets/cordis.patch.yml
+--- a/presets/cordis.patch.yml
++++ b/presets/cordis.patch.yml
+@@ -87,16 +87,20 @@
+             config:
+               - id: tool-subagent-control
+                 name: '@deepseek-ai/dsh-tool-subagent-control'
++                disabled: true
+               - id: tool-subagent-list-agents
+                 name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
++                disabled: true
+               - id: tool-subagent
+                 name: '@deepseek-ai/dsh-tool-subagent'
++                disabled: true
+                 config:
+                   provider: spawn
+                   toolName: subagent
+                   modelSelectionSettings: true
+               - id: tool-subagent-fork
+                 name: '@deepseek-ai/dsh-tool-subagent'
++                disabled: true
+                 config:
+                   provider: fork
+                   toolName: subagent_fork

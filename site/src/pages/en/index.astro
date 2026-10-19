@@ -11,7 +11,7 @@ import logoDark from '../../../../brands/official/logo-dark.svg'
 import mainShot from '../../assets/screenshots/desktop-main.png'
 import capabilityShot from '../../assets/screenshots/desktop-capability-market.png'
 import connectorsShot from '../../assets/screenshots/desktop-connectors.png'
-import cronShot from '../../assets/screenshots/desktop-cron.png'
+import scheduleShot from '../../assets/screenshots/desktop-schedule.png'
 import settingsShot from '../../assets/screenshots/desktop-settings.png'
 import adminUsersShot from '../../assets/screenshots/admin-users.png'
 import adminCapabilityShot from '../../assets/screenshots/admin-capabilities.png'
@@ -122,8 +122,8 @@ const capabilities = [
   },
   {
     icon: 'clock',
-    title: 'Scheduled jobs',
-    body: 'cron plus prompt, workspace and agent preset. Every run keeps its session, result and error so it can be reviewed afterwards.',
+    title: 'Automation tasks',
+    body: 'Upstream Schedule reminders (once / interval / daily / weekly / cron) delivered back to the original session; account-scoped with delivery history.',
   },
   {
     icon: 'browser',
@@ -666,8 +666,8 @@ curl -k https://<your-domain>/healthz`}</code></pre>
           <figcaption><strong>Connectors</strong>Standard MCP configuration with OAuth and token renewal</figcaption>
         </figure>
         <figure>
-          <Image src={cronShot} alt="Scheduled jobs" width={720} height={450} loading="lazy" format="webp" quality={78} />
-          <figcaption><strong>Scheduled jobs</strong>cron, prompt, workspace and permissions, with run details</figcaption>
+          <Image src={scheduleShot} alt="Automation tasks" width={720} height={450} loading="lazy" format="webp" quality={78} />
+          <figcaption><strong>Automation tasks</strong>Schedule reminders delivered to the original session, scoped by account</figcaption>
         </figure>
         <figure>
           <Image src={settingsShot} alt="Settings" width={720} height={450} loading="lazy" format="webp" quality={78} />

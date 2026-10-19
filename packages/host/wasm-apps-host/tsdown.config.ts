@@ -6,7 +6,6 @@ export default defineConfig({
   name: PACKAGE_NAME,
   entry: {
     index: 'src/index.ts',
-    invariant: 'src/invariant.ts',
     // The Electron seam is its own entry on purpose: `src/index.ts` must stay
     // loadable under plain Node (unit tests + the profile boot smoke), while
     // this module statically imports `electron` and may only be loaded by the

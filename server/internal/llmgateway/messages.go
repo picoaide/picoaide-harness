@@ -134,7 +134,10 @@ func (a *API) serveAnthropicJSON(c *gin.Context, resp *http.Response, userID, pr
 		var completionEstimated bool
 		ct, completionEstimated = estimateCompletionFallback(pt, ct, int64(len(body)))
 		estimated = estimated || completionEstimated
-		usageID, err := serverstore.RecordUsageKindCachedEstimatedForProvider(a.DB, userID, providerID, model, pt, ct, cache, billingKindSearch, estimated)
+		// 0085：Anthropic 服务端 web_search 按次计费。只统计成功带回网页结果的
+		// 搜索（错误块/空结果不计），金额 = token 费用 + 次数 × 单价。
+		searchRequests := countWebSearches(body)
+		usageID, err := serverstore.RecordUsageKindCachedEstimatedForProviderWithSearch(a.DB, userID, providerID, model, pt, ct, cache, searchRequests, billingKindSearch, estimated)
 		if err != nil {
 			// FIX-05 + G5b:与 /v1/chat/completions 同源 —— **任何**结算失败都
 			// 必须在交付响应体之前拒绝,不能 log 后继续 200(事务已回滚)。
@@ -214,6 +217,11 @@ func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID 
 	// 一变就被判成"0 正文字节" ⇒ 整条流免单。
 	var contentTracker streamContentTracker
 	var pt, ct, cache int64
+	// searches 统计本条流里成功的 web_search 次数（0085，按次计费）。
+	// settledSearch 记录最近一次成功回填进去的次数，用于收尾时判断
+	// "最后一条 usage 行之后是否又到了新的搜索结果"。
+	var searches searchMeter
+	var settledSearch int64
 	// ptSeen/ctSeen = 收到过**可用**的输入/输出侧计量(>0 才算;r7 r7f1-4)。
 	var ptSeen, ctSeen bool
 	for {
@@ -227,6 +235,9 @@ func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID 
 		if len(line) > 0 {
 			line = string(redactSecrets([]byte(line), secrets))
 			if s := strings.TrimSpace(line); strings.HasPrefix(s, "data:") {
+				// 0085：搜索结果块通常在 message_delta（最后一条 usage）之前到达；
+				// 每行都喂给计数器，保证回填时带上的次数是最新的。
+				searches.observe([]byte(s))
 				if lpt, lct, lcache, ok, perr := anthropicUsage([]byte(s)); perr != nil {
 					log.Printf("gateway: parse anthropic usage line: %v", perr)
 				} else if ok {
@@ -243,7 +254,8 @@ func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID 
 						ptSeen = true // 缓存命中属于输入侧计量
 					}
 					if usageID > 0 {
-						if uerr := updateUsageTokensSettled(a.DB, usageID, pt, ct, cache, false); uerr != nil {
+						searchNow := searches.count()
+						if uerr := updateUsageTokensSettledWithSearch(a.DB, usageID, pt, ct, cache, searchNow, false); uerr != nil {
 							// FIX-05 + G5b:流式回填结算失败 —— SSE 头已发,状态码
 							// 改不了;写一条 error 事件后**终止泵送**。
 							if !clientGone {
@@ -253,6 +265,7 @@ func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID 
 							}
 							return
 						}
+						settledSearch = searchNow
 					}
 				}
 			}
@@ -321,6 +334,7 @@ func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID 
 	// 也按请求体补估;只有 data: [DONE]/error 事件、正文一个字节都没交付时才
 	// 删行(r7 r7f1-2:闸门是正文内容,不是"转发过任意一行")。结算失败一律
 	// fail-closed(G5b)。
+	finalSearch := searches.count()
 	if usageID > 0 && (pt <= 0 || ct <= 0) {
 		settleIn := streamSettlement{
 			usageID:          usageID,
@@ -334,13 +348,25 @@ func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID 
 			cacheTokens:      cache,
 			promptSeen:       ptSeen,
 			completionSeen:   ctSeen,
+			searchRequests:   finalSearch,
 		}
 		settled, serr := settleStreamFallback(a.DB, settleIn)
-		log.Printf("gateway: anthropic stream with missing/zero usage side, fallback settlement: usage=%d stop=%s forwarded=%d content=%d pt=%d ct=%d settled=%v err=%v",
-			usageID, stopReason, forwardedBytes, deliveredContentBytes, pt, ct, settled, serr)
+		log.Printf("gateway: anthropic stream with missing/zero usage side, fallback settlement: usage=%d stop=%s forwarded=%d content=%d pt=%d ct=%d search=%d settled=%v err=%v",
+			usageID, stopReason, forwardedBytes, deliveredContentBytes, pt, ct, finalSearch, settled, serr)
 		if serr != nil {
 			if !clientGone {
 				abortSettlementFailureStream(c, fl, serr, "anthropic stream fallback")
+			}
+		}
+	} else if usageID > 0 && finalSearch > settledSearch {
+		// 0085：搜索结果在最后一条 usage 行之后才到（或上游压根没报 usage 但搜索
+		// 成功）—— 补一次回填把按次费用落进去。回填按 usage_id 做差额结算，
+		// 重复执行不会重复扣款。
+		if uerr := updateUsageTokensSettledWithSearch(a.DB, usageID, pt, ct, cache, finalSearch, false); uerr != nil {
+			if !clientGone {
+				abortSettlementFailureStream(c, fl, uerr, "anthropic stream search backfill")
+			} else {
+				log.Printf("gateway: search backfill failed after client gone: usage=%d err=%v", usageID, uerr)
 			}
 		}
 	}

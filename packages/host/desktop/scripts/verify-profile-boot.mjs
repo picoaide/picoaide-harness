@@ -11,7 +11,7 @@ import { NO_OWNER_LOCK_MIN_AGE_MS, reclaimOrphanedDocumentLocks } from '../lib/d
 import { bootDesktopProfile } from './boot-desktop-profile.mjs'
 import { prepareDesktopProfile, desktopProfileContext } from '../lib/profile.js'
 import { readDesktopChannelProfile } from '../lib/desktop-channel.js'
-import { inactiveRequiredRows, FIBER_FAILED } from '../lib/startup-rows.js'
+import { inactiveRequiredRows, FIBER_ACTIVE, FIBER_FAILED } from '../lib/startup-rows.js'
 
 // 产物清理(2026-09): 依赖包 lib/ 不再入库, fresh checkout 下 profile smoke
 // 需要先构建全部 workspace 依赖(cron/connectors/browser 等),
@@ -196,6 +196,33 @@ try {
       + inactiveRows.map(row => `  - ${row.id}: ${row.reason}`).join('\n'),
     )
   }
+  // 2026-10-19 交叉审计 EXP-3/RC-2：9 个默认实验性 bundle 不能只断言“名单里有
+  // 字符串”——bundle 层缺 `cordis.patch.yml`、上游改了行 id、或某行被后续层
+  // disable，名单仍然会绿。这里逐行钉住它们插入的 row id 且要求 fiber ACTIVE。
+  const experimentalRows = [
+    'agent-team', 'tool-agent-team', 'ui-agent-team',
+    'auto-review',
+    'translator', 'cot-translation',
+    'optional-persistent-terminals', 'optional-terminal-registry',
+    process.platform === 'win32' ? 'optional-terminal-pwsh' : 'optional-terminal-bash',
+    'optional-tool-terminal',
+    'optional-session-search', 'optional-session-query-sqlite', 'optional-tool-session-query',
+    'optional-session-title-all-prompts',
+    'optional-ralph', 'optional-ralph-workflow', 'tool-ralph',
+    'skill-badge',
+  ]
+  const allEntries = [...ctx.loader.entries()]
+  const inactiveExperimental = experimentalRows.filter((id) => {
+    const entry = allEntries.find(candidate => candidate.options.id === id)
+    return entry === undefined || entry.disabled === true || entry.fiber?.state !== FIBER_ACTIVE
+  })
+  if (inactiveExperimental.length > 0) {
+    throw new Error(
+      'assembled desktop profile has experimental bundle rows that are not ACTIVE:\n'
+      + inactiveExperimental.map((id) => `  - ${id}`).join('\n'),
+    )
+  }
+
   // 更宽的一层：**任何**已启用行都不该是 FAILED（`apply` 或配置校验抛异常）。
   // 与"必需行必须 ACTIVE"分开：PENDING 在冒烟环境里可能是合法的（某个服务本来
   // 就不存在），FAILED 则任何环境都不合法。实测（2026-09-20）本组合树 189 行、
@@ -500,6 +527,8 @@ try {
     ['ui-plugin-manager', 'P0-8：侧栏插件页与桌面自研面板的 DOM 接管不互通'],
     ['office-to-pdf', 'libreoffice-kit 引擎不在四张打包清单覆盖内 + macOS 签名'],
     ['ui-settings-plugins', '桌面隐藏「插件」设置选项卡（2026-09 产品决策）'],
+    ['ui-settings-models', '桌面隐藏「模型」设置分区（2026-10-18 产品决策）'],
+    ['ui-settings-plugin-inventory', '桌面隐藏「内置插件」清单分区（2026-10-18 产品决策）'],
     ['hmr', '与 plugin-manager 共用 profileContext 开关，但没有 CLI 专属的 appReady 会炸整棵树'],
     // 0.1.7 新增的两条上游行：它们的包只被 **peer 声明**、永不随包安装
     // （`@deepseek-ai/dsh-deepseek-account` / `@deepseek-ai/dsh-api-account-controller`
@@ -819,6 +848,9 @@ try {
     // 桌面隐藏「插件」设置选项卡(2026-09 产品决策,与 ui-settings-models
     // 同机制:desktop/cordis.patch.yml 同 id 覆盖行 disabled)。
     '@deepseek-ai/dsh-client-ui-settings-plugins',
+    // 2026-10-19 交叉审计 CS-03/RC-5：内置插件清单页也必须从 Web graph 消失，
+    // 不能只靠 mustStayDisabled 自证名单。
+    '@deepseek-ai/dsh-client-ui-settings-plugin-inventory',
     // 与名单无关的**行为**闸门（2026-09-23 加固）：这几行是客户端行，被打开时它们的
     // client bundle 会出现在真实 Renderer 的模块图里 —— 这条断言观测的就是"图里有没有
     // 它们"，因此删掉 (d) 的名单项、把名单改短都不影响它。

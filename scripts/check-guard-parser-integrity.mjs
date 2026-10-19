@@ -392,7 +392,12 @@ const REGISTERED_INSTALL_INTEGRITY_BODIES = [
     // `scripts/channel-modules.mjs`（`--list` / `--template` / `--explain` / `--check`；
     // 它读契约 + 真跑 `normalizeChannelFeatures()`，被 `verify-ci-scripts.mjs` 第 20 节真跑）
     // ⇒ 摘要再次同步（同一条 `sha256sum` 口径）。
-    sha256: 'bead6539e5cb3b832029eb6058339420503dbda17e25f0d3b2d3230bce2a3946',
+    //
+    // 2026-10-19（合并 origin/master：DSH 0.2.1-rc.2 + 官方 Schedule 退役自研 cron）：
+    // `EXECUTION_POINT_REGISTRY` / `EXECUTION_FACE_REGISTRY` 两侧各自的登记（P0 集成的
+    // 能力中心、网关客户端、模块编译契约等 + master 的 schedule 与审计判据）合并后，
+    // 本件内容再次变化 ⇒ 摘要按 `sha256sum scripts/check-install-integrity.mjs` 同步。
+    sha256: 'edf310540cee7b0077603c359d01ba38113d75a3cf3c1a4faf95e4f5e17ac5c8',
     methods: [
       'judge-body-bytes-equal-head',
       'yarnrc-forbidden-keys',

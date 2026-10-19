@@ -7,7 +7,7 @@ PicoAide Harness 的插件生态不是一个市场，而是**一套组合约定 
 
 ## 官方上游与本项目的关系
 
-上游是 DeepSeek Harness（`deepseek-ai/deepseek-harness`），本项目以**固定版本原样运行**它：当前 pin `dsh-v0.2.0-rc.2`，真源是仓库根的 `upstream.json`。两边分工清楚：
+上游是 DeepSeek Harness（`deepseek-ai/deepseek-harness`），本项目以**固定版本原样运行**它：当前 pin `dsh-v0.2.1-rc.2`，真源是仓库根的 `upstream.json`。两边分工清楚：
 
 | | 上游 | 本项目 |
 |---|---|---|
@@ -40,7 +40,7 @@ PicoAide Harness 的插件生态不是一个市场，而是**一套组合约定 
 | `dsh-plugin-desktop` | 桌面壳：窗口与导航策略、托盘、更新检查与安装交接、诊断导出、完成/提问/审批通知、asar 文件系统与读取提示、高级呈现的 layout 与主题投影 | 两面 | `desktop-shell`、`desktop-diagnostics`、`desktop-updates`、`desktop-loop-notify`、`desktop-asar-fs` |
 | `@picoaide/dsh-enterprise` | 企业登录门（预认证登录页、服务端地址、登录方式）、会话与令牌、网关模型目录接入、启动引导、错误上报、技能遥测、渠道内容同步、能力中心入口 | 两面 | `picoaide-auth-gate`、`picoaide-session`、`picoaide-gateway-llm`、`picoaide-bootstrap`、`picoaide-channel-sync` |
 | `@picoaide/dsh-connectors` | 连接器框架（MCP 注册、认证、凭据存储与续期）+ 连接器中心面板 + 每个已连接连接器的斜杠命令 | 两面 | `pico-connectors` |
-| `@picoaide/dsh-cron` | 定时任务：作业账本、5 个模型工具（`cron_create` / `cron_list` / `cron_set_enabled` / `cron_run` / `cron_remove`）、执行历史与面板 | 两面 | `pico-cron` |
+| `@deepseek-ai/dsh-schedule`（上游，0.2.1 启用） | 自动化任务：任务目录、投递与 4 个模型工具（`schedule_create` / `schedule_list` / `schedule_update` / `schedule_delete`），由桌面组合默认启用并按账号过滤 | 宿主 + 客户端 | `schedule` / `ui-schedule` |
 | `@picoaide/dsh-browser` | 内置浏览器：独立窗口（`WebContentsView` + CDP）、控制权模型、op log、`browser_*` 工具组、侧栏入口与状态提示 | 两面 | `pico-browser` |
 | `@picoaide/dsh-wasm-apps-host` | 应用窗口的宿主侧：自定义协议处理器、请求转发到平台、窗口生命周期与分区 | 宿主面 | `pico-wasm-apps-host` |
 | `@picoaide/dsh-wasm-apps` | 应用中心面板：目录、打开应用、发布入口 | 客户端面 | `picoaide-wasm-apps` |

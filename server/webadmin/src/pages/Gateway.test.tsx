@@ -589,6 +589,8 @@ describe('Gateway 保存面(F-07)', () => {
       'peak_windows',
       'rate_limit',
       'retention_months',
+      // 0085:web_search 按次单价(元/千次,0=不计费)。
+      'search_price_per_1k',
       'server_base_url',
       // R17A-06:未定价模型的准入策略(缺省 reject)也是本页的正常字段。
       'unpriced_model_policy',
@@ -596,6 +598,41 @@ describe('Gateway 保存面(F-07)', () => {
     for (const foreign of ['error_reporting_dsn', 'error_reporting_enabled', 'error_reporting_level', 'error_reporting_heartbeat', 'glitchtip_base_url', 'glitchtip_organization']) {
       expect(body[foreign]).toBeUndefined()
     }
+  })
+
+  // 0085:Search 按次计费(元/千次)。读取服务端值 → 保存时提交 → 非法值前端拦截。
+  it('Search 按次计费:读取服务端值、保存时提交、非法值前端拦截', async () => {
+    const puts: Array<Record<string, unknown>> = []
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/server/admin/gateway' && init?.method === 'PUT') {
+        puts.push(JSON.parse(String(init.body)) as Record<string, unknown>)
+        return { ok: true }
+      }
+      if (path === '/api/server/admin/gateway') {
+        return {
+          default_model: 'deepseek-chat', rate_limit: '0', peak_windows: '',
+          search_price_per_1k: '5', retention_months: '6', default_thinking_level: 'max',
+          server_base_url: '', max_file_refs: '600', body_parse_budget_mb: '128',
+          file_expiry_days: '7', unpriced_model_policy: 'reject',
+        }
+      }
+      return baseImpl(path, init)
+    })
+    render(<Gateway />)
+    await waitForGatewayLoaded()
+    const input = screen.getByLabelText('Search 按次计费(元/千次)') as HTMLInputElement
+    expect(input.value).toBe('5')
+
+    fireEvent.change(input, { target: { value: '-1' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    expect(await screen.findByText(/Search 按次计费必须是 0~1000/)).toBeTruthy()
+    expect(puts).toHaveLength(0)
+
+    fireEvent.change(input, { target: { value: '5' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await screen.findByText('已保存')
+    expect(puts).toHaveLength(1)
+    expect(puts[0]!.search_price_per_1k).toBe('5')
   })
 
   // 2026-09-22:服务端把每用户限流缺省从 60 改成 **0 = 不限制**(与官方口径一致:

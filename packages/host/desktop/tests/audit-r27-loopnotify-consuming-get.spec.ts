@@ -153,6 +153,7 @@ async function startConsumingGetFixture(options: { readonly wireProof?: boolean 
   await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 })
   const server = ctx.webServer
   const port = server.port
+  if (port === undefined) throw new Error('fixture WebServer did not expose a listening port')
   const authority = `127.0.0.1:${String(port)}`
   const judge = vi.fn(upstreamShapedJudge)
   let prefixFenceCalls = 0
@@ -636,13 +637,13 @@ describe('FIX-36：围栏替身仍与 pinned 上游同形（漂移检测）', ()
     // 这几条是上面 `upstreamShapedJudge` 的取值域来源：上游改了它们，替身必须重新对齐
     // （否则这条判据会在一个已经不成立的判定面上给出绿色）。
     const rpcHost = readFileSync(join(UPSTREAM_CONNECTION_SRC, 'rpc-host.ts'), 'utf8')
-    expect(rpcHost).toContain('if (!isTrustedApiRequest(request, this.trustedHosts)) return 403')
-    expect(rpcHost).toContain('return this.browserAuth.isAuthenticated(request) ? undefined : 401')
+    expect(rpcHost).toContain('if (!this.isTrusted(request)) return { rejection: 403 }')
+    expect(rpcHost).toContain('if (this.browserAuth.isAuthenticated(request, secure)) return { peer: this.browserPeer }')
 
     const trust = readFileSync(join(UPSTREAM_CONNECTION_SRC, 'api-request-trust.ts'), 'utf8')
     expect(trust).toContain("if (header(request.headers, 'sec-fetch-site') === 'cross-site') return false")
     expect(trust).toContain('if (origin === undefined) return true')
-    expect(trust).toContain('return new URL(origin).host === hostUrl.host')
+    expect(trust).toContain('return isSameAuthorityOrigin(origin, host)')
 
     const browserAuth = readFileSync(join(UPSTREAM_CONNECTION_SRC, 'browser-auth.ts'), 'utf8')
     expect(browserAuth).toContain("const COOKIE_PREFIX = 'dsh-auth-'")

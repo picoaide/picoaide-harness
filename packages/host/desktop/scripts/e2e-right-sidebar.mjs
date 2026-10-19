@@ -392,43 +392,20 @@ try {
     const pristine = await evaluate(`(() => {
       const panel = document.querySelector('[data-slot="rightbar.session"]')
       const text = panel?.textContent ?? ''
-      return text.includes('工作区文件') || text.includes('定时任务')
+      return text.includes('工作区文件')
     })()`)
     const panelText = await evaluate(`(document.querySelector('[data-slot="rightbar.session"]')?.textContent ?? '').slice(0, 200)`)
     console.log('[probe] rightbar.session text:', JSON.stringify(panelText))
     const tabs = await evaluate(`[...document.querySelectorAll('[data-slot="sidebar.right.pane.tab"], [role="tab"], [class*="chip"]')].map(el => (el.textContent ?? '').trim()).filter(Boolean).slice(0, 10)`)
     console.log('[probe] right sidebar chips:', JSON.stringify(tabs))
 
-    // 5. Open OUR migrated tab (cron's scheduled jobs) from the guide and prove
-    // its body renders inside the official panel. The guide entry is a button
-    // whose text is the tab title.
-    // Scope to the official panel: the left sidebar also carries a
-    // 「定时任务」 entry (2026-09-21 并道后它住在「更多」浮层里), and that one opens
-    // the main-area center instead — clicking the wrong one would look like a
-    // missing tab body.
-    if (!pristine) {
-      skip('点开「定时任务」后 cron 面板在官方右栏内渲染', '面板布局已被上一轮变更（复用同一会话）')
-    } else {
-    const cronEntryClicked = await evaluate(`(() => {
+    // 5. 自研 cron 已退役（2026-10-18 换官方 Schedule）；右侧栏不再有 cron 页签，
+    // 这里只保留官方「工作区文件」引导页的渲染检查，避免探针驱动已删除的面板。
+    const guideVisible = await evaluate(`(() => {
       const panel = document.querySelector('[data-slot="rightbar.session"]')
-      if (!panel) return false
-      const entry = [...panel.querySelectorAll('button, [role="button"]')]
-        .find(b => (b.textContent ?? '').includes('定时任务'))
-      if (!entry) return false
-      entry.click()
-      return true
+      return panel !== null && (panel.textContent ?? '').includes('工作区文件')
     })()`)
-    const cronRendered = cronEntryClicked
-      ? await waitFor(`!!document.querySelector('[data-slot="rightbar.session"] [data-dsh-cron-panel]')`, 12000)
-      : false
-    check('点开「定时任务」后 cron 面板在官方右栏内渲染', cronRendered, `clicked=${cronEntryClicked}`)
-    if (cronRendered) {
-      await wait(800)
-      await shoot('05-cron-tab')
-      const cronText = await evaluate(`(document.querySelector('[data-slot="rightbar.session"] [data-dsh-cron-panel]')?.textContent ?? '').slice(0, 120)`)
-      console.log('[probe] cron tab text:', JSON.stringify(cronText))
-    }
-    }
+    check('官方右栏保留工作区文件引导页', guideVisible)
 
     // 6. Panel interactions. The chrome controls carry stable aria-labels
     // (分栏 / 全屏 / 收起右侧边栏), and the presentation itself is asserted

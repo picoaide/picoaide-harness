@@ -70,7 +70,7 @@ The whole site uses the vocabulary below; individual pages do not invent their o
 | 门户页 | portal | The server root `/`, where employees download the client |
 | 能力中心 | Capability Hub | "Mine + Market" for skills and agents |
 | 连接器 | connectors | The MCP connector framework |
-| 定时任务 | scheduled jobs | The product's cron jobs (**not** upstream Schedule reminders) |
+| 自动化任务 | automation tasks | Upstream Schedule tasks (replacing the retired in-house cron), account-scoped |
 | 内置浏览器 | built-in browser | The separate browser window an Agent can drive |
 | 应用中心 | app centre | Employee-built WASM apps |
 | 渠道内容 | channel content | Branding and copy injected into the image at build time |
@@ -86,7 +86,7 @@ The whole site uses the vocabulary below; individual pages do not invent their o
 | Sandbox | Landlock on Linux, directory ACLs on Windows, Seatbelt on macOS |
 | Capability distribution | Capability Hub: skills and agents, sourced from Market / Org / Local; uploads go through an approval + authorization "two-gate" model |
 | External systems | Connectors: one standard MCP config (`type` + `url`, or `command`/`args`/`env`), OAuth authorization code + PKCE, automatic token renewal |
-| Automation | Scheduled jobs: cron + prompt + workspace + agent preset + permissions, with execution history; triggers missed while the app is fully exited are skipped by default |
+| Automation | Upstream Schedule tasks: once/interval/daily/weekly/cron reminders delivered to the original session, account-scoped; no delivery while the app is fully exited, due tasks fire on the next launch |
 | Agent browser | Separate browser window, multiple tabs, control handed over by an explicit button, 100MB default download cap, operation log |
 | Voice input | Recognition in a local subprocess (audio never leaves the machine, works offline), zh/en/ja/ko/yue auto-detected, capped at 120 seconds / 4MiB |
 | Memory | Five tracks (user profile / global facts / project key memory / project log / daily log), written only after confirmation |
@@ -116,7 +116,7 @@ These are deliberate boundaries rather than "coming later"; they are listed here
 
 ## Upstream version
 
-The upstream DeepSeek Harness runs **unchanged at a fixed version** (currently pinned at `dsh-v0.2.0-rc.2`; the source of truth is `upstream.json` at the repository root). There is no whole-tree fork — only a small set of patches, each with its own guard — and upgrades follow the upstream version number. Trade-offs and costs are in [Product Philosophy](/en/philosophy/).
+The upstream DeepSeek Harness runs **unchanged at a fixed version** (currently pinned at `dsh-v0.2.1-rc.2`; the source of truth is `upstream.json` at the repository root). There is no whole-tree fork — only a small set of patches, each with its own guard — and upgrades follow the upstream version number. Trade-offs and costs are in [Product Philosophy](/en/philosophy/).
 
 ## Related
 

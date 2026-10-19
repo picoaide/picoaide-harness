@@ -86,7 +86,7 @@ The conventions every product-owned package follows:
 - Function plugins only have the named exports `name` / `inject` / `Config` / `apply`, **with no default export**; service-class packages default-export a service class;
 - `Config` validates the row's `config` with a Schemastery schema; **a key absent from the row is a schema default**, so decide each key's default behaviour explicitly when writing the schema;
 - Every side effect (tools, routes, listeners, timers, slots) is wrapped in `ctx.effect` and returns a cleanup function: plugin unload and generation rebuilds both rely on it to roll back;
-- Each product package carries its own `./invariant` subpath (in-package invariant self-checks) and explicit `exports`.
+- Declare `exports` explicitly; upstream removed the invariants service in 0.2.1, so **do not add a `./invariant` companion entry** (it will not be loaded).
 
 Three patch semantics are worth memorising (implemented in upstream `deepseek-harness/vendor/include/src/index.ts`):
 
@@ -142,7 +142,7 @@ Do not read another plugin's DOM, stylesheets, or component source to guess plac
 
 This line is a hard contract:
 
-- **Platform module table (`PLATFORM_MODULES`)**: `react`, `react/jsx-runtime`, `react-dom`, `react-dom/client`, `@deepseek-ai/cordis`, `@deepseek-ai/dsh-client-store`, `@deepseek-ai/dsh-client-ui-slots`, `@deepseek-ai/dsh-client-ui-primitives`, `@deepseek-ai/dsh-client-ui-dockkit` — 9 entries; the single source of truth in this repository is `scripts/platform-modules.mjs`, mirrored entry by entry from the pinned upstream `deepseek-harness/packages/client/web/src/platform.ts`.
+- **Platform module table (`PLATFORM_MODULES`)**: `react`, `react/jsx-runtime`, `react-dom`, `react-dom/client`, `@deepseek-ai/cordis`, `zod`, `@tanstack/react-virtual`, `@deepseek-ai/dsh-client-store`, `@deepseek-ai/dsh-client-ui-slots`, `@deepseek-ai/dsh-client-ui-primitives`, `@deepseek-ai/dsh-client-ui-dockkit` — 11 entries; the single source of truth in this repository is `scripts/platform-modules.mjs`, mirrored entry by entry from the pinned upstream `deepseek-harness/packages/client/web/src/platform.ts`.
 
 The alignment rules:
 

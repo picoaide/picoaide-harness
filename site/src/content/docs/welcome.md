@@ -23,7 +23,7 @@ PicoAide Harness 是**企业级 DeepSeek Harness 一体化平台**：桌面客�
 
 | 层 | 位置 | 负责 |
 |---|---|---|
-| **桌面客户端** | 员工机器 | 原生窗口与托盘、登录页与账户、自动更新，以及全部界面面板：对话、能力中心、连接器、定时任务、内置浏览器、语音输入、五轨记忆、应用中心 |
+| **桌面客户端** | 员工机器 | 原生窗口与托盘、登录页与账户、自动更新，以及全部界面面板：对话、能力中心、连接器、自动化任务、内置浏览器、语音输入、五轨记忆、应用中心 |
 | **本地 Harness 服务** | 员工机器，`127.0.0.1` 上的随机端口（可固定） | 跑固定版本的上游 DeepSeek Harness：会话与消息日志、文件读写、工作区、沙箱与审批、工具执行 |
 | **企业服务端** | 客户内网一台机器（一个容器镜像） | 账号与认证、模型网关与密钥、计量计费与余额闸门、能力中心与审批、连接器目录、应用中心、审计、客户端分发、门户页与管理后台 |
 
@@ -47,7 +47,7 @@ PicoAide Harness 是**企业级 DeepSeek Harness 一体化平台**：桌面客�
 
 | 角色 | 先读 | 再读 | 出问题时 |
 |---|---|---|---|
-| **员工** | [快速开始](/getting-started/) | [桌面客户端](/desktop/)（会话、能力中心、连接器、定时任务、浏览器、记忆、应用中心） | [常见问题](/faq/) |
+| **员工** | [快速开始](/getting-started/) | [桌面客户端](/desktop/)（会话、能力中心、连接器、自动化任务、浏览器、记忆、应用中心） | [常见问题](/faq/) |
 | **企业管理员** | [快速开始](/getting-started/) → [私有化部署](/deployment/) | [容器化部署](/deployment/compose/) → [管理后台](/admin/) → [客户端分发与升级](/deployment/client-delivery/) | [运维与排障](/deployment/operations/) |
 | **运维** | [私有化部署](/deployment/) | [容器化部署](/deployment/compose/) → [升级、备份与回滚](/deployment/upgrade/) → [离线部署](/deployment/offline/) | [运维与排障](/deployment/operations/) |
 | **开发者** | [系统架构](/architecture/) | [插件开发](/plugin-development/) → [插件生态](/plugin-ecosystem/) → [API 参考](/api-reference/) | [产品哲学](/philosophy/)（先看设计取舍再改） |
@@ -67,7 +67,7 @@ PicoAide Harness 是**企业级 DeepSeek Harness 一体化平台**：桌面客�
 | 门户页 | portal | 服务端根路径 `/`，员工下载客户端的地方 |
 | 能力中心 | Capability Hub | 技能 / 智能体的「我的 + 市场」 |
 | 连接器 | connectors | MCP 连接器框架 |
-| 定时任务 | scheduled jobs | 产品侧的 cron 作业（**不是**上游 Schedule 提醒） |
+| 自动化任务 | automation tasks | 上游 Schedule 的自动化任务/提醒（替换已退役的自研 cron），按账号隔离 |
 | 内置浏览器 | built-in browser | Agent 可驱动的独立浏览器窗口 |
 | 应用中心 | app centre | 员工自建 WASM 应用 |
 | 渠道内容 | channel content | 构建期随镜像注入的品牌与文案 |
@@ -83,7 +83,7 @@ PicoAide Harness 是**企业级 DeepSeek Harness 一体化平台**：桌面客�
 | 沙箱 | Linux 走 Landlock，Windows 走目录 ACL，macOS 走 Seatbelt |
 | 能力分发 | 能力中心：技能与智能体；来源「市场 / 组织 / 本地」；上传走审核 + 授权「双门制」 |
 | 外部系统 | 连接器：一条标准 MCP 配置（`type` + `url`，或 `command`/`args`/`env`），OAuth 授权码 + PKCE，令牌自动续期 |
-| 自动化 | 定时任务：cron + 提示词 + 工作区 + 智能体预设 + 权限，执行历史可查；应用完全退出期间错过的触发默认跳过 |
+| 自动化 | 上游 Schedule 的自动化任务：单次 / 间隔 / 每日 / 每周 / cron 提醒到原会话；应用完全退出期间不触发，下次启动补触发；按账号隔离 |
 | Agent 操作浏览器 | 独立浏览器窗口、多标签、控制权按钮交接、下载默认 100MB 上限、操作日志 |
 | 语音输入 | 本机子进程识别（音频不出机器、离线可用），中英日韩粤自动识别，上限 120 秒 / 4MiB |
 | 记忆 | 五轨记忆（用户档案 / 全局事实 / 项目关键记忆 / 项目日志 / 每日日志），确认制写入 |
@@ -113,7 +113,7 @@ PicoAide Harness 是**企业级 DeepSeek Harness 一体化平台**：桌面客�
 
 ## 上游版本
 
-上游 DeepSeek Harness 以**固定版本原样运行**（当前 pin `dsh-v0.2.0-rc.2`，真源为仓库根 `upstream.json`）：不做整体分叉，只保留少量带判据的补丁，升级只跟随上游版本号。取舍与代价见[产品哲学](/philosophy/)。
+上游 DeepSeek Harness 以**固定版本原样运行**（当前 pin `dsh-v0.2.1-rc.2`，真源为仓库根 `upstream.json`）：不做整体分叉，只保留少量带判据的补丁，升级只跟随上游版本号。取舍与代价见[产品哲学](/philosophy/)。
 
 ## 相关
 

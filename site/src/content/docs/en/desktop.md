@@ -238,54 +238,39 @@ The connector panel is a set of loopback routes: `GET /api/pico/connectors` list
 `approve` / `deny` / `refresh`. **Every action except state polling requires a proof of possession**; without
 it the handler is never entered.
 
-## Scheduled jobs
+## Automation tasks
 
-The sidebar's "Scheduled jobs" opens the job centre. The task board was merged into it, so **there is now
-exactly one kind of job**: at the scheduled time the Host process runs an agent action.
+The More → Automation tasks entry opens the upstream Schedule task center (replacing the
+in-house cron in 0.2.1). Tasks are scheduled by the Host, bound to the session that created
+them, and deliver their prompt back to that session.
 
-### Job model
+### Task model
 
 | Field | Description |
 |---|---|
-| Name | Required; whitespace-only counts as missing (the UI and the model surface use the same judgement) |
-| Cron expression | Five fields, minute precision; presets: daily 09:00 / hourly / every 10 minutes / Monday 09:00 |
-| Content (prompt) | The task description sent to the agent. **It is data, not a command line** — the action is a closed union with no `command` or `shell` field |
-| Workspace | Defaults to the current workspace, or pins another one |
-| Agent preset | Defaults to the composition default, or names one; the permission field must name a preset that actually exists in this composition, and a typo is rejected at creation time |
-| Permission | Pinned into the session this run creates |
-| Enabled | Can be toggled at any time |
+| Title | Required; blank-after-trim is treated as missing |
+| Timing | Once / fixed interval / daily / weekly / 5-field cron, using the local timezone |
+| Prompt | Delivered to the original session when due; data, not a command line |
+| Session | Fixed to the creating session; cross-session delivery is impossible |
+| Status | Active / ended; inspect, edit, and delete in the task center |
+| Delivery history | Trigger time and delivered message id; old records are pruned |
 
-### Execution
+### Execution and account isolation
 
-- The **Host process** fires it: it **still runs** after you close the window or the browser page.
-- Every trigger **creates a new agent session** (with the pinned workspace, preset and permission) and sends
-  the prompt to it.
-- Each execution record carries: trigger time, session id, prompt, start and end time, result (succeeded /
-  failed / cancelled) and the error text. You can jump straight from the details to that session.
-- **Missed triggers are skipped by default.** Triggers missed while the app was fully quit, or while the job's
-  account was signed out, are not replayed unless you explicitly enable "catch up the most recent missed
-  run" in settings — and even then only the **most recent** one.
-- **A wall-clock time that does not exist because of a daylight-saving jump does not fire either** (for
-  example when the clock jumps from 02:00 straight to 03:00 and 02:30 never happens). The skip is recorded
-  and shown on the job panel.
+- The Host delivers when due; closing the window keeps the app running and tasks fire. Fully
+  quitting the app stops delivery.
+- On the next launch, due tasks for the **currently signed-in account** are delivered (not all
+  historical occurrences).
+- Catalog, history, updates, and deletes are filtered by the current Pico account
+  (server + username). Other accounts' tasks are invisible, immutable, and never delivered;
+  unowned legacy rows are also hidden in an account-aware host.
+- A task is never delivered to another account's session.
 
 ### Model tool surface
 
-Models can call five tools: `cron_create` / `cron_list` / `cron_set_enabled` / `cron_run` / `cron_remove`.
-Their boundaries match the UI:
-
-- **Owner filtering**: a job the current account cannot see is reported to the model as non-existent (it
-  never leaks that the job exists);
-- **Deleting a running job is refused** — deletion does not cancel the running session, so the client refuses
-  rather than leaving an execution with no record;
-- Users can always see and manage these jobs in the UI: the AI proposes, the human decides.
-
-### Settings
-
-- Enable or disable the scheduler (disabling keeps the configured jobs);
-- Whether to announce the plugin's capability to the model (default **on**: it declares its capabilities and
-  limits in the system prompt);
-- Catch up missed triggers (default **off**).
+Models can call four tools: `schedule_create` / `schedule_list` / `schedule_update` /
+`schedule_delete`. Boundaries match the UI: filtering is account-scoped (a task the account
+cannot see is reported as non-existent), and users can always see and manage their tasks.
 
 ## Built-in browser
 

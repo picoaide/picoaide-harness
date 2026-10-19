@@ -56,7 +56,7 @@ export const FIBER_FAILED = 3
  * 判据是「缺了它这个产品就不是它」：窗口与壳、桌面自有路由、登录门、企业面、
  * 四个自研业务面。**不含**可选客户端 UI 行 —— `profile.ts` 的 `filterRows` 会有意
  * 丢弃组合里解析不到的客户端行，把它们放进来会造成启动假报警。
- * 共 21 条；`tests/startup-rows.spec.ts` 会逐条断言它们真的在组合树里且未被 disable。
+ * 共 20 条；`tests/startup-rows.spec.ts` 会逐条断言它们真的在组合树里且未被 disable。
  *
  * 2026-09-21（并道改造）：`picoaide-foot-menu` 入表 —— 它是**五个面板入口的唯一
  * 承载行**（更多 + 浮层）。它不在 `filterRows` 的丢弃范围内（那只丢
@@ -96,7 +96,6 @@ export const REQUIRED_DESKTOP_ROWS = [
   'picoaide-skill-telemetry',
   // 自研业务面
   'pico-connectors',
-  'pico-cron',
   'pico-browser',
   'pico-wasm-apps-host',
   'picoaide-account-card',

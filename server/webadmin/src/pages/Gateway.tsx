@@ -157,7 +157,7 @@ export default function Gateway() {
   const [providers, setProviders] = useState<Provider[]>([])
   const [models, setModels] = useState<Model[]>([])
   const [channels, setChannels] = useState<Channel[]>([])
-  const [cfg, setCfg] = useState({ default_model: '', rate_limit: '0', peak_windows: '', retention_months: '6', default_thinking_level: 'max', server_base_url: '', max_file_refs: '600', body_parse_budget_mb: '128', file_expiry_days: '7', unpriced_model_policy: 'reject' })
+  const [cfg, setCfg] = useState({ default_model: '', rate_limit: '0', peak_windows: '', search_price_per_1k: '0', retention_months: '6', default_thinking_level: 'max', server_base_url: '', max_file_refs: '600', body_parse_budget_mb: '128', file_expiry_days: '7', unpriced_model_policy: 'reject' })
   const [peakList, setPeakList] = useState<PeakWindowRow[]>([])
   // 审计 2026-09-12 P1-2:服务端存的 peak_windows 无法解析时为 true →
   // 禁止把空列表当成「清空」写回去(那是静默破坏计费口径)。管理员显式
@@ -224,6 +224,8 @@ export default function Gateway() {
         default_model: g.default_model ?? '',
         rate_limit: String(g.rate_limit ?? '0'),
         peak_windows: g.peak_windows ?? '',
+        // 0085:web_search 按次单价(元/千次);服务端缺省返回 "0"
+        search_price_per_1k: String(g.search_price_per_1k ?? '0'),
         retention_months: g.retention_months ?? '6',
         default_thinking_level: g.default_thinking_level ?? 'max',
         server_base_url: g.server_base_url ?? '',
@@ -307,6 +309,15 @@ export default function Gateway() {
       setError('高峰时段每行至少要勾选一个生效星期(一天都不选请删除该行;要清空全部峰谷配置请用「清空高峰时段配置」)')
       return
     }
+    // 0085:Search 按次单价(元/千次)。空串 = 0(不计费);NaN/负数/超上限先拦住,
+    // 与 serverstore.ParseSearchPricePer1K 同口径(服务端仍会再校验一次)。
+    if (cfg.search_price_per_1k.trim() !== '') {
+      const sp = Number(cfg.search_price_per_1k)
+      if (!Number.isFinite(sp) || sp < 0 || sp > 1000) {
+        setError('Search 按次计费必须是 0~1000 的数值(元/千次成功搜索,0=不计费)')
+        return
+      }
+    }
     setBusy('save-gateway')
     try {
       // 高峰时段由结构化列表序列化;空列表 = 清空(无峰谷价,审计修复 H1/M4)
@@ -324,6 +335,7 @@ export default function Gateway() {
         body_parse_budget_mb: cfg.body_parse_budget_mb,
         file_expiry_days: cfg.file_expiry_days,
         unpriced_model_policy: cfg.unpriced_model_policy,
+        search_price_per_1k: cfg.search_price_per_1k,
         peak_windows: peaked.length ? JSON.stringify(peaked) : '',
       }
       const res = await request(`${ADMIN_API}/gateway`, { method: 'PUT', body: JSON.stringify(body) })
@@ -976,10 +988,22 @@ export default function Gateway() {
             </div>
           </section>
 
-          {/* 计费(峰谷折扣) */}
+          {/* 计费(峰谷折扣 / Search 按次) */}
           <section className="space-y-1">
-            <h3 className="text-sm font-medium text-muted-foreground">计费（峰谷折扣）</h3>
+            <h3 className="text-sm font-medium text-muted-foreground">计费（峰谷 / 按次）</h3>
             <div className="space-y-2">
+              <div className="space-y-1">
+                <Label htmlFor="search-price-per-1k">Search 按次计费(元/千次)</Label>
+                <Input id="search-price-per-1k" type="number" min={0} max={1000} step="0.01"
+                  value={cfg.search_price_per_1k}
+                  onChange={(e) => setCfg({ ...cfg, search_price_per_1k: e.target.value })} />
+                <p className="text-xs text-muted-foreground">
+                  web_search <strong>成功返回网页结果</strong>时按次收费,不参与峰谷折扣;0 = 不计费(缺省)。
+                  DeepSeek 官方 5 元/千次成功请求,2026-11-01 00:00(北京时间)起对 DeepSeek Harness /
+                  Claude Code / Codex 的 Server 端搜索开始计费。只统计网关 <code>/v1/messages</code> 的
+                  服务端搜索;客户端直连的 web_fetch 不经过此处,不计费。
+                </p>
+              </div>
               <Label>高峰时段(北京时间)</Label>
               {peakParseFailed && (
                 <div className="rounded border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
@@ -1329,7 +1353,11 @@ export default function Gateway() {
                   value={modelForm.cache_input_price_per_1m}
                   onChange={(e) => setModelForm({ ...modelForm, cache_input_price_per_1m: e.target.value })}
                 />
-                <p className="text-xs text-muted-foreground">仅作定价展示;命中 token 仍按输入价计费。</p>
+                <p className="text-xs text-muted-foreground">
+                  命中 token 按此价计费(不是展示项);留空或填 0 = 未配置,回退按输入价计费。
+                  DeepSeek V4 官方缓存命中价约为输入价的 2%~3.3%(Flash 0.04/2、Pro 0.30/9,高峰价),
+                  不填会把命中部分按输入价多算几十倍。
+                </p>
               </div>
               <div className="space-y-1">
                 <Label htmlFor="model-offpeak">低谷折扣率(0-1,留空 = 无峰谷价)</Label>
@@ -1346,7 +1374,7 @@ export default function Gateway() {
               </div>
             </div>
             <ul className="space-y-1 text-xs text-muted-foreground">
-              <li>配置价格后,用量页按 输入token×输入价 + 输出token×输出价 折算费用;未配置价格(或填 0)的模型在缺省策略下会被拒绝调用(429 MODEL_NOT_PRICED,不转发也不产生费用)—— 确实免费/自建时把「未定价模型策略」改成「允许使用」,那时费用才按 0 记。</li>
+              <li>配置价格后,用量页按 未命中输入token×输入价 + 命中输入token×缓存价 + 输出token×输出价 折算费用;未配置价格(或填 0)的模型在缺省策略下会被拒绝调用(429 MODEL_NOT_PRICED,不转发也不产生费用)—— 确实免费/自建时把「未定价模型策略」改成「允许使用」,那时费用才按 0 记。</li>
               <li>低谷折扣:配置「全局设置 → 高峰时段」后,高峰窗口外(空闲时段)费用 × 折扣率,高峰时段按标准价。</li>
               <li>DeepSeek 官方错峰五折(2026-08 起):高峰 = 北京周一至周五 09:00-12:00、14:00-18:00,空闲价 = 高峰价 × 50%。</li>
             </ul>

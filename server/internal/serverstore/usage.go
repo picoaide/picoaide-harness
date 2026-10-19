@@ -335,7 +335,17 @@ func RecordUsageKind(db *sql.DB, userID int64, model string, promptTokens, compl
 // 相同,但把**实际命中的 provider** 一并落库并按它取价(审计 2026-09-13 P1-6)。
 // providerID=0 时语义与旧入口完全一致(按 name 取价)。
 func RecordUsageKindCachedEstimatedForProvider(db *sql.DB, userID, providerID int64, model string, promptTokens, completionTokens, cacheTokens int64, kind string, estimated bool) (int64, error) {
-	return recordUsageKindAtCached(db, userID, providerID, model, promptTokens, completionTokens, cacheTokens, kind, estimated, time.Now())
+	return RecordUsageKindCachedEstimatedForProviderWithSearch(db, userID, providerID, model, promptTokens, completionTokens, cacheTokens, 0, kind, estimated)
+}
+
+// RecordUsageKindCachedEstimatedForProviderWithSearch 在
+// RecordUsageKindCachedEstimatedForProvider 的基础上把**成功 web_search 次数**
+// 一并落库，并按 settings `usage.search_price_per_1k` 计费（0085）。
+//
+// 按次费用是独立价目：它**不参与**峰谷折扣（见 recordUsageKindAtCached 的
+// cost 计算），因为官方 Search 单价没有峰谷差异。
+func RecordUsageKindCachedEstimatedForProviderWithSearch(db *sql.DB, userID, providerID int64, model string, promptTokens, completionTokens, cacheTokens, searchRequests int64, kind string, estimated bool) (int64, error) {
+	return recordUsageKindAtCached(db, userID, providerID, model, promptTokens, completionTokens, cacheTokens, searchRequests, kind, estimated, time.Now())
 }
 
 // SetUsageProvider 把已存在的 usage 行(流式 pending 行)绑定到实际命中的
@@ -357,20 +367,25 @@ func SetUsageProvider(db *sql.DB, id, providerID int64) error {
 
 // recordUsageKindAt 是 RecordUsageKind 的时间注入版本(测试固定时刻)。
 func recordUsageKindAt(db *sql.DB, userID int64, model string, promptTokens, completionTokens int64, kind string, now time.Time) (int64, error) {
-	return recordUsageKindAtCached(db, userID, 0, model, promptTokens, completionTokens, 0, kind, false, now)
+	return recordUsageKindAtCached(db, userID, 0, model, promptTokens, completionTokens, 0, 0, kind, false, now)
 }
 
-// recordUsageKindAtCached 带缓存命中数与估算标记的记录(时间注入)。
-func recordUsageKindAtCached(db *sql.DB, userID, providerID int64, model string, promptTokens, completionTokens, cacheTokens int64, kind string, estimated bool, now time.Time) (int64, error) {
+// recordUsageKindAtCached 带缓存命中数、web_search 次数与估算标记的记录(时间注入)。
+func recordUsageKindAtCached(db *sql.DB, userID, providerID int64, model string, promptTokens, completionTokens, cacheTokens, searchRequests int64, kind string, estimated bool, now time.Time) (int64, error) {
 	// P0-B:负 token 既不进费用也不落库(月用量/报表/对账都会被负数污染)。
 	promptTokens, completionTokens, cacheTokens = clampTokens(promptTokens, completionTokens, cacheTokens)
+	// 0085:响应体可控的搜索次数同样先归零 —— 负次数会产生负费用。
+	if searchRequests < 0 {
+		searchRequests = 0
+	}
 	// P1-6:按实际命中的 provider 取价(providerID=0 时回退 name 口径)。
 	//
 	// R13-GE（V2-2 读面收口）：计价输入（价目 + 缓存价 + 峰谷窗口）在**一个已钉
 	// search_path 的只读事务**里读齐（唯一实现 loadModelPriceInputs）。旧实现是
 	// 四条裸池上读 ⇒ shadow 在场时取到 shadow 价目，却把金额落进 public 行。
 	pi := loadModelPriceInputs(db, providerID, model)
-	cost := costOfAt(now, promptTokens, completionTokens, cacheTokens, pi.inputPer1M, pi.outputPer1M, pi.cachePer1M, pi.offpeak, pi.peakWindows)
+	cost := costOfAt(now, promptTokens, completionTokens, cacheTokens, pi.inputPer1M, pi.outputPer1M, pi.cachePer1M, pi.offpeak, pi.peakWindows) +
+		searchFee(searchRequests, pi.searchPer1K)
 	// 分区写路径:确保 now 所属月份分区存在(幂等 CREATE TABLE IF NOT EXISTS)。
 	//
 	// R9-D R9D-00(P0):这一步失败 = **当月每一次对话**都会被网关 503 METERING_FAILED
@@ -405,8 +420,8 @@ func recordUsageKindAtCached(db *sql.DB, userID, providerID int64, model string,
 		return 0, err
 	}
 	var id int64
-	if err := tx.QueryRow(`INSERT INTO usage (user_id, model, provider_id, prompt_tokens, completion_tokens, cache_prompt_tokens, kind, cost, created_at, estimated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
-		userID, model, providerID, promptTokens, completionTokens, cacheTokens, kind, cost, now, estimated).Scan(&id); err != nil {
+	if err := tx.QueryRow(`INSERT INTO usage (user_id, model, provider_id, prompt_tokens, completion_tokens, cache_prompt_tokens, search_requests, kind, cost, created_at, estimated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+		userID, model, providerID, promptTokens, completionTokens, cacheTokens, searchRequests, kind, cost, now, estimated).Scan(&id); err != nil {
 		return 0, err
 	}
 	if err := settleUsageCostTx(tx, id, userID, cost, false); err != nil {
@@ -423,21 +438,31 @@ func recordUsageKindAtCached(db *sql.DB, userID, providerID int64, model string,
 // 「先交付后结算」在语义上就是后付费 —— 欠款必须如实落账,而不是因为余额不够
 // 就整笔回滚成零落账零扣费。见 settleUsageCostTx 的 allowOverdraft 说明。
 func UpdateUsageTokensCachedEstimatedOverdraft(db *sql.DB, id, promptTokens, completionTokens, cacheTokens int64, estimated bool) error {
-	return updateUsageTokensAtCached(db, id, promptTokens, completionTokens, cacheTokens, estimated, true, time.Now())
+	return updateUsageTokensAtCached(db, id, promptTokens, completionTokens, cacheTokens, 0, estimated, true, time.Now())
+}
+
+// UpdateUsageTokensCachedEstimatedOverdraftWithSearch 是流式回填的带搜索次数版本
+// （0085）：web_search 次数与 token 一起回填，按次费用在收尾时一次结算。
+func UpdateUsageTokensCachedEstimatedOverdraftWithSearch(db *sql.DB, id, promptTokens, completionTokens, cacheTokens, searchRequests int64, estimated bool) error {
+	return updateUsageTokensAtCached(db, id, promptTokens, completionTokens, cacheTokens, searchRequests, estimated, true, time.Now())
 }
 
 // updateUsageTokensAt 是 UpdateUsageTokens 的时间注入版本(测试固定时刻)。
 func updateUsageTokensAt(db *sql.DB, id, promptTokens, completionTokens int64, now time.Time) error {
-	return updateUsageTokensAtCached(db, id, promptTokens, completionTokens, 0, false, false, now)
+	return updateUsageTokensAtCached(db, id, promptTokens, completionTokens, 0, 0, false, false, now)
 }
 
-// updateUsageTokensAtCached 带缓存命中数、估算标记与透支许可的回填(时间注入)。
+// updateUsageTokensAtCached 带缓存命中数、web_search 次数、估算标记与透支许可的
+// 回填(时间注入)。
 // 审计修复 2026-P (M4): 计费时刻取该行 created_at(pending 行 = 请求发起
 // 时刻插入),而非回填时刻 time.Now()——跨高峰/空闲边界的流式请求不再因
 // 流结束时点计价,与「低谷窗口按记录时刻判定」的设计一致。
-func updateUsageTokensAtCached(db *sql.DB, id, promptTokens, completionTokens, cacheTokens int64, estimated, allowOverdraft bool, now time.Time) error {
+func updateUsageTokensAtCached(db *sql.DB, id, promptTokens, completionTokens, cacheTokens, searchRequests int64, estimated, allowOverdraft bool, now time.Time) error {
 	// P0-B:回填路径同样归零(流式 usage 行 / 估算回填都可能带负值)。
 	promptTokens, completionTokens, cacheTokens = clampTokens(promptTokens, completionTokens, cacheTokens)
+	if searchRequests < 0 {
+		searchRequests = 0
+	}
 	// 0061/0062: 回填与余额结算同事务。0062 起由 settleUsageCostTx 把该行的
 	// 计费金额**收敛到 cost**(按流水已计费额算差额):重复回填不重复扣,
 	// 费用向下修正自动记 refund 回补(此前只减不补,余额会永久偏离)。
@@ -483,13 +508,14 @@ func updateUsageTokensAtCached(db *sql.DB, id, promptTokens, completionTokens, c
 	// 回填的连接需求从"缓存命中 0 条额外连接"变成"恒定多 1 条"）。三类计价输入与
 	// usage 行同事务、同 pin，也保证金额与落账看同一个库（R13-GE · V2-2）。
 	pi := loadModelPriceInputsQ(tx, db, providerID, model)
-	cost := costOfAt(billAt, promptTokens, completionTokens, cacheTokens, pi.inputPer1M, pi.outputPer1M, pi.cachePer1M, pi.offpeak, pi.peakWindows)
+	cost := costOfAt(billAt, promptTokens, completionTokens, cacheTokens, pi.inputPer1M, pi.outputPer1M, pi.cachePer1M, pi.offpeak, pi.peakWindows) +
+		searchFee(searchRequests, pi.searchPer1K)
 	// 锁住 usage 行:并发回填按行串行,避免同一行的差额被算两次。
 	if _, err := tx.Exec("SELECT id FROM usage WHERE id = ? FOR UPDATE", id); err != nil {
 		return err
 	}
-	if _, err := tx.Exec("UPDATE usage SET prompt_tokens = ?, completion_tokens = ?, cache_prompt_tokens = ?, cost = ?, estimated = ? WHERE id = ?",
-		promptTokens, completionTokens, cacheTokens, cost, estimated, id); err != nil {
+	if _, err := tx.Exec("UPDATE usage SET prompt_tokens = ?, completion_tokens = ?, cache_prompt_tokens = ?, search_requests = ?, cost = ?, estimated = ? WHERE id = ?",
+		promptTokens, completionTokens, cacheTokens, searchRequests, cost, estimated, id); err != nil {
 		return err
 	}
 	if err := settleUsageCostTx(tx, id, userID, cost, allowOverdraft); err != nil {
@@ -521,6 +547,9 @@ func DeleteUsage(db *sql.DB, id int64) error {
 // 只有"一个字节都没交付"的空流才允许被清掉:内容已交付的流式请求要么回填了
 // 上游上报的用量、要么走字节估算(settleStreamFallback),两者都让
 // prompt/completion 至少一侧 > 0 —— 于是**不会**命中这里的 0-token 条件。
+// 0085:搜索成功但模型没产出任何 token 的流(search_requests > 0、cost > 0)
+// 同样是"已计费"的行,**不得**按 0-token 清掉 —— 否则余额已扣、usage 明细消失,
+// 对账与账本不变量同时被破坏。条件里显式排除 search_requests > 0。
 // 审计 r7 srvbill-1 的旧形态(余额不足 → 整笔回滚 → 留下 0-token 行)会连
 // 排障线索一起被删,现在流式结算允许透支欠款如实落账,这类行不再出现。
 func CleanupPendingUsage(db *sql.DB, cutoff time.Time) error {
@@ -533,7 +562,7 @@ func CleanupPendingUsage(db *sql.DB, cutoff time.Time) error {
 	// （0-token 行无界堆积，磁盘按月单调增长，而整条链路 `err=nil`）。
 	return withUsageSearchPath(db, func(tx *sql.Tx) error {
 		_, err := tx.Exec(`DELETE FROM usage WHERE kind IN (`+strings.Join(kinds, ",")+
-			`) AND prompt_tokens = 0 AND completion_tokens = 0 AND created_at < ?::timestamptz`,
+			`) AND prompt_tokens = 0 AND completion_tokens = 0 AND search_requests = 0 AND created_at < ?::timestamptz`,
 			pgInstantArg(cutoff))
 		return err
 	})

@@ -169,6 +169,7 @@ describe('speech model payload staging', () => {
       repoRoot: repo,
       appDir,
       speechModel,
+      runtimes: runtimesStub(),
     })
     expect(speechModel.materialized).toEqual([join(appDir, SPEECH_MODEL_PAYLOAD_DIR)])
     expect(speechModel.cleared).toEqual([])
@@ -191,6 +192,7 @@ describe('speech model payload staging', () => {
       repoRoot: repo,
       appDir,
       speechModel,
+      runtimes: runtimesStub(),
     })
     expect(speechModel.cleared).toEqual([payload])
     expect(existsSync(payload)).toBe(false)

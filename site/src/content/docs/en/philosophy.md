@@ -107,7 +107,7 @@ The test is simple: if a principle has no landing place in the code, it does not
 - Tool calls are approved per call: writing files, running commands, driving the browser, and uploading all ask for confirmation, and an approval covers that call only. Both sandbox refusals and approval refusals return to the model as tool errors, so the model can see who refused and why.
 - Capability distribution is an **approval + authorization two-gate model**: an uploaded skill or agent sits in `pending`, an administrator approves it, and it still has to be authorized for specific people before it becomes visible and installable. Unauthorized content stays invisible, and ownership belongs to the first publisher who claimed the name.
 - Memory is confirmation-first: the vendored plugin `packages/vendor/memory-evolve` defaults to `reviewMode: 'suggest'` — the AI files suggestions through `memory_suggest` into the pending queue and only writes once the user accepts. Todos work the same way.
-- Scheduled jobs are created by **humans** (cron + prompt + workspace + preset + permissions); the model can only act through explicit tools (`cron_create` / `cron_list` / `cron_set_enabled` / `cron_run` / `cron_remove`) within the set of jobs the user can see, a job it cannot see is reported as missing, and **a running job refuses deletion** (deleting would not cancel the live session, only lose its record).
+- Automation tasks are created by **humans** (timing + prompt, bound to the original session); the model can only act through explicit tools (`schedule_create` / `schedule_list` / `schedule_update` / `schedule_delete`) within the set of tasks **visible to the current account**; a task it cannot see is reported as missing, and both catalog and delivery are account-scoped.
 - App-side authorization is explicit: the consent record that allows the AI to read an app's data is scoped by (user + server + app), and a missing scope fails closed rather than writing.
 - Browser control only changes hands through **one button, in both directions**: "Take over" acquires it and "Hand back to AI" returns it; the mask's empty areas, the activity panel, and `Esc` never change it.
 
@@ -119,7 +119,7 @@ The test is simple: if a principle has no landing place in the code, it does not
 
 ## 7. The upstream version is pinned, not modified
 
-**Principle**: the upstream DeepSeek Harness runs unchanged at a fixed version (currently pinned at `dsh-v0.2.0-rc.2`; the source of truth is `upstream.json` at the repository root). Product capabilities come from plugin composition plus a **small number of guarded patches**, never a whole-tree fork.
+**Principle**: the upstream DeepSeek Harness runs unchanged at a fixed version (currently pinned at `dsh-v0.2.1-rc.2`; the source of truth is `upstream.json` at the repository root). Product capabilities come from plugin composition plus a **small number of guarded patches**, never a whole-tree fork.
 
 **Evidence**
 

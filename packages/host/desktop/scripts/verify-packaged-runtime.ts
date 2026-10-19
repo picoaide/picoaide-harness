@@ -212,6 +212,36 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'node_modules/@deepseek-ai/dsh-experimental-speech-to-text-sensevoice/lib/index.js',
   'node_modules/@deepseek-ai/dsh-experimental-api-speech-to-text/lib/typert.host.js',
   'node_modules/@deepseek-ai/dsh-experimental-client-ui-voice-input/lib/client.js',
+  'node_modules/@deepseek-ai/dsh-experimental-agent-team-profile/package.json',
+  'node_modules/@deepseek-ai/dsh-experimental-agent-team-profile/cordis.patch.yml',
+  'node_modules/@deepseek-ai/dsh-experimental-agent-team-profile/lib/index.js',
+  'node_modules/@deepseek-ai/dsh-experimental-auto-review/package.json',
+  'node_modules/@deepseek-ai/dsh-experimental-auto-review/cordis.patch.yml',
+  'node_modules/@deepseek-ai/dsh-experimental-auto-review/lib/index.js',
+  'node_modules/@deepseek-ai/dsh-experimental-cot-translation-bundle/package.json',
+  'node_modules/@deepseek-ai/dsh-experimental-cot-translation-bundle/cordis.patch.yml',
+  'node_modules/@deepseek-ai/dsh-experimental-cot-translation-bundle/lib/index.js',
+  'node_modules/@deepseek-ai/dsh-experimental-terminal-bundle/package.json',
+  'node_modules/@deepseek-ai/dsh-experimental-terminal-bundle/cordis.patch.yml',
+  'node_modules/@deepseek-ai/dsh-experimental-terminal-bundle/lib/index.js',
+  'node_modules/@deepseek-ai/dsh-experimental-session-search/package.json',
+  'node_modules/@deepseek-ai/dsh-experimental-session-search/cordis.patch.yml',
+  'node_modules/@deepseek-ai/dsh-experimental-session-search/lib/index.js',
+  'node_modules/@deepseek-ai/dsh-experimental-session-titles-bundle/package.json',
+  'node_modules/@deepseek-ai/dsh-experimental-session-titles-bundle/cordis.patch.yml',
+  'node_modules/@deepseek-ai/dsh-experimental-session-titles-bundle/lib/index.js',
+  'node_modules/@deepseek-ai/dsh-experimental-ralph-bundle/package.json',
+  'node_modules/@deepseek-ai/dsh-experimental-ralph-bundle/cordis.patch.yml',
+  'node_modules/@deepseek-ai/dsh-experimental-ralph-bundle/lib/index.js',
+  'node_modules/@deepseek-ai/dsh-experimental-badge-skill-bundle/package.json',
+  'node_modules/@deepseek-ai/dsh-experimental-badge-skill-bundle/cordis.patch.yml',
+  'node_modules/@deepseek-ai/dsh-experimental-badge-skill-bundle/lib/index.js',
+  'node_modules/@deepseek-ai/dsh-experimental-client-ui-agent-team/lib/client.js',
+  'node_modules/@deepseek-ai/dsh-experimental-client-ui-cot-translation/lib/client.js',
+  // 2026-10-19 交叉审计 EXP-4/RC-4：官方 Schedule（账号隔离补丁）、徽章 skill
+  // 提供方与默认 preset 补丁也必须在产物里，否则 bundle 层/补丁静默缺失。
+  'node_modules/@deepseek-ai/dsh-schedule/lib/index.js',
+  'node_modules/@deepseek-ai/dsh-skill-badge/lib/index.js',
   // 平台内置技能（作者手册，2026-09-19 起叫 `app-builder`）**不在本清单里**，也不在包里：
   // 它的源目录已从本 vendored 包搬到服务端仓库的 `server/skills/app-builder/`，随服务端
   // 镜像发布、由员工在能力中心按需安装（`server/Dockerfile` 直接 COPY，客户端产物里
@@ -246,12 +276,10 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   //     「every @picoaide dependency is asserted」：新增自有插件依赖而不补清单即红。
   'node_modules/@picoaide/dsh-account-card/lib/index.js',
   'node_modules/@picoaide/dsh-account-card/lib/client.js',
-  'node_modules/@picoaide/dsh-account-card/lib/invariant.js',
   'node_modules/@picoaide/dsh-account-card/package.json',
   'node_modules/@picoaide/dsh-account-card/cordis.patch.yml',
   'node_modules/@picoaide/dsh-browser/lib/index.js',
   'node_modules/@picoaide/dsh-browser/lib/client.js',
-  'node_modules/@picoaide/dsh-browser/lib/invariant.js',
   // surface seam（§16.1）：`@picoaide/dsh-wasm-apps-host/lib/index.js` **值导入**
   // `BROWSER_SURFACE_SERVICE` 去取 browser 插件 provide 的 surface 注册表 —— 应用窗口
   // 就是经它注册成 `kind:'app'` 的（2026-09-21 审计 P0-1）。缺这个产物 ⇒ 打包版
@@ -266,10 +294,6 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'node_modules/@picoaide/dsh-browser/lib/guard.js',
   'node_modules/@picoaide/dsh-browser/package.json',
   'node_modules/@picoaide/dsh-browser/cordis.patch.yml',
-  'node_modules/@picoaide/dsh-cron/lib/index.js',
-  'node_modules/@picoaide/dsh-cron/lib/client.js',
-  'node_modules/@picoaide/dsh-cron/lib/invariant.js',
-  'node_modules/@picoaide/dsh-cron/package.json',
   // 侧边栏底部「更多」行（2026-09-21 并道改造）：五个面板插件的底部条目都登记进它
   // 提供的 `picoFootMenu` 服务，`lib/client.js` 就是那个注册了**唯一**底部座位占用者
   // 的客户端 bundle。它**没有** `lib/invariant.js`（本包没有伴生不变量行），所以这里
@@ -297,7 +321,6 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'node_modules/@picoaide/dsh-capability-center/cordis.patch.yml',
   'node_modules/@picoaide/dsh-wasm-apps/lib/index.js',
   'node_modules/@picoaide/dsh-wasm-apps/lib/client.js',
-  'node_modules/@picoaide/dsh-wasm-apps/lib/invariant.js',
   'node_modules/@picoaide/dsh-wasm-apps/package.json',
   'node_modules/@picoaide/dsh-wasm-apps/cordis.patch.yml',
   // 客户端专属 WASM 应用 origin（2026-09-19，契约 §2）：宿主插件（协议 handler +
@@ -317,7 +340,6 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'node_modules/@picoaide/dsh-gateway-client/lib/electron.js',
   'node_modules/@picoaide/dsh-gateway-client/package.json',
   'node_modules/@picoaide/dsh-wasm-apps-host/lib/index.js',
-  'node_modules/@picoaide/dsh-wasm-apps-host/lib/invariant.js',
   'node_modules/@picoaide/dsh-wasm-apps-host/lib/electron-adapter.js',
   // 2026-09-20 补：`lib/main.js` 还**值导入** `…/app-proof`（安装密钥仓库）。
   // 此前该子路径既没被构建、也没进本清单 ⇒ 打包版启动报 ERR_MODULE_NOT_FOUND，
@@ -359,7 +381,7 @@ export const REQUIRED_UNPACKED_RUNTIME_ENTRIES = [
   // prebuilt/、node-pty 的 spawn-helper 只存在于 darwin prebuilds),
   // 而旧实现只要求「至少一项存在」→ afterPack 门禁空转。
   'node_modules/node-pty/prebuilds/linux-x64/pty.node',
-  'node_modules/@img/sharp-linux-x64/lib/sharp-linux-x64-0.35.3.node',
+  'node_modules/@img/sharp-linux-x64/lib/sharp-linux-x64-0.35.5.node',
   'node_modules/@koromix/koffi-linux-x64/linux_x64/koffi.node',
   'node_modules/node-addon-require-builtin-linux-x64-gnu/prebuilt/linux-x64-gnu-napi-v9.node',
   'node_modules/@vscode/ripgrep-linux-x64/bin/rg',
@@ -961,7 +983,7 @@ export const NATIVE_PLATFORM_FAMILIES: readonly NativePlatformFamily[] = [
   {
     id: '@img/sharp-linux-x64',
     packageDir: 'node_modules/@img/sharp-linux-x64',
-    entries: ['node_modules/@img/sharp-linux-x64/lib/sharp-linux-x64-0.35.3.node'],
+    entries: ['node_modules/@img/sharp-linux-x64/lib/sharp-linux-x64-0.35.5.node'],
     purpose: '托盘/应用图标的位图派生走 sharp（缺它品牌图与图标派生整类失败）',
     applies: (platform, arch) => platform === 'linux' && targetIsX64(arch),
   },
@@ -1496,9 +1518,13 @@ function desktopProductRoot(): string {
  * 下调必须在同一次改动里给出理由并改这张表（低于下限时 `assertRequiredEntriesCoverWorkspaceSurface`
  * 会拒包）。
  */
+// 2026-10-18（DSH 0.2.1-rc.2）：上游删除运行时不变式服务（`@deepseek-ai/dsh-invariants`
+// 与各包的 `./invariant` 伴生子路径），本仓 8 个自研包同步删除伴生入口（覆盖表内 7 个包）⇒ 每包三条计数
+// 各减 1，生效清单总数 129 → 122。下调理由与上游升级指南
+// `docs/upgrade-guide/v0.2.0-rc.2/remove-runtime-invariants` 一致；棘轮仍贴住真实条目。
 export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE: readonly WorkspacePackageCoverageFloor[] = [
-  { package: 'dsh-account-card', flattened: 5, effective: 5, library: 3 },
-  { package: 'dsh-browser', flattened: 7, effective: 7, library: 5 },
+  { package: 'dsh-account-card', flattened: 4, effective: 4, library: 2 },
+  { package: 'dsh-browser', flattened: 6, effective: 6, library: 4 },
   // 能力中心的 host + client 双面（2026-10-13 从 enterprise 搬出）：5 条扁平条目
   // （`lib/index.js` / `lib/client.js` / `lib/skill-telemetry.js` / `package.json` /
   // `cordis.patch.yml`），生效清单同样 5 条（锚点表里的 package.json + cordis.patch.yml
@@ -1506,24 +1532,23 @@ export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE: readonly WorkspacePackageCover
   { package: 'dsh-capability-center', flattened: 5, effective: 5, library: 3 },
   // connectors / enterprise 的条目**全部**在 `REQUIRED_ASAR_EXPORTS`（specifier + 落点）里，
   // 扁平清单里一条都没有 ⇒ `flattened: 0` 是有意的，不是漏登记。
-  { package: 'dsh-connectors', flattened: 0, effective: 7, library: 5 },
-  // cron 的 `cordis.patch.yml` 只有 profile 锚点表覆盖（扁平清单 4 条 ⇒ 生效 5 条）。
-  { package: 'dsh-cron', flattened: 4, effective: 5, library: 3 },
-  // enterprise 在 `REQUIRED_ASAR_EXPORTS` 里有 15 条 + 锚点表的 `cordis.patch.yml`。
+  { package: 'dsh-connectors', flattened: 0, effective: 6, library: 4 },
+  // enterprise 在 `REQUIRED_ASAR_EXPORTS` 里有 16 条 + 锚点表的 `cordis.patch.yml`。
   // 14 条（原 13 条 + R16B-01 新增的 `session-identity`）：account-card 的余额快照要盖
   // 会话身份章，而身份口径的唯一实现在 enterprise ⇒ 多一条真实的跨包 specifier。
   // 15 条（2026-09-28，DSH 0.1.7-rc.2 网关鉴权迁移）：新增 `gateway-llm`（自研 provider 行）。
-  // 2026-10-13（P0-b）：`skill-telemetry` 这一条随技能面搬到能力中心包 ⇒ effective
-  // 16 → 15、`lib/` 产物 14 → 13。
-  { package: 'dsh-enterprise', flattened: 0, effective: 15, library: 13 },
+  // 2026-10-13（P0-b）：`skill-telemetry` 这一条随技能面搬到能力中心包 ⇒ effective −1；
+  // 2026-10-19（DSH 0.2.1-rc.2）：上游删除运行时不变式（`./invariant` 伴生入口）⇒
+  // 再 −1 ⇒ 16 → 14、`lib/` 产物 14 → 12。
+  { package: 'dsh-enterprise', flattened: 0, effective: 14, library: 12 },
   { package: 'dsh-foot-menu', flattened: 4, effective: 4, library: 2 },
   // 2026-10-13（P0-b）：网关客户端叶子包（`server-connector` 的实现落点）。
   // 五条扁平条目全在生效清单里，其中 `lib/` 产物 4 条。
   { package: 'dsh-gateway-client', flattened: 5, effective: 5, library: 4 },
   { package: 'dsh-host-home', flattened: 2, effective: 2, library: 1 },
   { package: 'dsh-host-locale', flattened: 4, effective: 4, library: 3 },
-  { package: 'dsh-wasm-apps', flattened: 5, effective: 5, library: 3 },
-  { package: 'dsh-wasm-apps-host', flattened: 6, effective: 6, library: 4 },
+  { package: 'dsh-wasm-apps', flattened: 4, effective: 4, library: 2 },
+  { package: 'dsh-wasm-apps-host', flattened: 5, effective: 5, library: 3 },
 ]
 
 /**
@@ -1543,9 +1568,13 @@ export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE: readonly WorkspacePackageCover
  *   · 应用宿主 +0（`app-routes.ts` 刻意**不**做成独立入口，它由 `lib/index.js` 的
  *     静态 import 带出来 —— 少一个只有本包可见的入口，就少一处"声明了却没构建"的
  *     风险面；本包 2026-09-20 正是在那一类上挂过）。
- * 实测：`effectivePackagedRuntimeEntries().length === 138`。
+ * 2026-10-19（#183–#185，DSH 0.2.1-rc.2）：129 → 146。9 个默认实验 bundle 各 3 条 +
+ * schedule/badge/preset 产物（交叉审计 EXP-4/RC-4 要求这些链进产物清单）；同一批
+ * 上游删除运行时不变式、退役自研 cron ⇒ 两处各自 −1/-12。
+ * 2026-10-19 合并 P0 集成（#181）：两条线的增量互不重叠 ⇒ 138 + (146 − 129) = 155。
+ * 实测：`effectivePackagedRuntimeEntries().length === 155`。
  */
-export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR = 138
+export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR = 155
 // 111 → 114（2026-09-23 合并 origin/master 的 #138）：那条线给必需清单加了
 // `@deepseek-ai/dsh-plugin-manager` 的 3 个 `lib/**` 条目，生效清单随之增长 3 条。
 // 棘轮语义是"贴住下限、只允许上调" ⇒ 合并后同步上调（删条目仍会打破等式）。
@@ -2054,7 +2083,6 @@ export const REQUIRED_ASAR_EXPORTS: readonly RequiredExport[] = [
   // 同批补漏的三个兄弟导出:它们都已在 `exports` 里发布、lib/ 也有产物,只是此前没进清单
   // (清单是"允许失败"的唯一真源,少一条就少一道门)。
   { specifier: '@picoaide/dsh-enterprise/channel-sync', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/channel-sync.js' },
-  { specifier: '@picoaide/dsh-enterprise/invariant', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/invariant.js' },
   // 2026-09-23（第三轮审计的反向 oracle）：下面 7 条都是**产物里真实存在、且被真实
   // specifier 引用**的入口，但此前不在任何一张表里 —— 也就是"删掉它们没有任何判据会红"。
   //   `@picoaide/dsh-enterprise`                 ← profile 行 `picoaide-enterprise` 的入口
@@ -2080,7 +2108,6 @@ export const REQUIRED_ASAR_EXPORTS: readonly RequiredExport[] = [
   { specifier: '@picoaide/dsh-enterprise/session-identity', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/session-identity.js' },
   { specifier: '@picoaide/dsh-enterprise/package.json', archivePath: 'node_modules/@picoaide/dsh-enterprise/package.json' },
   { specifier: '@picoaide/dsh-connectors', archivePath: 'node_modules/@picoaide/dsh-connectors/lib/index.js' },
-  { specifier: '@picoaide/dsh-connectors/invariant', archivePath: 'node_modules/@picoaide/dsh-connectors/lib/invariant.js' },
   { specifier: '@picoaide/dsh-connectors/store', archivePath: 'node_modules/@picoaide/dsh-connectors/lib/store.js' },
   { specifier: '@picoaide/dsh-connectors/user-scope', archivePath: 'node_modules/@picoaide/dsh-connectors/lib/user-scope.js' },
   { specifier: '@picoaide/dsh-connectors/client', archivePath: 'node_modules/@picoaide/dsh-connectors/lib/client.js' },
@@ -2120,8 +2147,6 @@ export const REQUIRED_PROFILE_PATCH_ANCHORS: readonly string[] = [
   'node_modules/@picoaide/dsh-browser/cordis.patch.yml',
   'node_modules/@picoaide/dsh-wasm-apps-host/package.json',
   'node_modules/@picoaide/dsh-wasm-apps-host/cordis.patch.yml',
-  'node_modules/@picoaide/dsh-cron/package.json',
-  'node_modules/@picoaide/dsh-cron/cordis.patch.yml',
   // 2026-10-13：能力中心的客户端面（`@picoaide/dsh-capability-center`）同样是
   // profile 的一层 bundle ⇒ 它的 `package.json` + `cordis.patch.yml` 必须随包
   // （缺任一份，`prepareDesktopProfile()` 组装期解析即抛错、应用根本起不来）。

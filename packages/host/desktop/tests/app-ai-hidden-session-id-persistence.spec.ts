@@ -44,7 +44,7 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import AgentDefaultModelConfig from '@deepseek-ai/dsh-agent-default-model'
-import SessionPersistenceJsonl from '@deepseek-ai/dsh-session-persistence-jsonl'
+import * as SessionPersistenceJsonl from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createAppAiRunner } from '../src/app-ai-runner.ts'
 // 直接引**源文件**（不是 `@picoaide/dsh-wasm-apps-host/ai-chat` 的构建产物）：本用例判的就是

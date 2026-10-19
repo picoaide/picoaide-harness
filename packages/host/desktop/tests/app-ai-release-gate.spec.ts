@@ -50,7 +50,7 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import AgentDefaultModelConfig from '@deepseek-ai/dsh-agent-default-model'
-import SessionPersistenceJsonl from '@deepseek-ai/dsh-session-persistence-jsonl'
+import * as SessionPersistenceJsonl from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { afterEach, describe, expect, it } from 'vitest'
 // 判据打的就是这次改动的源码（走 lib 会拿旧产物测出假绿，本仓登记过的"本地绿、CI 红"形态）。
 import {
@@ -201,9 +201,9 @@ function instrument(ctx: Context, widenedSessionId: string | undefined, widenMs 
         const widenedCall = calls === widenCallIndex
         await realWhenIdle()
         if (!widenedCall) return
-        await sleep(widenMs)
-        // 自校准：加宽窗口真的开着吗（新一轮的句柄此刻已经发布）？
-        ledger.wipeWindowOpen = ledger.handles.length >= 2
+        // 自校准：把窗口**开到新一轮句柄真的发布**为止（不靠固定 sleep —— CI 负载下
+        // 120ms 可能早于调度，导致"窗口没打开"的假红；判据强度不变）。
+        ledger.wipeWindowOpen = await waitFor(() => ledger.handles.length >= 2, widenMs + 4000)
       }
     }
     const realDispose = handle.dispose.bind(handle)

@@ -88,7 +88,7 @@ When all three hold at once, the only workable shape is "local execution + serve
 
 ### Pinned upstream + plugin composition
 
-Upstream DeepSeek Harness runs at a **fixed version** (currently pinned at `dsh-v0.2.0-rc.2`; `upstream.json` at the repository root is the source of truth). The repository keeps only a small set of **patches with regression tests** (`patches/`, each with a matching test) and does not modify upstream wholesale. The desktop shell is itself a **legitimate DSH plugin**: it neither invents a second renderer IPC plugin system nor exposes Electron APIs to the page; it inserts itself as one row in the upstream Cordis plugin tree.
+Upstream DeepSeek Harness runs at a **fixed version** (currently pinned at `dsh-v0.2.1-rc.2`; `upstream.json` at the repository root is the source of truth). The repository keeps only a small set of **patches with regression tests** (`patches/`, each with a matching test) and does not modify upstream wholesale. The desktop shell is itself a **legitimate DSH plugin**: it neither invents a second renderer IPC plugin system nor exposes Electron APIs to the page; it inserts itself as one row in the upstream Cordis plugin tree.
 
 So "what we add" and "what upstream provides" live on the same assembly surface and are expressed the same way:
 
@@ -96,7 +96,7 @@ So "what we add" and "what upstream provides" live on the same assembly surface 
 |---|---|---|
 | **Upstream rows (unchanged)** | agent, session, tools, settings, webserver, sandbox, llm adapters | Pinned version, upstream semantics |
 | **Rows we add** | `desktop-shell`, `desktop-diagnostics`, `desktop-updates`, `desktop-loop-notify`, `desktop-asar-fs`, `desktop-asar-guidance` | Inserted by the desktop layer's composition patch |
-| **Bundle layers we add** | Ten owned packages: `@picoaide/dsh-enterprise`, `-capability-center`, `-account-card`, `-wasm-apps`, `-foot-menu`, `-wasm-apps-host`, `-connectors`, `-browser`, `-cron` and `dsh-memory-evolve`; plus upstream's experimental voice-input bundle | Each owned package carries one composition patch layer; together with the desktop package's own `cordis.patch.yml` (carried as the first entry of `@picoaide/dsh-enterprise`'s bundle list) that is eleven layers, entering the profile as bundle layers in a fixed order |
+| **Bundle layers we add** | Nine owned packages: `@picoaide/dsh-enterprise`, `-capability-center`, `-account-card`, `-wasm-apps`, `-foot-menu`, `-wasm-apps-host`, `-connectors`, `-browser` and `dsh-memory-evolve`; plus upstream experimental bundles such as voice input | Each owned package carries one composition patch layer; together with the desktop package's own `cordis.patch.yml` (carried as the first entry of `@picoaide/dsh-enterprise`'s bundle list) that is ten layers, entering the profile as bundle layers in a fixed order |
 | **Upstream rows we disable** | see the next section | Each has a concrete reason; these are not "we don't need it, so off" |
 
 ### Upstream rows we explicitly disable
@@ -200,7 +200,7 @@ Failure always **keeps the current version**: no install, no downgrade, no switc
 | Item | Fact |
 |---|---|
 | Database | PostgreSQL only. Containerized delivery embeds PG 18; the server binary also accepts an external instance (`-pg-dsn` is a required flag) |
-| Migrations | `server/internal/serverstore/migrations-pg/`, file names shaped `NNNN_<description>.sql` (four-digit number + underscore), applied automatically at server start; the range is `0001–0084` (some numbers were dropped historically, hence contiguous gaps). **Migrations are one-way**: rolling back the image cannot roll the database back to the old structure, so back up before upgrading |
+| Migrations | `server/internal/serverstore/migrations-pg/`, file names shaped `NNNN_<description>.sql` (four-digit number + underscore), applied automatically at server start; the range is `0001–0085` (some numbers were dropped historically, hence contiguous gaps). **Migrations are one-way**: rolling back the image cannot roll the database back to the old structure, so back up before upgrading |
 | Usage detail | Natively **partitioned by month** on `created_at` (`usage_YYYYMM`), retention configurable in months (default 6), expired partitions dropped with `DROP PARTITION`; deleting detail does not affect the ledgers |
 | Usage ledgers | `usage_daily` (partitioned by year) and `usage_monthly` are **kept forever** and rebuilt idempotently from the detail, so expired detail never loses historical statistics |
 | Audit | `audit_logs` carries a **hash chain**: each row's `hash = sha256(prev_hash \| username \| action \| detail \| created_at)` and `prev_hash` points at the previous row; writes are serialized with an advisory lock so concurrent inserts cannot read the same `prev_hash` and fork the chain. Retention is configurable, and pruning keeps the newest row of a deleted batch as an anchor so the chain still proves itself |

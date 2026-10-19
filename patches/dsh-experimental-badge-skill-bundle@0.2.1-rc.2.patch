@@ -1,0 +1,24 @@
+diff --git a/locale/zh.json b/locale/zh.json
+--- a/locale/zh.json
++++ b/locale/zh.json
+@@ -1,6 +1,6 @@
+ {
+   "meta": {
+-    "title": "DSH 徽章技能",
+-    "description": "让 Agent 为文档、PR 等产出添加「powered by dsh」徽章。"
++    "title": "徽章技能",
++    "description": "让 Agent 为文档、PR 等产出添加当前产品/OEM 名徽章。"
+   }
+ }
+diff --git a/locale/en.json b/locale/en.json
+--- a/locale/en.json
++++ b/locale/en.json
+@@ -1,6 +1,6 @@
+ {
+   "meta": {
+-    "title": "DSH badge skill",
+-    "description": "Let agents add a “powered by dsh” badge to documents, pull requests, and other outputs."
++    "title": "Badge skill",
++    "description": "Let agents add the current product/OEM badge to documents, pull requests, and other outputs."
+   }
+ }

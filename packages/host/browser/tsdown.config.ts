@@ -8,7 +8,6 @@ export default defineConfig([
     name: PACKAGE_NAME,
     entry: {
       index: 'src/index.ts',
-      invariant: 'src/invariant.ts',
       // surface seam（§16.1）：`@picoaide/dsh-wasm-apps-host` 反向依赖它注册/取得
       // 应用窗口 surface —— 单独一个入口，避免整个 runtime 被拖进那个包。
       surface: 'src/surface.ts',

@@ -1067,6 +1067,9 @@ type modelPriceInputs struct {
 	cachePer1M  float64
 	offpeak     float64
 	peakWindows []PeakWindow
+	// searchPer1K 是 web_search 按次单价（元/千次，0085）；0 = 不计费。
+	// 它是**独立价目**：不参与峰谷折扣，加在 costOfAt 之后。
+	searchPer1K float64
 }
 
 // loadModelPriceInputs 在**一个**已钉 search_path 的只读事务里读齐全部计价输入
@@ -1118,6 +1121,13 @@ func loadModelPriceInputsQ(q rowQuerier, scope *sql.DB, providerID int64, name s
 	out.inputPer1M, out.outputPer1M, out.offpeak = modelPricesForProviderQ(q, scope, providerID, name)
 	out.cachePer1M = modelCachePriceForProviderQ(q, scope, providerID, name)
 	out.peakWindows = loadPeakWindowsQ(q, scope)
+	// 0085：Search 按次单价与价目同属"计价输入"，必须取自同一个已钉句柄。
+	// 读取侧对非法/缺失值一律按 0 处理（fail-safe：不凭空多收）；写入侧 400。
+	if raw, ok, err := getSettingQ(q, scope, SearchPriceSetting); err == nil && ok {
+		if v, valid := ParseSearchPricePer1K(raw); valid {
+			out.searchPer1K = v
+		}
+	}
 	return out
 }
 

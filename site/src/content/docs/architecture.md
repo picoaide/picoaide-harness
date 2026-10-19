@@ -23,7 +23,7 @@ PicoAide Harness 是一个三层系统：**桌面客户端 / 本地 Harness 服�
 
 | 层 | 位置 | 进程模型 | 职责 | 明确不负责 |
 |---|---|---|---|---|
-| **桌面客户端** | 员工机器 | Electron 多进程（main / renderer，另有独立的浏览器窗口与应用窗口） | 原生窗口与托盘；对话、能力中心、连接器、定时任务、内置浏览器、语音输入、记忆、应用中心；本地更新检查与安装；权限审批界面 | 不持有上游模型密钥；不决定模型可用性与额度；不决定谁能看到哪份内容 |
+| **桌面客户端** | 员工机器 | Electron 多进程（main / renderer，另有独立的浏览器窗口与应用窗口） | 原生窗口与托盘；对话、能力中心、连接器、自动化任务、内置浏览器、语音输入、记忆、应用中心；本地更新检查与安装；权限审批界面 | 不持有上游模型密钥；不决定模型可用性与额度；不决定谁能看到哪份内容 |
 | **本地 Harness 服务** | 员工机器（`127.0.0.1`，默认随机端口，可固定） | 运行在 Electron main 进程内的上游 DSH 宿主（Cordis 插件树），对外只提供 loopback HTTP/WebSocket | 跑**固定版本**的上游 DSH；承载会话与上下文、工作区与文件、子进程与内核沙箱、工具执行与审批 | 不直连模型供应商（走服务端网关）；不上报会话正文 |
 | **企业服务端** | 客户内网一台机器 | 单个 Go 二进制（gin）+ PostgreSQL，容器化交付（`caddy` + `server` + `postgres` 三容器） | 认证与 RBAC、模型网关与计量计费、能力中心与审批、连接器目录、应用中心、审计、客户端分发、门户页与管理后台 | 不接触员工本地文件；不执行员工机器上的命令；不代理会话正文 |
 
@@ -88,7 +88,7 @@ PicoAide Harness 是一个三层系统：**桌面客户端 / 本地 Harness 服�
 
 ### 固定上游 + 插件组合
 
-上游 DeepSeek Harness 以**固定版本**运行（当前 pin `dsh-v0.2.0-rc.2`，真源为仓库根 `upstream.json`），仓库对上游只保留少量**带判据的补丁**（`patches/`，每条都有对应的回归用例），不做整体魔改。桌面壳本身就是一个**合法的 DSH 插件**：它不另造一套 renderer IPC 插件系统，也不把 Electron API 暴露给页面，而是把自己作为一行插入上游的 Cordis 插件树。
+上游 DeepSeek Harness 以**固定版本**运行（当前 pin `dsh-v0.2.1-rc.2`，真源为仓库根 `upstream.json`），仓库对上游只保留少量**带判据的补丁**（`patches/`，每条都有对应的回归用例），不做整体魔改。桌面壳本身就是一个**合法的 DSH 插件**：它不另造一套 renderer IPC 插件系统，也不把 Electron API 暴露给页面，而是把自己作为一行插入上游的 Cordis 插件树。
 
 因此「我们加的东西」与「上游的东西」在同一个装配面上，用同一种机制表达：
 
@@ -96,7 +96,7 @@ PicoAide Harness 是一个三层系统：**桌面客户端 / 本地 Harness 服�
 |---|---|---|
 | **上游行（原样）** | agent、session、tools、settings、webserver、sandbox、llm 适配器 | 固定版本、按上游语义运行 |
 | **我们新增的行** | `desktop-shell`、`desktop-diagnostics`、`desktop-updates`、`desktop-loop-notify`、`desktop-asar-fs`、`desktop-asar-guidance` | 由桌面层的组装补丁插入 |
-| **我们新增的 bundle 层** | 十个自有包：`@picoaide/dsh-enterprise`、`-capability-center`、`-account-card`、`-wasm-apps`、`-foot-menu`、`-wasm-apps-host`、`-connectors`、`-browser`、`-cron` 与 `dsh-memory-evolve`；另有上游的实验性语音输入 bundle | 自有包各带一层组装补丁，加上桌面包自身的 `cordis.patch.yml`（由 `@picoaide/dsh-enterprise` 的 bundle 列表首项携带）合计十一层，作为 profile 的 bundle 层进入组合，顺序固定 |
+| **我们新增的 bundle 层** | 九个自有包：`@picoaide/dsh-enterprise`、`-capability-center`、`-account-card`、`-wasm-apps`、`-foot-menu`、`-wasm-apps-host`、`-connectors`、`-browser` 与 `dsh-memory-evolve`；另有上游的实验性语音输入等 bundle | 自有包各带一层组装补丁，加上桌面包自身的 `cordis.patch.yml`（由 `@picoaide/dsh-enterprise` 的 bundle 列表首项携带）合计十层，作为 profile 的 bundle 层进入组合，顺序固定 |
 | **显式禁用的上游行** | 见下一节 | 关闭都有具体理由，不是「用不到就关」 |
 
 ### 被显式禁用的上游行
@@ -119,7 +119,7 @@ PicoAide Harness 是一个三层系统：**桌面客户端 / 本地 Harness 服�
 
 此外 Windows 上还有三处**实现替换**（不是简单关闭）：目录选择器改为桌面自有的浏览式实现；`pwsh-sandbox` 与 `agent-preset-registry` 换成桌面自有的 Windows 实现（前者因为平台不提供所需 PTY）。
 
-连接器、内置浏览器、定时任务、应用宿主与记忆这五个自有 bundle 层**没有禁用任何上游行**——它们只新增行与槽位。
+连接器、内置浏览器、应用宿主与记忆这四个自有 bundle 层**没有禁用任何上游行**——它们只新增行与槽位（自动化任务已改用官方 Schedule，不再有自有 cron 层）。
 
 ### profile 固定为 `desktop` 的含义
 
@@ -153,7 +153,7 @@ PicoAide Harness 是一个三层系统：**桌面客户端 / 本地 Harness 服�
 - 审批策略为「自动拒绝」时，需要审批的动作会被**拒绝**而不是放行——方向是 fail-closed；
 - 审批记录与会话日志一起留在本机，服务端看不到。
 
-**「AI 只提议，人批准」这条设计**体现在三处，缺一不可：工具调用要人批准；定时任务由人查看与管理（模型可以创建作业，但作业的启停与删除都在界面上可见可控）；应用发布要人确认，并按管理端开关决定是否再经管理员审批。它不是一句产品口号，而是由权限预设、审批策略与审批界面共同实现的机制约束。
+**「AI 只提议，人批准」这条设计**体现在三处，缺一不可：工具调用要人批准；自动化任务由人查看与管理（模型可以创建作业，但作业的启停与删除都在界面上可见可控）；应用发布要人确认，并按管理端开关决定是否再经管理员审批。它不是一句产品口号，而是由权限预设、审批策略与审批界面共同实现的机制约束。
 
 ## 模型链路
 
@@ -200,7 +200,7 @@ PicoAide Harness 是一个三层系统：**桌面客户端 / 本地 Harness 服�
 | 项目 | 事实 |
 |---|---|
 | 数据库 | 只支持 PostgreSQL。容器化交付内置 PG 18；服务端二进制也接受外部实例（`-pg-dsn` 为必填参数） |
-| 迁移 | `server/internal/serverstore/migrations-pg/`，文件名形状 `NNNN_<描述>.sql`（四位编号 + 下划线），服务端启动时自动执行；编号区间 `0001–0084`（历史上删减过部分编号，因此有连续空档）。**迁移是单向的**：回滚镜像不能把库降回旧结构，升级前必须先备份 |
+| 迁移 | `server/internal/serverstore/migrations-pg/`，文件名形状 `NNNN_<描述>.sql`（四位编号 + 下划线），服务端启动时自动执行；编号区间 `0001–0085`（历史上删减过部分编号，因此有连续空档）。**迁移是单向的**：回滚镜像不能把库降回旧结构，升级前必须先备份 |
 | usage 明细 | 按 `created_at` 做**原生月分区**（`usage_YYYYMM`），保留 N 个月可配（默认 6），过期用 `DROP PARTITION` 秒删；删除明细不影响账本 |
 | usage 账本 | `usage_daily`（按年分区）/ `usage_monthly` **永久保留**，由账本任务从明细幂等重算，因此历史统计不会因为明细过期而丢 |
 | 审计 | `audit_logs` 带**哈希链**：每行的 `hash = sha256(prev_hash \| username \| action \| detail \| created_at)`，`prev_hash` 指向前一行；写入用 advisory lock 串行化，避免并发插入读到同一个 `prev_hash` 形成分叉。保留策略可配，裁剪时保留被删批次的最新一条作为锚，链仍可自证 |

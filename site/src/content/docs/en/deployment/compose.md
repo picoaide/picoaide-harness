@@ -257,7 +257,7 @@ docker compose up -d
 docker compose ps        # expect picoaide-caddy / picoaide-server / picoaide-postgres all Up
 ```
 
-The first start runs every database migration (currently `0001–0084`) and creates the usage
+The first start runs every database migration (currently `0001–0085`) and creates the usage
 partitions; it **can take 1–2 minutes**. `up -d` returning does not mean the service is ready — the
 health check is mandatory:
 

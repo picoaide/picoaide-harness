@@ -12,7 +12,7 @@ import logoDark from '../../../brands/official/logo-dark.svg'
 import mainShot from '../assets/screenshots/desktop-main.png'
 import capabilityShot from '../assets/screenshots/desktop-capability-market.png'
 import connectorsShot from '../assets/screenshots/desktop-connectors.png'
-import cronShot from '../assets/screenshots/desktop-cron.png'
+import scheduleShot from '../assets/screenshots/desktop-schedule.png'
 import settingsShot from '../assets/screenshots/desktop-settings.png'
 import adminUsersShot from '../assets/screenshots/admin-users.png'
 import adminCapabilityShot from '../assets/screenshots/admin-capabilities.png'
@@ -109,8 +109,8 @@ const capabilities = [
   },
   {
     icon: 'clock',
-    title: '定时任务',
-    body: 'cron + 提示词 + 工作区 + 智能体预设，到点自动执行；每次执行的会话、结果与错误随时可查。',
+    title: '自动化任务',
+    body: '官方 Schedule 的单次/间隔/每日/每周/cron 提醒，到点投递回原会话；按账号隔离，投递记录可查。',
   },
   {
     icon: 'browser',
@@ -639,8 +639,8 @@ curl -k https://<你的域名>/healthz`}</code></pre>
           <figcaption><strong>连接器中心</strong>标准 MCP 配置接入，OAuth 授权与续期</figcaption>
         </figure>
         <figure>
-          <Image src={cronShot} alt="定时任务" width={720} height={450} loading="lazy" format="webp" quality={78} />
-          <figcaption><strong>定时任务</strong>cron + 提示词 + 工作区 + 权限，执行详情可查</figcaption>
+          <Image src={scheduleShot} alt="自动化任务" width={720} height={450} loading="lazy" format="webp" quality={78} />
+          <figcaption><strong>自动化任务</strong>官方 Schedule 提醒，投递回原会话，按账号隔离</figcaption>
         </figure>
         <figure>
           <Image src={settingsShot} alt="设置" width={720} height={450} loading="lazy" format="webp" quality={78} />

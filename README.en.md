@@ -35,9 +35,9 @@ PicoAide Harness packages DeepSeek Harness local agents, the Host service, its p
 | --- | --- | --- |
 | <img src="assets/screenshots/desktop-main.png" alt="Desktop main window" width="100%"> | <img src="assets/screenshots/desktop-capability-market.png" alt="Capability Hub" width="100%"> | <img src="assets/screenshots/desktop-connectors.png" alt="Connector hub" width="100%"> |
 
-| Scheduled tasks | Settings |
+| Automation tasks | Settings |
 | --- | --- |
-| <img src="assets/screenshots/desktop-cron.png" alt="Scheduled tasks" width="100%"> | <img src="assets/screenshots/desktop-settings.png" alt="Settings" width="100%"> |
+| <img src="assets/screenshots/desktop-schedule.png" alt="Automation tasks (upstream Schedule)" width="100%"> | <img src="assets/screenshots/desktop-settings.png" alt="Settings" width="100%"> |
 
 ### Admin console
 
@@ -89,14 +89,14 @@ Client upgrades and first-time installs can also fetch packages straight from **
 ### Enterprise-grade, all in one
 
 - **Desktop + service + console**: the client handles interaction, the local service runs agents, and the admin console manages accounts, quotas, and audit;
-- **Multi-user isolation**: connector credentials, browser sessions, and scheduled tasks are isolated per account; logout tears down every session;
+- **Multi-user isolation**: connector credentials, browser sessions, and automation tasks are isolated per account; logout tears down every session;
 - **Usage and quotas**: per-user, per-model billing, limits, and exemptions with peak-hour tiered pricing.
 
 ### Production-ready productivity tools
 
 - **Capability Hub**: Mine/Market tabs with skill & agent type filters, source (Market/Organization/Local) and quality (Official/Featured) badges, multi-version merge with history, and one-click install/update/uninstall;
 - **Connector hub**: built-in SalesEasy (NeoCRM) and other MCP connectors with OAuth + PKCE, locally encrypted credential storage, and dynamic MCP registration;
-- **Scheduled tasks**: cron-triggered runs with a chosen agent, prompt, workspace, and permissions; execution detail (session, result, error) is always inspectable, with session jump; driven by the Host scheduler;
+- **Automation tasks**: upstream Schedule reminders (once / interval / daily / weekly / cron) delivered back to the original session; account-scoped, with delivery history kept by the Host;
 - **Embedded browser**: the agent can take over the browser to act, with multi-tab, address bar, permission approval, and download control;
 - **Voice input**: the composer microphone turns speech into draft text; recognition runs on the machine (audio never leaves it, works offline) with the model **shipped inside the client** (works right after install, zero download; the weights are about 230MiB and the installer grows by roughly +140–250 MiB depending on how well each platform's package format compresses them); only a channel package that explicitly sets `desktop.speech_bundle_model: false` falls back to downloading it on first use;
 - **Five-track memory**: user profile, global facts, project key memory, project logs, and daily logs, isolated per directory and git branch, with confirmation-first writes.

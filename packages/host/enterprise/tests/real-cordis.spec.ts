@@ -62,16 +62,6 @@ const CREATOR_SKILLS = [
 const desktopRequire = createRequire(createRequire(import.meta.url).resolve('dsh-plugin-desktop/package.json'))
 /** 桌面包根：`boot-desktop-profile.mjs` 的产物前置在这里。 */
 const DESKTOP_PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'desktop')
-/**
- * 预设挂载记录的读取面。**必须经桌面包的解析锚点**取 ——
- * `@deepseek-ai/dsh-agent-preset-registry` 是桌面包的依赖，企业包自己解析不到它
- * （`createRequire(import.meta.url).resolve` 会 MODULE_NOT_FOUND）。`require(esm)`
- * 与 Loader 自己的 `import()` 落在**同一个** ESM 模块实例上，所以模块级的挂载集合
- * 互通（挂载记录读不到时下面的断言会直接点名，不会静默变成"没有挂载"）。
- */
-const { livePresetMounts } = desktopRequire('@deepseek-ai/dsh-agent-preset-registry') as {
-  livePresetMounts: (within?: unknown) => Array<{ presetId: string, key?: unknown }>
-}
 
 /** 每个用例自己的临时数据根。 */
 const homes: string[] = []
@@ -142,9 +132,11 @@ describe('real 创造模式 preset on 0.1.7', () => {
       //    所以这里成对断言：全局层**看不到**它们（说明它们确实由这条预设贡献，而不是
       //    别的行顺带装的），preset 作用域里**看得到**（说明组合真的把它们接上了）。
       const globalNames = (await ctx.skills.list()).map(skill => skill.name)
-      const mount = livePresetMounts(ctx.fiber).find(candidate => candidate.presetId === 'cordis')
-      expect(mount, '创造模式的挂载记录不在 livePresetMounts 里').toBeDefined()
-      const scoped = await ctx.skills.list({ scope: mount?.key })
+      // 0.2.1 删除了 `livePresetMounts`；registry 的 `acquireScope` 给出同一条
+      // 保留 revision 的 scope key（读完即释放）。
+      const lease = await ctx.agentPresets.acquireScope('cordis')
+      const scoped = await ctx.skills.list({ scope: lease.key })
+      await lease[Symbol.asyncDispose]()
       const scopedNames = scoped.map(skill => skill.name)
       for (const skill of CREATOR_SKILLS) {
         expect(globalNames, `${skill} 不该出现在全局技能层`).not.toContain(skill)
@@ -153,7 +145,13 @@ describe('real 创造模式 preset on 0.1.7', () => {
       // 而且它们来自**那个包**（真路径），不是任何"预设目录"。
       const shipped = scoped.find(skill => skill.name === 'editing-cordis-compositions')
       if (shipped?.path !== undefined) {
-        expect(shipped.path.startsWith(join(skillsDir, 'editing-cordis-compositions'))).toBe(true)
+        // 0.2.1 起 `dsh-agent-preset` 可能被嵌套安装在 `@deepseek-ai/dsh` 之下，
+        // 与 `desktopRequire.resolve()` 命中的提升副本不是同一物理路径 —— 判据只要求
+        // 来源仍是该包的 `skills/` 目录（不是任何预设目录），不绑定提升位置。
+        expect(
+          shipped.path.replaceAll('\\', '/'),
+          `path=${shipped.path} skillsDir=${skillsDir}`,
+        ).toContain('/@deepseek-ai/dsh-agent-preset/skills/editing-cordis-compositions/')
       } else {
         expect(shipped?.resourceBase, '技能既没有 path 也没有 resourceBase，来源不可判').toBeDefined()
       }

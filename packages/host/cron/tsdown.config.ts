@@ -16,7 +16,6 @@ export default defineConfig([
       'host-executor': 'src/host-executor.ts',
       'host-routes': 'src/host-routes.ts',
       service: 'src/service.ts',
-      invariant: 'src/invariant.ts',
     },
     outDir: 'lib',
     format: 'esm',

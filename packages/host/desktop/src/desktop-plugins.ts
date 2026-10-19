@@ -28,6 +28,7 @@ const PACKAGE_NAME_PATTERN = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$
 const IMMUTABLE_BUNDLES = new Set([
   ...(PROFILE_TEMPLATES.web?.bundles ?? []),
   '@deepseek-ai/dsh-desktop-app',
+  '@deepseek-ai/dsh-experimental-agent-team-profile',
   'dsh-plugin-desktop',
 ])
 

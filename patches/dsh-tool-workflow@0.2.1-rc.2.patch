@@ -1,0 +1,12 @@
+diff --git a/lib/index.js b/lib/index.js
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -265,7 +265,7 @@
+ 	ctx.systemPrompt.section({
+ 		name: `tool:${toolName}`,
+ 		order: ctx.systemPrompt.getSectionOrder("TOOL_WORKFLOW"),
+-		text: `Use the ${toolName} tool ONLY when the user explicitly asks for a workflow or for large multi-agent orchestration: you write a JavaScript script (the tool description documents the exact format) that fans work out across many subagents with phases and structured results. For one or two delegations, prefer plain subagent calls.`
++		text: `Use the ${toolName} tool ONLY when the user explicitly asks for a workflow or for large multi-agent orchestration: you write a JavaScript script (the tool description documents the exact format) that fans work out across many subagents with phases and structured results. For one or two delegations, prefer the Agent Teams spawn_teammate tool.`
+ 	});
+ 	ctx.tools.register(defineTool({
+ 		name: toolName,

@@ -1,0 +1,208 @@
+diff --git a/lib/index.js b/lib/index.js
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -1,10 +1,8 @@
+-import { readFile } from "node:fs/promises";
+ import { fileURLToPath } from "node:url";
+ import { BUNDLED_SKILL_RANK } from "@deepseek-ai/dsh-skill";
+ //#region lib/types/index.js
+ /**
+-* Bundled `dsh-badge` skill provider.
+-*
++* Bundled badge skill provider, branded with the product (OEM) name.
+ * @module @deepseek-ai/dsh-skill-badge
+ */
+ const PROVIDER_NAME = "dsh-badge";
+@@ -13,41 +11,99 @@
+ 	kind: "directory",
+ 	path: fileURLToPath(new URL("../assets/", import.meta.url))
+ };
+-const CANDIDATE = {
+-	name: "dsh-badge",
+-	description: "Add the official “powered by dsh” badge to documents, pull requests, merge requests, and other content produced with DeepSeek Harness. Use whenever creating a pull request or merge request. Also use when the user asks for a dsh badge, powered-by-dsh attribution, or a reusable dsh badge asset or snippet.",
+-	invocation: {
+-		modelInvocable: true,
+-		userInvocable: true
+-	},
+-	provider: PROVIDER_NAME,
+-	source: "bundled",
+-	resourceBase: RESOURCE_BASE,
+-	rank: BUNDLED_SKILL_RANK,
+-	locator: SKILL_BODY_URL
+-};
+-const provider = {
+-	name: PROVIDER_NAME,
+-	list: () => Promise.resolve([CANDIDATE]),
+-	async get(_candidate) {
+-		return {
+-			name: CANDIDATE.name,
+-			description: CANDIDATE.description,
+-			invocation: CANDIDATE.invocation,
+-			provider: CANDIDATE.provider,
+-			source: CANDIDATE.source,
+-			resourceBase: RESOURCE_BASE,
+-			content: await readFile(SKILL_BODY_URL, "utf8")
+-		};
+-	}
+-};
++const FALLBACK_PRODUCT_NAME = "PicoAide Harness";
++/** Resolve the product/OEM name composed into the running desktop profile. */
++function productName(ctx) {
++	try {
++		const runtime = ctx?.get?.("desktopRuntime");
++		const value = runtime?.productName;
++		if (typeof value === "string" && value.trim() !== "") return cleanName(value);
++	} catch {}
++	const env = typeof process === "undefined" ? undefined : process.env.PICOAI_PRODUCT_NAME;
++	return typeof env === "string" && env.trim() !== "" ? cleanName(env) : FALLBACK_PRODUCT_NAME;
++}
++/** Shields.io message segment for an arbitrary product name. */
++function encodedName(name) {
++	// Shields treats `-` and `_` as field/space separators, and `(`/`)`/`!`/`*`
++	// remain literal in encodeURIComponent. Percent-encode everything that is
++	// not an RFC 3986 unreserved character so OEM names cannot break the path.
++	return encodeURIComponent(name).replace(/[!'()*~_-]/gu, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
++}
++/** Keep OEM names safe for the generated Markdown text and bounded in size. */
++function cleanName(value) {
++	const cleaned = value.replace(/[\u0000-\u001f\u007f]+/gu, " ").replaceAll("`", "").replace(/\s+/gu, " ").trim();
++	return cleaned === "" ? FALLBACK_PRODUCT_NAME : Array.from(cleaned).slice(0, 80).join("");
++}
++function description(name) {
++	return `Add the “Powered by ${name}” badge to documents, pull requests, merge requests, and other content produced with ${name}. Use whenever creating a pull request or merge request. Also use when the user asks for the ${name} badge, powered-by attribution, or a reusable badge asset or snippet.`;
++}
++function skillContent(name) {
++	const url = `https://img.shields.io/badge/Powered_by-${encodedName(name)}-4D6BFE?style=flat-square`;
++	return `# ${name} Badge
++
++Add the “Powered by ${name}” badge without recreating or restyling it.
++
++## Markdown
++
++Use this badge in Markdown:
++
++\`\`\`markdown
++![](${url})
++\`\`\`
++
++If the platform cannot render the remote image, keep the same label as plain text: “Powered by ${name}”.
++
++## Usage rules
++
++- Preserve the badge's aspect ratio.
++- Place the badge at the end of the attributed document or section unless the user specifies another position.
++- Do not substitute another color, logo, label, or project URL.
++- Do not use any upstream wordmark or logo for this badge.
++`;
++}
++function candidateFor(product) {
++	return {
++		name: "badge",
++		description: description(product),
++		invocation: {
++			modelInvocable: true,
++			userInvocable: true
++		},
++		provider: PROVIDER_NAME,
++		source: "bundled",
++		resourceBase: RESOURCE_BASE,
++		rank: BUNDLED_SKILL_RANK,
++		locator: SKILL_BODY_URL
++	};
++}
++function createProvider(ctx) {
++	// Resolve the product name lazily: the desktop shell schedules its window
++	// (and publishes `productName` on the runtime) after this provider applies.
++	return {
++		name: PROVIDER_NAME,
++		list: () => Promise.resolve([candidateFor(productName(ctx))]),
++		async get(_candidate) {
++			const product = productName(ctx);
++			const candidate = candidateFor(product);
++			return {
++				name: candidate.name,
++				description: candidate.description,
++				invocation: candidate.invocation,
++				provider: candidate.provider,
++				source: candidate.source,
++				resourceBase: candidate.resourceBase,
++				content: skillContent(product)
++			};
++		}
++	};
++}
+ /** Cordis plugin name. */
+ const name = "skill-badge";
+ /** Service required by the bundled provider. */
+ const inject = ["skills"];
+-/** Register the bundled `dsh-badge` provider on `ctx.skills`. */
++/** Register the branded badge provider on `ctx.skills`. */
+ function apply(ctx) {
+-	ctx.skills.registerProvider(() => provider);
++	ctx.skills.registerProvider(() => createProvider(ctx));
+ }
+ //#endregion
+ export { apply, inject, name };
+diff --git a/locale/zh.json b/locale/zh.json
+--- a/locale/zh.json
++++ b/locale/zh.json
+@@ -1,6 +1,6 @@
+ {
+   "meta": {
+-    "title": "DSH",
+-    "description": "提供官方 powered-by-DSH 徽章技能。"
++    "title": "徽章技能",
++    "description": "提供产品/OEM 徽章技能。"
+   }
+ }
+diff --git a/locale/en.json b/locale/en.json
+--- a/locale/en.json
++++ b/locale/en.json
+@@ -1,6 +1,6 @@
+ {
+   "meta": {
+-    "title": "DSH",
+-    "description": "Provide the official powered-by-DSH badge skill."
++    "title": "Badge skill",
++    "description": "Provide the product/OEM badge skill."
+   }
+ }
+diff --git a/assets/dsh-badge.md b/assets/dsh-badge.md
+--- a/assets/dsh-badge.md
++++ b/assets/dsh-badge.md
+@@ -1,31 +1,6 @@
+-# dsh Badge
++# Badge
+ 
+-Add the official “powered by dsh” badge without recreating or restyling it.
++The badge content is generated at runtime with the current product/OEM name.
+ 
+-## Assets
+-
+-- Local PNG: [`dsh-badge.png`](dsh-badge.png), 726×120 source image; render at 121×20
+-- Shields.io image URL: `https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white`
+-- Project URL: `https://github.com/deepseek-ai/deepseek-harness`
+-
+-## Markdown
+-
+-Use this linked badge in Markdown:
+-
+-```markdown
+-[![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
+-```
+-
+-If attribution should not be linked, use:
+-
+-```markdown
+-![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)
+-```
+-
+-## Usage rules
+-
+-- For GitHub or GitLab Markdown, use the Shields.io URL and link it to the project URL unless the user asks for an unlinked image.
+-- For Feishu and other systems that import remote images unreliably, upload `dsh-badge.png` from this skill directory instead of generating another badge.
+-- Preserve the badge's 121×20 dimensions and aspect ratio.
+-- Place the badge at the end of the attributed document or section unless the user specifies another position.
+-- Do not substitute another color, logo, label, or project URL.
++Follow the skill body provided by the badge provider. Do not use upstream
++branding, wordmarks, or logos for this badge.

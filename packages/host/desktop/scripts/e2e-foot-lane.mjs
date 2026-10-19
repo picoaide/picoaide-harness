@@ -1,7 +1,7 @@
 /**
  * 侧边栏底部"并道"视觉探针（2026-09-21）。
  *
- * 为什么需要：底部原有的 5 行导航（定时任务 / 能力中心 / 连接器 / 浏览器 / 应用中心）
+ * 为什么需要：底部原有的 5 行导航（自动化任务 / 能力中心 / 连接器 / 浏览器 / 应用中心）
  * 被合并进一个「更多」行 + 向上浮层，账户卡从常显 140px 收成一行 + 浮层。这是**纯
  * 视觉/交互**的改动，单元测试只能证明组件各自渲染正确，"点得到、浮层不裁切、激活态
  * 文案跟着面板变"必须在真窗口里证明 —— 因此本探针走完整 UI 路径：mock 登录 → 截图
@@ -225,7 +225,7 @@ const pressEscape = async () => {
   await send('Input.dispatchKeyEvent', { type: 'keyUp', ...key })
 }
 
-const FOOT_LABELS = ['定时任务', '能力中心', '连接器', '浏览器', '应用中心']
+const FOOT_LABELS = ['自动化任务', '能力中心', '连接器', '浏览器', '应用中心']
 const TRANSCRIPT = []
 
 try {
@@ -252,11 +252,11 @@ try {
   }
   check('进入桌面外壳（已登录）', await waitFor(`!!document.querySelector('.dshDesktopConversationSurface')`, 40000))
 
-  // 2. 并道后的常态：底部只剩「更多」+「设置」+ 账户行；5 个旧标签不在侧边栏可见。
+  // 2. 并道后的常态：底部只剩「更多」+「设置」+ 账户行；5 个面板入口不在侧边栏可见。
   const laneTexts = await visibleTexts()
   TRANSCRIPT.push(`可见按钮文案: ${JSON.stringify(laneTexts.slice(0, 24))}`)
   check('底部有「更多」行', laneTexts.includes('更多'))
-  check('「设置」行保留', laneTexts.includes('设置'))
+  check('「设置」入口已并入官方账户菜单（不在底栏常驻）', !laneTexts.includes('设置'))
   const leaked = FOOT_LABELS.filter(l => laneTexts.includes(l))
   check('5 个旧导航行已不可见（进入浮层）', leaked.length === 0, leaked.length === 0 ? '' : `仍可见: ${leaked.join(' / ')}`)
 
@@ -289,7 +289,7 @@ try {
     })))()`)
     TRANSCRIPT.push(`浮层条目: ${JSON.stringify(items)}`)
     const order = items.map(i => i.text)
-    check('浮层条目顺序 = 定时任务 / 能力中心 / 连接器 / 浏览器 / 应用中心',
+    check('浮层条目顺序 = 自动化任务 / 能力中心 / 连接器 / 浏览器 / 应用中心',
       JSON.stringify(order) === JSON.stringify(FOOT_LABELS), JSON.stringify(order))
     const rect = await evaluate(`(() => { const r = document.querySelector('[role="menu"]').getBoundingClientRect(); return { top: Math.round(r.top), left: Math.round(r.left), w: Math.round(r.width), h: Math.round(r.height), vh: window.innerHeight } })()`)
     TRANSCRIPT.push(`浮层几何: ${JSON.stringify(rect)}`)
