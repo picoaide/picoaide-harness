@@ -822,6 +822,13 @@ jobs:
       # （`docs-only-and-not-tag`）——被钉步骤的条件不是"随手加"，必须走登记。
       # tag 上仍然保留的：release-policy / 发布说明 / 迁移锚点 / 拓扑 / 渠道 pin 五步
       # （它们在 `needs.changes.outputs.code` 之外，与代码测试无关，是发布正确性判据）。
+      #
+      # ⚠️ 但 `yarn check` 同时承担**构建**：它被跳过时 packages/*/lib 与 desktop/build
+      # 不会产出，而本 job 后面的 workspace-build 归集正是 tar 这些目录（2026-10-19
+      # v2.8.3-beta.4 的 tag 现场：gate 第 20 步 `tar: Cannot stat` 直接红、release job
+      # 被跳过、Release 未生成）。所以 tag 路径必须**单独编译** —— 见下面那条
+      # 「Build workspace packages (tag: compile only, no tests)」步（`yarn prebuild`，
+      # 按依赖序构建 15 个 workspace 包，只编译不跑测试）。
       - name: Full gate (packages + all root guards)
         if: needs.changes.outputs.code != 'false' && github.ref_type != 'tag'
         env:
@@ -897,6 +904,14 @@ jobs:
           # 能把 `pass=2 fail=1 / EXIT=1` 翻成 `pass=3 fail=0 / EXIT=0`（V13-A §3.3 端到端复现）。
           export PATH="${{ steps.frozen-toolchain.outputs.path }}"
           "${{ steps.frozen-launchers.outputs.interp }}" scripts/verify-wasm-client-only.sh --groups 6
+      # tag 上 Full gate 被跳过（只编译+打包+发布），但 workspace-build 归集与三个
+      # 桌面打包 job 都依赖它产出的 packages/*/lib 与 desktop/build ⇒ 这里补一条
+      # **仅 tag** 的编译步（prebuild 只跑各包的 build，不跑 check/test）。
+      - name: Build workspace packages (tag only, compile without tests)
+        if: github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          yarn prebuild
       # 2026-09-06 实测:upload-artifact 对多 glob path 会按各条目的根拍平目录
       # 结构(下载后 lib/ 树丢失),故先 tar 打包为单文件,目录结构自控。
       - name: Package workspace build products
