@@ -342,6 +342,9 @@ export const EXECUTION_FACE_REGISTRY = [
   'packages/host/desktop/scripts/verify-session-restart.mjs',
   'packages/host/desktop/scripts/verify-win-installer.ts',
   'packages/host/desktop/scripts/verify-win-portable.ts',
+  // 构建期守卫（2026-10-20）：gateway-client 的 `build` 脚本在 tsdown/tsc 之后
+  // 断言产物没有内联 npm electron 桩。改写它 = 改写"打包产物没有静默降级"这条判据。
+  'packages/host/gateway-client/scripts/check-built-electron.mjs',
   'packages/vendor/memory-evolve/scripts/build.mjs',
   'packages/vendor/memory-evolve/scripts/run-tests.mjs',
   'packages/vendor/memory-evolve/scripts/sync-worker.mjs',

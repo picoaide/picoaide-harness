@@ -206,8 +206,13 @@ export default class SessionService extends Service {
   }
 
   private async restore(): Promise<void> {
+    // 恢复是构造期发起的异步动作：期间用户可能已经登录或登出（setSession / clear
+    // 都会推进 persistEpoch）。这两类显式决定必须压过迟到的恢复结果 —— 否则
+    // "clear() 之后 restore 又把会话装回来"会让登出/换号无效。
+    const epochAtStart = this.persistEpoch
     const restored = await loadPersisted(this.tokenFile)
     if (this.session !== null) return
+    if (this.persistEpoch !== epochAtStart) return
     this.session = restored
     this.ctx.emit(SESSION_CHANGED_EVENT, restored)
   }
@@ -217,9 +222,23 @@ async function loadPersisted(tokenFile: string): Promise<Session | null> {
   try {
     const mod = await loadElectronModule()
     const ss = mod?.safeStorage
-    if (!ss) return null
     if (!existsSync(tokenFile)) return null
     const raw = readFileSync(tokenFile)
+    if (!ss) {
+      // Electron API 整体拿不到（典型成因：打包把 npm electron 内联进产物，
+      // loadElectronModule() 返回 {}）。此时仍要尝试 0600 明文形态 —— 否则
+      // 明明盘上有一份可用的令牌，却被当成"未登录"：每次启动都要求重新登录，
+      // 并且新令牌继续以明文落盘。v10 密文在没有 safeStorage 时本就解不出来，
+      // 解析失败返回 null 是正确的。
+      if (process.versions.electron !== undefined) {
+        console.warn('[pico] safeStorage is unavailable inside Electron; only the 0600 plaintext session token can be restored')
+      }
+      try {
+        return JSON.parse(raw.toString('utf8')) as Session
+      } catch {
+        return null
+      }
+    }
     // 双格式恢复(2026-09-01 审计):safeStorage 后端可在两次运行间切换
     // (有 keyring ↔ basic_text)——旧加密文件遇 basic_text 会走明文解析失败、
     // 旧明文文件遇可用 keyring 会走 decryptString 失败;两端分别回退,

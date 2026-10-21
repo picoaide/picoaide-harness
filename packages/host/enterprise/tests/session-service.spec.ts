@@ -25,6 +25,17 @@ function stubCtx(): { ctx: Context; emit: ReturnType<typeof vi.fn> } {
   }
 }
 
+/**
+ * 一次性的"没有持久化令牌"路径。
+ *
+ * 不要再用固定的 `/tmp/unused-session.json`：setSession 会把明文令牌写过去，
+ * 同一台机器上的下一次运行就会把它当成"已登录"（2026-10-20 明文回退上线后
+ * 这个跨运行污染直接让第一条用例变红）。
+ */
+function emptyTokenFile(): string {
+  return join(mkdtempSync(join(tmpdir(), 'pico-session-empty-')), 'session.json')
+}
+
 describe('session-service', () => {
   it('exposes the stable session-changed event name', () => {
     expect(SESSION_CHANGED_EVENT).toBe('pico/session-changed')
@@ -39,7 +50,7 @@ describe('session-service', () => {
 
   it('starts logged out and emits on set and clear', async () => {
     const { ctx, emit } = stubCtx()
-    const service = new SessionService(ctx, { tokenFile: '/tmp/unused-session.json' })
+    const service = new SessionService(ctx, { tokenFile: emptyTokenFile() })
     expect(service.isLoggedIn()).toBe(false)
     expect(service.getSession()).toBeNull()
     // restore() runs asynchronously; in a non-Electron test it resolves to null
@@ -84,12 +95,52 @@ describe('session-service', () => {
 
   it('never lets an async restore overwrite an already-set session', async () => {
     const { ctx, emit } = stubCtx()
-    const service = new SessionService(ctx, { tokenFile: '/tmp/unused-session.json' })
+    const service = new SessionService(ctx, { tokenFile: emptyTokenFile() })
     service.setSession(SAMPLE_SESSION)
     // restore() settles after setSession; the session must stay the set value.
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(service.getSession()).toEqual(SAMPLE_SESSION)
     expect(emit).toHaveBeenCalledWith(SESSION_CHANGED_EVENT, SAMPLE_SESSION)
+  })
+
+  it('restores a 0600 plaintext token when safeStorage is unavailable (2026-10-20 build regression)', async () => {
+    // 现场：打包把 npm electron 内联进产物 ⇒ loadElectronModule() 返回 {} ⇒
+    // 没有 safeStorage。旧实现在这里直接 return null，把盘上可用的明文令牌当成
+    // "未登录"，于是每次启动都要求重新登录。
+    const dir = mkdtempSync(join(tmpdir(), 'pico-session-plaintext-'))
+    const file = join(dir, 'session.json')
+    writeFileSync(file, JSON.stringify(SAMPLE_SESSION), { mode: 0o600 })
+    const { ctx, emit } = stubCtx()
+    const service = new SessionService(ctx, { tokenFile: file })
+    // 现象：restore 在构造期异步发起（动态 import + 读文件），CI 4 vCPU 负载下可能超过 vitest 缺省的 1s 预算；下限取 10s（R11-B-02）。
+    await vi.waitFor(() => { expect(service.getSession()).toEqual(SAMPLE_SESSION) }, { timeout: 10_000 })
+    expect(emit).toHaveBeenCalledWith(SESSION_CHANGED_EVENT, SAMPLE_SESSION)
+  })
+
+  it('leaves a v10-encrypted token unreadable when safeStorage is unavailable', async () => {
+    // 没有 safeStorage 时密文本来就解不出来：回退明文解析失败是正确的 null，
+    // 不得把密文误当成会话 JSON。
+    const dir = mkdtempSync(join(tmpdir(), 'pico-session-encrypted-'))
+    const file = join(dir, 'session.json')
+    writeFileSync(file, Buffer.concat([Buffer.from('v10'), Buffer.from([1, 2, 3, 4, 5, 6, 7, 8])]), { mode: 0o600 })
+    const { ctx, emit } = stubCtx()
+    const service = new SessionService(ctx, { tokenFile: file })
+    // 现象：失败路径同样要等 restore 的一次异步落定；预算理由与下限同上（R11-B-02）。
+    await vi.waitFor(() => { expect(emit).toHaveBeenCalledWith(SESSION_CHANGED_EVENT, null) }, { timeout: 10_000 })
+    expect(service.getSession()).toBeNull()
+  })
+
+  it('lets an explicit clear() during restore win over the late restore result', async () => {
+    // restore 在构造期发起；clear() 同步发生且早于它落定 ⇒ 迟到的恢复结果不得
+    // 把刚登出的会话装回来。
+    const dir = mkdtempSync(join(tmpdir(), 'pico-session-clear-race-'))
+    const file = join(dir, 'session.json')
+    writeFileSync(file, JSON.stringify(SAMPLE_SESSION), { mode: 0o600 })
+    const { ctx } = stubCtx()
+    const service = new SessionService(ctx, { tokenFile: file })
+    service.clear()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(service.getSession()).toBeNull()
   })
 })
 

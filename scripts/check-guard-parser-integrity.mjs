@@ -397,7 +397,11 @@ const REGISTERED_INSTALL_INTEGRITY_BODIES = [
     // `EXECUTION_POINT_REGISTRY` / `EXECUTION_FACE_REGISTRY` 两侧各自的登记（P0 集成的
     // 能力中心、网关客户端、模块编译契约等 + master 的 schedule 与审计判据）合并后，
     // 本件内容再次变化 ⇒ 摘要按 `sha256sum scripts/check-install-integrity.mjs` 同步。
-    sha256: 'edf310540cee7b0077603c359d01ba38113d75a3cf3c1a4faf95e4f5e17ac5c8',
+    //
+    // 2026-10-20：`EXECUTION_FACE_REGISTRY` 补登 gateway-client 的构建期守卫
+    // `packages/host/gateway-client/scripts/check-built-electron.mjs` ⇒ 本件内容变化，
+    // 摘要按同一条 `sha256sum` 口径同步。
+    sha256: 'a8ba1dbaad4db40f2b880ef1df8d4f75b70c96323e1c786d66959b63897a74a2',
     methods: [
       'judge-body-bytes-equal-head',
       'yarnrc-forbidden-keys',

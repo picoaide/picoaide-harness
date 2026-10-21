@@ -31,7 +31,7 @@
     "lib/types/**/*.d.ts"
   ],
   "scripts": {
-    "build": "tsdown && tsc -p tsconfig.json --emitDeclarationOnly",
+    "build": "tsdown && tsc -p tsconfig.json --emitDeclarationOnly && node scripts/check-built-electron.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "check": "yarn run build && yarn run test"

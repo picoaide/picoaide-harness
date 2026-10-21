@@ -36,4 +36,14 @@ export default defineConfig({
   dts: false,
   clean: true,
   sourcemap: true,
+  // `electron` 必须 external：它是 **devDependency**（真实宿主运行时由 Electron
+  // 进程提供），而 tsdown 只会自动外置 dependencies。一旦被内联，产物里进的是
+  // npm 包里那份 index.js —— 在普通 Node 里它只返回可执行文件路径，在打包产物
+  // 里连 node_modules/electron 都没有，`require` 会抛 "Electron failed to install
+  // correctly"。于是 `loadElectronModule()` 在 main 进程拿不到 `safeStorage`：
+  // 会话令牌解不出来（每次启动都当未登录），而且读取失败后会以 0600 明文重写
+  // 令牌。enterprise / browser / wasm-apps-host / desktop 的 tsdown 配置都已显式
+  // 外置 `electron`，本包是同一组件的共享叶子包，口径必须一致。
+  // 2026-10-20 回归：漏了这一条，beta.6/beta.7 每次启动都被踢回登录页。
+  external: ['electron'],
 })
